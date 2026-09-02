@@ -90,7 +90,11 @@ export default class SyGspPlugin extends q.Plugin {
         notify: (msg, type) => this.notification.toast(msg, type),
       });
       this.controller = this._buildController();
+      // 事件绑定不依赖 onLayoutReady: 装载器(kernelInit 失败等)可能跳过 onLayoutReady,
+      // 否则 sync:error/success 无监听 → 失败无 toast、无状态日志(实证于用户环境)
+      this._bindEngineEvents();
       await this.controller.restore();
+      await this._applyStartupBehavior();
     } catch (err) {
       const msg = (err && err.message) || String(err);
       this.logs.error("onload 失败: " + ((err && err.stack) || err));
@@ -289,6 +293,8 @@ export default class SyGspPlugin extends q.Plugin {
   // ---------- 引擎事件 → 日志/通知/历史/面板 ----------
 
   _bindEngineEvents() {
+    if (this._eventsBound) return; // onload 与 onLayoutReady 双入口,只绑一次
+    this._eventsBound = true;
     this.events.on("state:changed", ({ state, conflictPaused }) => {
       this.logs.info("状态: " + state + (conflictPaused ? " (冲突暂停: " + conflictPaused.kind + ")" : ""));
       if (this.notification) {
@@ -463,6 +469,13 @@ export default class SyGspPlugin extends q.Plugin {
   }
 
   async _applyStartupBehavior() {
+    if (this._startupApplied) return; // onload 与 onLayoutReady 双入口,只执行一次
+    this._startupApplied = true;
+    if (!this.settingUtils || !this.controller) {
+      // onload 失败导致的装配不完整: 失败本身已 toast/落日志,这里跳过并留痕
+      this.logs.warn("启动行为跳过: 插件装配未完成");
+      return;
+    }
     const mode = Number(this.settingUtils.take("sync_mode")) || 0;
     const enabled = this.settingUtils.take("enabled_sync") !== false;
     if (this.controller.isConflictPaused()) {

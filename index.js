@@ -799,6 +799,17 @@ var _GitProvider = class _GitProvider {
     const digest = await globalThis.crypto.subtle.digest("SHA-1", merged);
     return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
+  // ---------- 实例工具入口 ----------
+  // 引擎统一经 provider 实例调用工具方法;实现复用对应静态版本。
+  // 此前仅有静态方法,引擎实例调用会报 "this.provider.gitBlobSha is not a function"。
+  /** 实例入口: 计算 git blob SHA-1,见静态 gitBlobSha */
+  async gitBlobSha(content) {
+    return _GitProvider.gitBlobSha(content);
+  }
+  /** 实例入口: 字节转 base64,见静态 bytesToBase64 */
+  bytesToBase64(bytes) {
+    return _GitProvider.bytesToBase64(bytes);
+  }
   // ---------- 查询契约 ----------
   /** 分支 HEAD: 返回 {sha} */
   async getBranchHead() {
@@ -4643,7 +4654,6 @@ var _SyncHistoryPanel = class _SyncHistoryPanel {
   _buildDom() {
     const i18n = this._i18n;
     const root = this._el("div", "history__root fn__flex fn__flex-column", "height:100%;min-height:0;box-sizing:border-box");
-    root.append(row1, row2);
     const sourceSelect = this._el("select", "b3-select history__source");
     sourceSelect.appendChild(this._option("0", i18n.dataSourceLocal));
     sourceSelect.appendChild(this._option("1", i18n.dataSourceRemote));
@@ -4687,7 +4697,7 @@ var _SyncHistoryPanel = class _SyncHistoryPanel {
     diffEl.append(leftCol.el, rightCol.el);
     right.append(filesEl, diffEl);
     body.append(commitsEl, right);
-    root.append(body);
+    root.append(row1, row2, body);
     [this._rootEl, this._sourceSelect, this._countEl, this._notebookSelect, this._pathInput] = [root, sourceSelect, countEl, notebookSelect, pathInput];
     [this._sinceInput, this._untilInput, this._searchBtn, this._commitsEl, this._filesEl, this._diffEl] = [sinceInput, untilInput, searchBtn, commitsEl, filesEl, diffEl];
     [this._leftTitle, this._rightTitle, this._leftTextarea, this._rightTextarea] = [leftCol.title, rightCol.title, leftCol.textarea, rightCol.textarea];
@@ -5237,7 +5247,9 @@ var SyGspPlugin = class extends q.Plugin {
         notify: (msg, type) => this.notification.toast(msg, type)
       });
       this.controller = this._buildController();
+      this._bindEngineEvents();
       await this.controller.restore();
+      await this._applyStartupBehavior();
     } catch (err) {
       const msg = err && err.message || String(err);
       this.logs.error("onload 失败: " + (err && err.stack || err));
@@ -5416,6 +5428,8 @@ var SyGspPlugin = class extends q.Plugin {
   }
   // ---------- 引擎事件 → 日志/通知/历史/面板 ----------
   _bindEngineEvents() {
+    if (this._eventsBound) return;
+    this._eventsBound = true;
     this.events.on("state:changed", ({ state, conflictPaused }) => {
       this.logs.info("状态: " + state + (conflictPaused ? " (冲突暂停: " + conflictPaused.kind + ")" : ""));
       if (this.notification) {
@@ -5576,6 +5590,12 @@ var SyGspPlugin = class extends q.Plugin {
     this.logs.info("自动同步已启动,间隔 " + Math.round(intervalMs / 1e3) + "s");
   }
   async _applyStartupBehavior() {
+    if (this._startupApplied) return;
+    this._startupApplied = true;
+    if (!this.settingUtils || !this.controller) {
+      this.logs.warn("启动行为跳过: 插件装配未完成");
+      return;
+    }
     const mode = Number(this.settingUtils.take("sync_mode")) || 0;
     const enabled = this.settingUtils.take("enabled_sync") !== false;
     if (this.controller.isConflictPaused()) {

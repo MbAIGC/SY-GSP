@@ -71,7 +71,6 @@ export class SyncHistoryPanel {
   _buildDom() {
     const i18n = this._i18n;
     const root = this._el("div", "history__root fn__flex fn__flex-column", "height:100%;min-height:0;box-sizing:border-box");
-    root.append(row1, row2);
     const sourceSelect = this._el("select", "b3-select history__source");
     sourceSelect.appendChild(this._option("0", i18n.dataSourceLocal));
     sourceSelect.appendChild(this._option("1", i18n.dataSourceRemote));
@@ -112,7 +111,7 @@ export class SyncHistoryPanel {
     diffEl.append(leftCol.el, rightCol.el);
     right.append(filesEl, diffEl);
     body.append(commitsEl, right);
-    root.append(body);
+    root.append(row1, row2, body);
     [this._rootEl, this._sourceSelect, this._countEl, this._notebookSelect, this._pathInput] =
       [root, sourceSelect, countEl, notebookSelect, pathInput];
     [this._sinceInput, this._untilInput, this._searchBtn, this._commitsEl, this._filesEl, this._diffEl] =

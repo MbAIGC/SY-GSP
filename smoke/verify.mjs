@@ -176,29 +176,45 @@ Module._resolveFilename = function (request, ...rest) {
 require.cache["siyuan-stub"] = { id: "siyuan-stub", filename: "siyuan-stub", loaded: true, exports: siyuanStub };
 
 // ---------- 最小 DOM / fetch 存根(设置面板与顶栏需要) ----------
-function fakeEl() {
-  return {
-    style: {},
+function fakeEl(tag) {
+  const el = {
+    tagName: String(tag || "div").toUpperCase(),
+    children: [],
+    style: { cssText: "" },
     dataset: {},
     className: "",
-    classList: { add() {}, remove() {}, contains: () => false },
+    classList: { add() {}, remove() {}, contains: () => false, toggle() {} },
     appendChild(c) {
+      el.children.push(c);
       return c;
     },
+    append(...cs) {
+      for (const c of cs) el.children.push(c);
+    },
+    remove() {},
     addEventListener() {},
     removeEventListener() {},
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    closest: () => null,
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
+    value: "",
+    textContent: "",
+    title: "",
+    width: 0,
+    src: "",
+    alt: "",
     setAttribute() {},
     getBoundingClientRect: () => ({ right: 0, bottom: 0 }),
-    querySelector: () => fakeEl(),
-    querySelectorAll: () => [],
-    textContent: "",
     placeholder: "",
     disabled: false,
     checked: false,
-    value: "",
     type: "",
     focus() {},
   };
+  return el;
 }
 globalThis.document = {
   createElement: () => fakeEl(),
@@ -267,6 +283,29 @@ plugin.data = {
     plugin._topBarCb();
     if (!stubCalls.menuOpen) throw new Error("menu.open 未被调用(点击无效)");
     if (stubCalls.submenuCount < 4) throw new Error("二级菜单缺失: 仅 " + stubCalls.submenuCount + " 组");
+  });
+
+  check("同步历史: 面板可构建(防白屏回归)", () => {
+    const { SyncHistoryPanel } = require("../src/ui/sync-history-panel.js");
+    const container = fakeEl("div");
+    const panel = new SyncHistoryPanel({
+      container,
+      i18n: {},
+      provider: {
+        listCommits: async () => [],
+        compareCommits: async () => [],
+        getFileContent: async () => ({ text: "", bytes: new Uint8Array() }),
+      },
+      listNotebooks: async () => [],
+      branchName: "main",
+      localCommitSha: "",
+      notify: () => {},
+      onRollback: async () => {},
+      onDownload: async () => {},
+    });
+    if (!container.children.length) throw new Error("面板根节点未挂载到容器");
+    if (!panel._commitsEl || !panel._diffEl) throw new Error("面板骨架不完整");
+    panel.destroy();
   });
 
   check("运行日志: 菜单点击后正确挂载到对话框内容区", () => {

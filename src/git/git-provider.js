@@ -85,6 +85,20 @@ export class GitProvider {
       .join("");
   }
 
+  // ---------- 实例工具入口 ----------
+  // 引擎统一经 provider 实例调用工具方法;实现复用对应静态版本。
+  // 此前仅有静态方法,引擎实例调用会报 "this.provider.gitBlobSha is not a function"。
+
+  /** 实例入口: 计算 git blob SHA-1,见静态 gitBlobSha */
+  async gitBlobSha(content) {
+    return GitProvider.gitBlobSha(content);
+  }
+
+  /** 实例入口: 字节转 base64,见静态 bytesToBase64 */
+  bytesToBase64(bytes) {
+    return GitProvider.bytesToBase64(bytes);
+  }
+
   // ---------- 查询契约 ----------
 
   /** 分支 HEAD: 返回 {sha} */

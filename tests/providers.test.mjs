@@ -163,3 +163,15 @@ test("Gitee 删除: DELETE 同时携带 query 与 body 参数", async () => {
   assert.ok(del.url.includes("sha=ds"));
   assert.equal(JSON.parse(del.init.body).sha, "ds");
 });
+
+test("provider 实例提供引擎所需的工具方法(gitBlobSha/bytesToBase64)", async () => {
+  const mk = (Cls) => new Cls({ owner: "o", repo: "r", branch: "main", token: "t" });
+  for (const p of [mk(GitHubProvider), mk(GiteeProvider)]) {
+    assert.equal(typeof p.gitBlobSha, "function", p.platform + ".gitBlobSha 应为实例方法");
+    assert.equal(typeof p.bytesToBase64, "function", p.platform + ".bytesToBase64 应为实例方法");
+  }
+  const bytes = GitProvider.textToBytes("hello\n");
+  const gh = mk(GitHubProvider);
+  assert.equal(await gh.gitBlobSha(bytes), await GitProvider.gitBlobSha(bytes));
+  assert.equal(gh.bytesToBase64(bytes), GitProvider.bytesToBase64(bytes));
+});
