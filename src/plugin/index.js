@@ -50,6 +50,10 @@ export default class SyGspPlugin extends q.Plugin {
       // 官方示例做法: 图标注册放最前,不依赖后续装配步骤
       // (若后续步骤抛错导致 createIcons 未执行,顶栏按钮将无图标可引用)
       this.createIcons();
+      // 顶栏按钮在 onload 即注册(官方 addTopBar 按 id 幂等,且元素不在文档时会重新插入):
+      // 装载器源码(siyuan app/src/plugin/lifecycle.ts)中 onload 抛错会直接短路,
+      // onLayoutReady 不会再执行——图标注册不能依赖它
+      this._registerTopBar();
       this.kernel = createKernel(q);
       await this._initStores();
       this.notification = new NotificationService({ q, i18n: this.i18n });
@@ -88,19 +92,28 @@ export default class SyGspPlugin extends q.Plugin {
       this.controller = this._buildController();
       await this.controller.restore();
     } catch (err) {
+      const msg = (err && err.message) || String(err);
       this.logs.error("onload 失败: " + ((err && err.stack) || err));
+      // 装载失败必须可见(对齐旧版 SGSP 的运行时可观察性),否则只剩「图标缺失」这类无因症状
       console.error("[SY-GSP] onload 失败:", err);
+      if (q && typeof q.showMessage === "function") {
+        q.showMessage("[SY-GSP] 加载失败: " + msg, 7000, "error");
+      }
     }
   }
 
   async onLayoutReady() {
     try {
-      this._registerTopBar();
+      this._registerTopBar(); // 幂等: onload 已注册时按 id 复用,不在文档时重新插入
       this._bindEngineEvents();
       await this._applyStartupBehavior();
     } catch (err) {
+      const msg = (err && err.message) || String(err);
       this.logs.error("onLayoutReady 失败: " + ((err && err.stack) || err));
       console.error("[SY-GSP] onLayoutReady 失败:", err);
+      if (q && typeof q.showMessage === "function") {
+        q.showMessage("[SY-GSP] 界面初始化失败: " + msg, 7000, "error");
+      }
     }
   }
 
@@ -454,19 +467,26 @@ export default class SyGspPlugin extends q.Plugin {
   // ---------- UI 动作 ----------
 
   _registerTopBar() {
-    if (this.isMobile) {
-      this.topBarElement = document.querySelector("#toolbarMore");
-    } else {
-      // 官方 API(siYuan Plugin.addTopBar): 实例方法,返回顶栏按钮元素;
-      // icon 必须是 addIcons 注册过的 symbol id(onload 首步已在 createIcons 注册);
-      // 传官方 id 选项,重复调用 onLayoutReady 时按 data-id 幂等复用
-      this.topBarElement = this.addTopBar({
-        id: "iconGmailSync",
-        icon: "iconGmailSync",
-        title: this.i18n.addTopBarIcon || "SY-GSP",
-        position: "right",
-        callback: () => this._openMenu(),
-      });
+    try {
+      if (this.isMobile) {
+        this.topBarElement = document.querySelector("#toolbarMore");
+      } else {
+        // 官方 API(siYuan Plugin.addTopBar): 实例方法,返回顶栏按钮元素;
+        // icon 必须是 addIcons 注册过的 symbol id(onload 首步已在 createIcons 注册);
+        // 传官方 id 选项,重复调用 onLayoutReady 时按 data-id 幂等复用
+        this.topBarElement = this.addTopBar({
+          id: "iconGmailSync",
+          icon: "iconGmailSync",
+          title: this.i18n.addTopBarIcon || "SY-GSP",
+          position: "right",
+          callback: () => this._openMenu(),
+        });
+        if (!this.topBarElement) {
+          console.error("[SY-GSP] addTopBar 未返回按钮元素(icon 非法或插件已销毁)");
+        }
+      }
+    } catch (err) {
+      console.error("[SY-GSP] 顶栏注册失败:", err);
     }
     if (this.notification) this.notification.setTopBarElement(this.topBarElement);
   }

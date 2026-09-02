@@ -65,3 +65,39 @@ icon 为 svg id/标签、**必须已注册**、callback 必须为函数,并返�
 ### 验证
 
 - 单元测试 100/100;构建 214 KB;冒烟 7/7(含新增图标注册断言)。
+
+## 七、第三轮修复: 图标依旧缺失(v0.1.3)——装载器状态机证据
+
+### 根因(源码级)
+
+siyuan `app/src/plugin/lifecycle.ts` 装载任务:
+
+```ts
+const loaded = await this.runInterruptibleHook(record, "onload", () => this.adapter.onload(plugin));
+if (!loaded || record.instance !== plugin) {
+    record.state = "loaded";
+    return;                 // onload 抛错 → 直接短路
+}
+...
+if (this.layoutReady) { await this.runLayout(record); }   // onLayoutReady 只在 onload 成功后执行
+```
+
+即 **onload 一旦抛错,`onLayoutReady` 不再执行**。v0.1.2 已把 `createIcons`(symbol 注入)
+提前到 onload 首行,但 `addTopBar`(创建顶栏按钮)仍在 `onLayoutReady`——onload 后段
+(迁移/控制器恢复等)在用户环境中抛错时,按钮永远不会创建,而设置面板因装配更早照常可用,
+与用户症状完全吻合。旧版 SGSP 的初始化链路无抛错点,故同一环境正常。
+
+### 修复
+
+1. `onload` 首行 `createIcons()` 之后**立即** `_registerTopBar()`——顶栏按钮不再依赖
+   `onLayoutReady`(官方 `addTopBar` 按 id 幂等,元素不在文档时重新插入,双调用安全);
+2. `onLayoutReady` 保留注册调用作为布局就绪后的再插入兜底;
+3. `onload`/`onLayoutReady` 失败改为**可见错误 toast**(对齐旧版 SGSP 的可观察性),
+   不再只有 console 静默日志——若仍异常,用户可直接看到原因;
+4. `_registerTopBar` 自身捕获异常并对 `addTopBar` 返回空元素的情形输出诊断。
+
+### 验证
+
+- 测试 100/100;构建 214 KB;冒烟 7/7;
+- 包内核验 onload 顺序:`createIcons() → _registerTopBar() → createKernel(...)`,
+  onload/onLayoutReady 失败 toast 均存在。

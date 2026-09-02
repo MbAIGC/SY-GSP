@@ -5192,6 +5192,7 @@ var SyGspPlugin = class extends q.Plugin {
   async onload() {
     try {
       this.createIcons();
+      this._registerTopBar();
       this.kernel = createKernel(q);
       await this._initStores();
       this.notification = new NotificationService({ q, i18n: this.i18n });
@@ -5230,8 +5231,12 @@ var SyGspPlugin = class extends q.Plugin {
       this.controller = this._buildController();
       await this.controller.restore();
     } catch (err) {
+      const msg = err && err.message || String(err);
       this.logs.error("onload 失败: " + (err && err.stack || err));
       console.error("[SY-GSP] onload 失败:", err);
+      if (q && typeof q.showMessage === "function") {
+        q.showMessage("[SY-GSP] 加载失败: " + msg, 7e3, "error");
+      }
     }
   }
   async onLayoutReady() {
@@ -5240,8 +5245,12 @@ var SyGspPlugin = class extends q.Plugin {
       this._bindEngineEvents();
       await this._applyStartupBehavior();
     } catch (err) {
+      const msg = err && err.message || String(err);
       this.logs.error("onLayoutReady 失败: " + (err && err.stack || err));
       console.error("[SY-GSP] onLayoutReady 失败:", err);
+      if (q && typeof q.showMessage === "function") {
+        q.showMessage("[SY-GSP] 界面初始化失败: " + msg, 7e3, "error");
+      }
     }
   }
   async onunload() {
@@ -5562,16 +5571,23 @@ var SyGspPlugin = class extends q.Plugin {
   }
   // ---------- UI 动作 ----------
   _registerTopBar() {
-    if (this.isMobile) {
-      this.topBarElement = document.querySelector("#toolbarMore");
-    } else {
-      this.topBarElement = this.addTopBar({
-        id: "iconGmailSync",
-        icon: "iconGmailSync",
-        title: this.i18n.addTopBarIcon || "SY-GSP",
-        position: "right",
-        callback: () => this._openMenu()
-      });
+    try {
+      if (this.isMobile) {
+        this.topBarElement = document.querySelector("#toolbarMore");
+      } else {
+        this.topBarElement = this.addTopBar({
+          id: "iconGmailSync",
+          icon: "iconGmailSync",
+          title: this.i18n.addTopBarIcon || "SY-GSP",
+          position: "right",
+          callback: () => this._openMenu()
+        });
+        if (!this.topBarElement) {
+          console.error("[SY-GSP] addTopBar 未返回按钮元素(icon 非法或插件已销毁)");
+        }
+      }
+    } catch (err) {
+      console.error("[SY-GSP] 顶栏注册失败:", err);
     }
     if (this.notification) this.notification.setTopBarElement(this.topBarElement);
   }
