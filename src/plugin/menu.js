@@ -1,116 +1,95 @@
 /**
- * MenuBuilder: 顶栏菜单(条目与旧版一致)。
- * 不承载业务逻辑,只组织入口与回调。
+ * MenuBuilder: 顶栏菜单(条目与旧版 SGSP 一致)。
+ * 注意思源 Menu.addItem 的返回值是 menuItem.element(HTMLElement),
+ * 子菜单必须以 submenu 数组内联传入,不能在返回值上继续 addItem。
  */
 
 export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
   const t = i18n;
-  const menu = new q.Menu("SY-GSP", true);
+  // 第二参数为关闭回调(与旧版 SGSP 一致),不可传布尔值
+  const menu = new q.Menu("SY-GSP", () => {});
 
   if (conflictPaused) {
     menu.addItem({
-      iconHTML: "",
-      label: (t.sygspMenuResolveConflict) || "🔴 处理冲突/恢复同步",
+      label: t.sygspMenuResolveConflict || "🔴 处理冲突/恢复同步",
       click: actions.resolveConflict,
     });
     menu.addSeparator();
   }
 
   menu.addItem({
-    iconHTML: "",
     label: t.startSync,
     icon: "iconRefresh",
     click: actions.startSync,
   });
-  const refresh = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.refreshOrRecover,
     icon: "iconRefresh",
     type: "submenu",
+    submenu: [
+      { icon: "iconRefresh", label: t.refreshWSTree, click: actions.refreshWorkspaceTree },
+      { icon: "iconImage", label: t.recoverAssets, click: actions.recoverAssets },
+    ],
   });
-  refresh.addItem({
-    iconHTML: "",
-    label: t.refreshWSTree,
-    icon: "iconRefresh",
-    click: actions.refreshWorkspaceTree,
-  });
-  refresh.addItem({
-    iconHTML: "",
-    label: t.recoverAssets,
-    icon: "iconImage",
-    click: actions.recoverAssets,
-  });
-
-  const range = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.syncRange,
     icon: "iconFilter",
     type: "submenu",
+    submenu: buildRadioItems(t.syncRange, [
+      ["0", t.workSpace],
+      ["1", t.dataFile],
+      ["2", t.noteFile],
+    ], "sync_range", actions),
   });
-  addRadioItems(range, t.syncRange, [
-    ["0", t.workSpace],
-    ["1", t.dataFile],
-    ["2", t.noteFile],
-  ], "sync_range", actions);
-
-  const strategy = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.syncStrategy,
     icon: "iconSettings",
     type: "submenu",
+    submenu: buildRadioItems(t.syncStrategy, [
+      ["0", t.autoSyncStrategy],
+      ["1", t.selectUpload],
+      ["2", t.keepRemoteCover],
+      ["3", t.keepLocalCover],
+    ], "sync_strategy", actions),
   });
-  addRadioItems(strategy, t.syncStrategy, [
-    ["0", t.autoSyncStrategy],
-    ["1", t.selectUpload],
-    ["2", t.keepRemoteCover],
-    ["3", t.keepLocalCover],
-  ], "sync_strategy", actions);
-
-  const fileType = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.noteType,
     icon: "iconFile",
     type: "submenu",
+    submenu: buildRadioItems(t.noteType, [
+      ["0", t.siyuanFile],
+      ["1", t.markdownFile],
+    ], "sync_file_type", actions),
   });
-  addRadioItems(fileType, t.noteType, [
-    ["0", t.siyuanFile],
-    ["1", t.markdownFile],
-  ], "sync_file_type", actions);
-
-  const mode = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.syncMode,
     icon: "iconClock",
     type: "submenu",
+    submenu: buildRadioItems(t.syncMode, [
+      ["0", t.autoSync],
+      ["1", t.manualSync],
+      ["2", t.fullManualSync],
+    ], "sync_mode", actions),
   });
-  addRadioItems(mode, t.syncMode, [
-    ["0", t.autoSync],
-    ["1", t.manualSync],
-    ["2", t.fullManualSync],
-  ], "sync_mode", actions);
 
   menu.addSeparator();
   menu.addItem({
-    iconHTML: "",
     label: t.syncHistory,
     icon: "iconHistory",
     click: actions.openHistory,
   });
   menu.addItem({
-    iconHTML: "",
-    label: (t.sygspMenuLogs) || "运行日志",
+    label: t.sygspMenuLogs || "运行日志",
     icon: "iconInfo",
     click: actions.openLogs,
   });
   menu.addItem({
-    iconHTML: "",
     label: t.sygspMenuDiagnosis || "只读诊断",
     icon: "iconHeart",
     click: actions.openDiagnosis,
   });
   menu.addSeparator();
   menu.addItem({
-    iconHTML: "",
     label: t.setting,
     icon: "iconSettings",
     click: actions.openSettings,
@@ -118,15 +97,14 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
   return menu;
 }
 
-function addRadioItems(parent, title, options, settingKey, actions) {
-  const current = String(parent ? actions.getSetting(settingKey) : "");
-  for (const [value, label] of options) {
-    parent.addItem({
-      iconHTML: current === value ? "iconSelect" : "",
-      label,
-      click: async () => {
-        await actions.setSettingAndSave(settingKey, Number(value));
-      },
-    });
-  }
+/** 生成单选风格的子菜单项数组: 当前值显示 iconSelect(与旧版 SGSP 一致) */
+function buildRadioItems(_title, options, settingKey, actions) {
+  const current = String(actions.getSetting(settingKey) ?? "");
+  return options.map(([value, label]) => ({
+    icon: current === value ? "iconSelect" : "",
+    label,
+    click: async () => {
+      await actions.setSettingAndSave(settingKey, Number(value));
+    },
+  }));
 }

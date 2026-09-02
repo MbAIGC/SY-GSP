@@ -5059,122 +5059,103 @@ var SyncHistoryPanel = _SyncHistoryPanel;
 // src/plugin/menu.js
 function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
   const t = i18n;
-  const menu = new q2.Menu("SY-GSP", true);
+  const menu = new q2.Menu("SY-GSP", () => {
+  });
   if (conflictPaused) {
     menu.addItem({
-      iconHTML: "",
       label: t.sygspMenuResolveConflict || "🔴 处理冲突/恢复同步",
       click: actions.resolveConflict
     });
     menu.addSeparator();
   }
   menu.addItem({
-    iconHTML: "",
     label: t.startSync,
     icon: "iconRefresh",
     click: actions.startSync
   });
-  const refresh = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.refreshOrRecover,
     icon: "iconRefresh",
-    type: "submenu"
+    type: "submenu",
+    submenu: [
+      { icon: "iconRefresh", label: t.refreshWSTree, click: actions.refreshWorkspaceTree },
+      { icon: "iconImage", label: t.recoverAssets, click: actions.recoverAssets }
+    ]
   });
-  refresh.addItem({
-    iconHTML: "",
-    label: t.refreshWSTree,
-    icon: "iconRefresh",
-    click: actions.refreshWorkspaceTree
-  });
-  refresh.addItem({
-    iconHTML: "",
-    label: t.recoverAssets,
-    icon: "iconImage",
-    click: actions.recoverAssets
-  });
-  const range = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.syncRange,
     icon: "iconFilter",
-    type: "submenu"
+    type: "submenu",
+    submenu: buildRadioItems(t.syncRange, [
+      ["0", t.workSpace],
+      ["1", t.dataFile],
+      ["2", t.noteFile]
+    ], "sync_range", actions)
   });
-  addRadioItems(range, t.syncRange, [
-    ["0", t.workSpace],
-    ["1", t.dataFile],
-    ["2", t.noteFile]
-  ], "sync_range", actions);
-  const strategy = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.syncStrategy,
     icon: "iconSettings",
-    type: "submenu"
+    type: "submenu",
+    submenu: buildRadioItems(t.syncStrategy, [
+      ["0", t.autoSyncStrategy],
+      ["1", t.selectUpload],
+      ["2", t.keepRemoteCover],
+      ["3", t.keepLocalCover]
+    ], "sync_strategy", actions)
   });
-  addRadioItems(strategy, t.syncStrategy, [
-    ["0", t.autoSyncStrategy],
-    ["1", t.selectUpload],
-    ["2", t.keepRemoteCover],
-    ["3", t.keepLocalCover]
-  ], "sync_strategy", actions);
-  const fileType = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.noteType,
     icon: "iconFile",
-    type: "submenu"
+    type: "submenu",
+    submenu: buildRadioItems(t.noteType, [
+      ["0", t.siyuanFile],
+      ["1", t.markdownFile]
+    ], "sync_file_type", actions)
   });
-  addRadioItems(fileType, t.noteType, [
-    ["0", t.siyuanFile],
-    ["1", t.markdownFile]
-  ], "sync_file_type", actions);
-  const mode = menu.addItem({
-    iconHTML: "",
+  menu.addItem({
     label: t.syncMode,
     icon: "iconClock",
-    type: "submenu"
+    type: "submenu",
+    submenu: buildRadioItems(t.syncMode, [
+      ["0", t.autoSync],
+      ["1", t.manualSync],
+      ["2", t.fullManualSync]
+    ], "sync_mode", actions)
   });
-  addRadioItems(mode, t.syncMode, [
-    ["0", t.autoSync],
-    ["1", t.manualSync],
-    ["2", t.fullManualSync]
-  ], "sync_mode", actions);
   menu.addSeparator();
   menu.addItem({
-    iconHTML: "",
     label: t.syncHistory,
     icon: "iconHistory",
     click: actions.openHistory
   });
   menu.addItem({
-    iconHTML: "",
     label: t.sygspMenuLogs || "运行日志",
     icon: "iconInfo",
     click: actions.openLogs
   });
   menu.addItem({
-    iconHTML: "",
     label: t.sygspMenuDiagnosis || "只读诊断",
     icon: "iconHeart",
     click: actions.openDiagnosis
   });
   menu.addSeparator();
   menu.addItem({
-    iconHTML: "",
     label: t.setting,
     icon: "iconSettings",
     click: actions.openSettings
   });
   return menu;
 }
-function addRadioItems(parent, title, options, settingKey, actions) {
-  const current = String(parent ? actions.getSetting(settingKey) : "");
-  for (const [value, label] of options) {
-    parent.addItem({
-      iconHTML: current === value ? "iconSelect" : "",
-      label,
-      click: async () => {
-        await actions.setSettingAndSave(settingKey, Number(value));
-      }
-    });
-  }
+function buildRadioItems(_title, options, settingKey, actions) {
+  var _a;
+  const current = String((_a = actions.getSetting(settingKey)) != null ? _a : "");
+  return options.map(([value, label]) => ({
+    icon: current === value ? "iconSelect" : "",
+    label,
+    click: async () => {
+      await actions.setSettingAndSave(settingKey, Number(value));
+    }
+  }));
 }
 
 // src/plugin/index.js

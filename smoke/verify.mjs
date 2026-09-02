@@ -24,7 +24,7 @@ function check(name, fn) {
 }
 
 // ---------- siyuan 存根(按官方 Plugin.addIcons/addTopBar 语义模拟) ----------
-const stubCalls = { addTopBar: 0, showMessage: 0, dialog: 0, settingOpen: 0, topBarIconId: null };
+const stubCalls = { addTopBar: 0, showMessage: 0, dialog: 0, settingOpen: 0, topBarIconId: null, menuOpen: null, menuFullscreen: false, submenuCount: 0 };
 const stubEnv = { symbols: new Set() }; // 已注入的 <symbol id> 集合
 function registerSymbolIds(svg) {
   const re = /<symbol\s+id="([^"]+)"/g;
@@ -94,14 +94,25 @@ class StubMenu {
   constructor() {
     this.items = [];
   }
-  addItem(item) {
-    this.items.push(item);
-    return this;
+  addItem(option) {
+    this.items.push(option);
+    // 官方契约: 子菜单以内联 submenu 数组传入;addItem 返回元素对象(无 addItem 方法)
+    if (option.submenu !== undefined && !Array.isArray(option.submenu)) {
+      throw new Error("submenu 必须为数组(Menu.addItem 返回 HTMLElement,不可链式调用)");
+    }
+    if (Array.isArray(option.submenu)) stubCalls.submenuCount += 1;
+    return { element: option };
   }
   addSeparator() {
-    return this;
+    this.items.push({ type: "separator" });
+    return { element: { type: "separator" } };
   }
-  open() {}
+  open(position) {
+    stubCalls.menuOpen = position;
+  }
+  fullscreen() {
+    stubCalls.menuFullscreen = true;
+  }
 }
 const siyuanStub = {
   Plugin: StubPlugin,
@@ -216,6 +227,15 @@ plugin.data = {
     if (stubCalls.topBarIconId !== "iconGmailSync") throw new Error("顶栏图标 id 不是 iconGmailSync");
     if (!stubEnv.symbols.has("iconGmailSync")) throw new Error("iconGmailSync symbol 未通过 addIcons 注入");
     if (typeof plugin._topBarCb !== "function") throw new Error("顶栏按钮未绑定回调");
+  });
+
+  check("顶栏菜单: 点击可构建且二级菜单内联", () => {
+    if (typeof plugin._topBarCb !== "function") throw new Error("顶栏按钮未绑定回调");
+    stubCalls.submenuCount = 0;
+    stubCalls.menuOpen = null;
+    plugin._topBarCb();
+    if (!stubCalls.menuOpen) throw new Error("menu.open 未被调用(点击无效)");
+    if (stubCalls.submenuCount < 4) throw new Error("二级菜单缺失: 仅 " + stubCalls.submenuCount + " 组");
   });
 
   // 路径一: 配置缺失(临时清空) → 提示并打开设置,不触发引擎

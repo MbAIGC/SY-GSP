@@ -101,3 +101,36 @@ if (this.layoutReady) { await this.runLayout(record); }   // onLayoutReady 只�
 - 测试 100/100;构建 214 KB;冒烟 7/7;
 - 包内核验 onload 顺序:`createIcons() → _registerTopBar() → createKernel(...)`,
   onload/onLayoutReady 失败 toast 均存在。
+
+## 八、第四轮修复: 顶栏点击无效(v0.1.4)——Menu.addItem 契约
+
+### 根因(源码级)
+
+siyuan `app/src/menus/Menu.ts`:
+
+```ts
+public addItem(option: IMenu) {
+    const menuItem = new MenuItem(option, this);
+    ...
+    return menuItem.element;   // 返回 HTMLElement,无 addItem 方法
+}
+```
+
+二级菜单的正确写法是把 `submenu: [...]` 数组内联在 addItem 选项中(旧版 SGSP 正是如此);
+SY-GSP 此前写成 `menu.addItem({type:"submenu"}).addItem(...)`,在返回的 HTMLElement 上
+调用不存在的 `.addItem` → TypeError,菜单未及 open() → 点击无效、无二级菜单。
+
+### 修复
+
+- 菜单构建全部改为内联 `submenu` 数组(与旧版 SGSP 写法一致);
+- `new q.Menu("SY-GSP", () => {})`: 第二参数按官方语义传关闭回调,不传布尔值;
+- 单选项沿用旧版方式: 当前值显示内置 iconSelect 图标。
+
+### 冒烟加固
+
+StubMenu.addItem 按官方契约返回无 addItem 方法的元素对象,并对 submenu 非数组直接抛错;
+新增断言: 触发顶栏回调后 menu.open 被调用且二级菜单不少于 4 组。
+
+### 验证
+
+- 测试 100/100;构建 214 KB;冒烟 8/8(含新增菜单断言)。
