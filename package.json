@@ -1,6 +1,6 @@
 {
   "name": "sy-gsp",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "SY-GSP —— 思源笔记 GitHub/Gitee 同步插件(同步引擎 2.0 全新源码实现)",
   "scripts": {

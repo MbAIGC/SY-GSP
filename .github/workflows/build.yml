@@ -1,14 +1,30 @@
-name: 构建与验证
+name: 构建发布
+
+# 触发:
+#   - 推送到 main: 测试 + 构建 + 冒烟,版本自动递增并发布 GitHub Release
+#   - 手动触发(workflow_dispatch): 可自定义版本号
+# 版本号: 从 v0.1.0 开始,每次成功编译补丁号 +1(v0.1.0 → v0.1.1 → …)
 
 on:
   push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "插件版本号(如 0.2.0,留空则自动递增)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sy-gsp-release
+  cancel-in-progress: false
 
 jobs:
-  verify:
+  release:
+    name: 测试构建发布
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
@@ -18,13 +34,40 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+
+      - name: 计算插件版本号
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ github.event.inputs.version }}"
+          V="${V#v}"
+          if [ -z "$V" ]; then
+            LATEST=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '[.[].tag_name | select(test("^v0\\.1\\.[0-9]+$")) | sub("^v0\\.1\\."; "") | tonumber] | max // -1')
+            V="0.1.$((LATEST + 1))"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "本次发布版本: v$V"
 
       - name: 安装依赖
-        run: npm install --include=dev
+        run: npm ci --include=dev
 
       - name: 单元测试
         run: npm test
+
+      - name: 写入版本号
+        run: |
+          node -e '
+            const fs = require("fs");
+            const v = "${{ steps.ver.outputs.version }}";
+            for (const f of ["plugin.json", "package.json"]) {
+              const j = JSON.parse(fs.readFileSync(f, "utf8"));
+              j.version = v;
+              fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
+            }
+            console.log("已写入版本 " + v);
+          '
 
       - name: 构建
         run: npm run build
@@ -33,16 +76,24 @@ jobs:
         run: npm run smoke
 
       - name: 打包插件
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          mkdir -p package/SY-GSP
-          cp index.js index.css plugin.json icon.png README.md README_en_US.md package/SY-GSP/
-          cp -r i18n package/SY-GSP/
-          cd package && zip -r "../SY-GSP-${GITHUB_REF_NAME}.zip" SY-GSP
+          mkdir -p dist
+          zip -r -q "dist/SY-GSP-${{ steps.ver.outputs.version }}.zip" \
+            index.js index.css plugin.json i18n icon.png preview.png \
+            README.md README_en_US.md
+          ls -la dist/
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: SY-GSP-${{ steps.ver.outputs.version }}
+          path: dist/*.zip
 
       - name: 发布 Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: SY-GSP-*.zip
+          tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: SY-GSP v${{ steps.ver.outputs.version }}
+          files: dist/*.zip
           generate_release_notes: true

@@ -1,8 +1,8 @@
 {
   "name": "SY-GSP",
   "author": "MbAIGC",
-  "url": "https://github.com/MbAIGC/SGSP",
-  "version": "1.0.0",
+  "url": "https://github.com/MbAIGC/SY-GSP",
+  "version": "0.1.0",
   "minAppVersion": "3.0.12",
   "backends": [
     "windows",
