@@ -2289,6 +2289,11 @@ var SyncQueue = class {
    * @returns {Promise<{merged:boolean, queued:boolean, result:any}>}
    *   merged=true 表示该触发被合并进运行中/已排队的任务,未创建新任务。
    */
+  /** 该仓库分支通道是否有任务在运行或排队 */
+  isBusy(key) {
+    const lane = this.lanes.get(key);
+    return !!lane && (lane.running || lane.pending > 0);
+  }
   enqueue(key, task, { mergeable = false, label = "" } = {}) {
     let lane = this.lanes.get(key);
     if (!lane) {
@@ -3040,6 +3045,10 @@ var SyncController = class {
     this.makeEngineDeps = deps.makeEngineDeps;
     this.repoInfo = deps.repoInfo;
     this.autoSync = deps.autoSync;
+    this.logger = deps.logger || { info() {
+    }, warn() {
+    }, error() {
+    } };
     this.queue = new SyncQueue();
     this.retryPolicy = new RetryPolicy({ enabled: false });
     this.state = SyncState.IDLE;
@@ -3100,6 +3109,10 @@ var SyncController = class {
       }
     }
     this.autoTick = false;
+    if (this.queue.isBusy(key)) {
+      this.notify(this.i18n("sygspQueueBusy", "已有同步任务在执行,本次请求已排队"), "info");
+      this.logger.warn("同步请求已排队(通道忙): " + key);
+    }
     const ctx = createSyncContext({
       trigger,
       mode: this.conflictPaused && overrides ? SyncMode.AUTO : mode,
@@ -3109,6 +3122,7 @@ var SyncController = class {
       branch: info.branch
     });
     if (overrides) ctx.overrides = overrides;
+    this.logger.info("开始同步 #" + ctx.id + " trigger=" + trigger + " mode=" + mode + " repo=" + info.owner + "/" + info.repo + " branch=" + info.branch);
     return this.queue.enqueue(
       key,
       () => this._runWithRetry(ctx),
@@ -3133,10 +3147,12 @@ var SyncController = class {
           }));
           return result;
         }
+        this.logger.info("同步完成 #" + ctx.id + " ↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) + " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0));
         await this._onFinished(ctx, result);
         return result;
       } catch (err) {
         const syncErr = err instanceof SyncError ? err : toSyncError(err, { phase: ctx.state });
+        this.logger.error("同步失败 #" + ctx.id + " [" + syncErr.category + "] " + syncErr.toDisplayText() + (syncErr.detail ? " | 详情: " + JSON.stringify(syncErr.detail).slice(0, 300) : ""));
         const decision = this.retryPolicy.decide(syncErr, attempt);
         if (!decision.retry || ctx.state === SyncState.CONFLICT_PAUSED) {
           await this._onFailed(ctx, syncErr);
@@ -3144,6 +3160,7 @@ var SyncController = class {
         }
         attempt += 1;
         ctx.attempt = attempt;
+        this.logger.warn("准备重试 #" + ctx.id + " 第 " + attempt + " 次,分类=" + syncErr.category);
         try {
           transition(ctx, SyncState.RETRYING);
         } catch (e) {
@@ -4523,6 +4540,9 @@ var RuntimeLogs = class {
   info(text) {
     this.append("info", text);
   }
+  warn(text) {
+    this.append("warn", text);
+  }
   error(text) {
     this.append("error", text);
   }
@@ -4533,17 +4553,31 @@ var RuntimeLogs = class {
 function openLogsDialog({ q: q2, i18n, logs }) {
   const dialog = new q2.Dialog({
     title: i18n && i18n.gSyncRuntimeLogsTitle || "SY-GSP 运行日志",
-    content: '<div style="padding:12px;display:flex;height:100%;"></div>',
+    content: '<div id="sygspLogsRoot" class="fn__flex fn__flex-column" style="height:100%;"></div>',
     width: "720px",
     height: "60vh"
   });
-  const root = dialog.element.firstElementChild;
+  const root = dialog.element.querySelector("#sygspLogsRoot");
+  if (!root) return dialog;
+  const bar = document.createElement("div");
+  bar.style.cssText = "display:flex;justify-content:flex-end;gap:8px;padding-bottom:8px;";
+  const refresh = document.createElement("button");
+  refresh.className = "b3-button b3-button--outline";
+  refresh.type = "button";
+  refresh.textContent = i18n && i18n.sygspLogsRefresh || "刷新";
   const textarea = document.createElement("textarea");
   textarea.className = "b3-text-field fn__flex-1";
   textarea.readOnly = true;
-  textarea.style.fontFamily = "monospace";
-  textarea.value = logs.render() || "暂无日志";
-  root.appendChild(textarea);
+  textarea.style.cssText = "font-family:monospace;font-size:12px;min-height:0;resize:none;";
+  const fill = () => {
+    textarea.value = logs.render() || "暂无日志";
+    textarea.scrollTop = textarea.scrollHeight;
+  };
+  refresh.addEventListener("click", fill);
+  fill();
+  bar.appendChild(refresh);
+  root.append(bar, textarea);
+  return dialog;
 }
 
 // src/ui/sync-history-panel.js
@@ -4609,7 +4643,7 @@ var _SyncHistoryPanel = class _SyncHistoryPanel {
   _buildDom() {
     const i18n = this._i18n;
     const root = this._el("div", "history__root fn__flex fn__flex-column", "height:100%;min-height:0;box-sizing:border-box");
-    const toolbar = this._el("div", "history__toolbar fn__flex fn__space", "padding:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--b3-theme-background-light)");
+    root.append(row1, row2);
     const sourceSelect = this._el("select", "b3-select history__source");
     sourceSelect.appendChild(this._option("0", i18n.dataSourceLocal));
     sourceSelect.appendChild(this._option("1", i18n.dataSourceRemote));
@@ -4619,29 +4653,22 @@ var _SyncHistoryPanel = class _SyncHistoryPanel {
     localInfo.textContent = i18n.localCommitLabel + ": " + (sha ? sha.slice(0, 8) : "-");
     if (this._opts.localCommitTime) localInfo.title = this._opts.localCommitTime;
     const notebookSelect = this._el("select", "b3-select history__notebook");
-    const pathInput = this._el("input", "b3-text-field history__path", "width:160px");
+    const pathInput = this._el("input", "b3-text-field history__path", "width:180px;flex:1 1 160px;min-width:120px");
     pathInput.type = "text";
     pathInput.placeholder = i18n.fileSearchPlaceholder;
     const sinceLabel = this._el("span", "ft__on-surface ft__smaller", "", i18n.startTime);
-    const sinceInput = this._el("input", "b3-text-field history__since", "width:150px");
+    const sinceInput = this._el("input", "b3-text-field history__since", "width:170px");
     sinceInput.type = "datetime-local";
     const untilLabel = this._el("span", "ft__on-surface ft__smaller", "", i18n.endTime);
-    const untilInput = this._el("input", "b3-text-field history__until", "width:150px");
+    const untilInput = this._el("input", "b3-text-field history__until", "width:170px");
     untilInput.type = "datetime-local";
     const searchBtn = this._el("button", "b3-button b3-button--outline history__search", "", i18n.search);
     searchBtn.type = "button";
-    toolbar.append(
-      sourceSelect,
-      countEl,
-      localInfo,
-      notebookSelect,
-      pathInput,
-      sinceLabel,
-      sinceInput,
-      untilLabel,
-      untilInput,
-      searchBtn
-    );
+    const rowStyle = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 8px 0;";
+    const row1 = this._el("div", "history__row", rowStyle + "padding-bottom:4px");
+    row1.append(sourceSelect, countEl, localInfo);
+    const row2 = this._el("div", "history__row", rowStyle + "padding-bottom:8px;border-bottom:1px solid var(--b3-theme-background-light)");
+    row2.append(notebookSelect, pathInput, sinceLabel, sinceInput, untilLabel, untilInput, searchBtn);
     const body = this._el("div", "history__body fn__flex fn__flex-1", "min-height:0");
     const commitsEl = this._el(
       "div",
@@ -4660,7 +4687,7 @@ var _SyncHistoryPanel = class _SyncHistoryPanel {
     diffEl.append(leftCol.el, rightCol.el);
     right.append(filesEl, diffEl);
     body.append(commitsEl, right);
-    root.append(toolbar, body);
+    root.append(body);
     [this._rootEl, this._sourceSelect, this._countEl, this._notebookSelect, this._pathInput] = [root, sourceSelect, countEl, notebookSelect, pathInput];
     [this._sinceInput, this._untilInput, this._searchBtn, this._commitsEl, this._filesEl, this._diffEl] = [sinceInput, untilInput, searchBtn, commitsEl, filesEl, diffEl];
     [this._leftTitle, this._rightTitle, this._leftTextarea, this._rightTextarea] = [leftCol.title, rightCol.title, leftCol.textarea, rightCol.textarea];
@@ -4809,7 +4836,7 @@ var _SyncHistoryPanel = class _SyncHistoryPanel {
   }
   /** 列表项：第一行提交信息首行，第二行小字灰色=作者+本地时间 */
   _createCommitItem(commit) {
-    const item = this._el("div", "b3-list-item history__commit", "cursor:pointer;display:flex;align-items:center");
+    const item = this._el("div", "b3-list-item history__commit", "cursor:pointer;display:flex;align-items:center;height:auto;min-height:0;padding:6px 8px");
     item.dataset.sha = commit.sha;
     item.title = commit.message || commit.sha;
     const wrap = this._el("div", "fn__flex fn__flex-column fn__flex-1", "min-width:0");
@@ -4883,7 +4910,7 @@ var _SyncHistoryPanel = class _SyncHistoryPanel {
   /** 文件行：状态徽标 + 可点击文件名 + 行尾操作按钮（removed 无按钮） */
   _createFileRow(file) {
     const i18n = this._i18n;
-    const row = this._el("div", "b3-list-item history__file", "display:flex;align-items:center;gap:6px;padding:4px 8px");
+    const row = this._el("div", "b3-list-item history__file", "display:flex;align-items:center;gap:6px;height:auto;min-height:0;padding:4px 8px");
     const status = _SyncHistoryPanel.STATUS_MAP[file.status] || { key: null, cls: "ft__primary" };
     const badge = this._el(
       "span",
@@ -5325,7 +5352,12 @@ var SyGspPlugin = class extends q.Plugin {
         pause: () => this._stopAutoSyncTimer(),
         resume: () => this._restartAutoSyncIfConfigured()
       },
-      makeEngineDeps: (ctx) => self._makeEngineDeps(ctx)
+      makeEngineDeps: (ctx) => self._makeEngineDeps(ctx),
+      logger: {
+        info: (t) => this.logs.info(t),
+        warn: (t) => this.logs.warn(t),
+        error: (t) => this.logs.error(t)
+      }
     });
   }
   _makeEngineDeps(ctx) {
@@ -5422,8 +5454,17 @@ var SyGspPlugin = class extends q.Plugin {
     });
     this.events.on("conflict:reopen", () => {
       const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
-      if (set) this.conflictDialog.show(set);
-      else this.diagnosisPanel.show({ mode: "base_recovery" });
+      if (set) {
+        this.conflictDialog.show(set);
+        return;
+      }
+      const paused = this.controller && this.controller.conflictPaused;
+      if (!paused || paused.kind === "BASE_UNRESOLVED") {
+        this.diagnosisPanel.show({ mode: "base_recovery" });
+      } else {
+        this.diagnosisPanel.show({ mode: "diagnosis" });
+        this.notification.toast(this.i18n.sygspConflictSetMissing || "未找到冲突明细,已打开诊断面板,可重新同步以重建冲突集", "info");
+      }
     });
   }
   // ---------- 同步入口 ----------

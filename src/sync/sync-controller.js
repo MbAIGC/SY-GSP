@@ -33,6 +33,7 @@ export class SyncController {
     this.makeEngineDeps = deps.makeEngineDeps;
     this.repoInfo = deps.repoInfo;
     this.autoSync = deps.autoSync;
+    this.logger = deps.logger || { info() {}, warn() {}, error() {} };
     this.queue = new SyncQueue();
     this.retryPolicy = new RetryPolicy({ enabled: false });
     this.state = SyncState.IDLE;
@@ -103,6 +104,12 @@ export class SyncController {
     }
     this.autoTick = false;
 
+    if (this.queue.isBusy(key)) {
+      // 忙时入队会静默等待,必须给用户可见反馈,否则表现为「点击无任何显示」
+      this.notify(this.i18n("sygspQueueBusy", "已有同步任务在执行,本次请求已排队"), "info");
+      this.logger.warn("同步请求已排队(通道忙): " + key);
+    }
+
     const ctx = createSyncContext({
       trigger,
       mode: this.conflictPaused && overrides ? SyncMode.AUTO : mode,
@@ -112,6 +119,8 @@ export class SyncController {
       branch: info.branch,
     });
     if (overrides) ctx.overrides = overrides;
+    this.logger.info("开始同步 #" + ctx.id + " trigger=" + trigger + " mode=" + mode +
+      " repo=" + info.owner + "/" + info.repo + " branch=" + info.branch);
 
     return this.queue.enqueue(
       key,
@@ -141,10 +150,14 @@ export class SyncController {
           }));
           return result;
         }
+        this.logger.info("同步完成 #" + ctx.id + " ↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) +
+          " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0));
         await this._onFinished(ctx, result);
         return result;
       } catch (err) {
         const syncErr = err instanceof SyncError ? err : toSyncError(err, { phase: ctx.state });
+        this.logger.error("同步失败 #" + ctx.id + " [" + syncErr.category + "] " + syncErr.toDisplayText() +
+          (syncErr.detail ? " | 详情: " + JSON.stringify(syncErr.detail).slice(0, 300) : ""));
         const decision = this.retryPolicy.decide(syncErr, attempt);
         if (!decision.retry || ctx.state === SyncState.CONFLICT_PAUSED) {
           await this._onFailed(ctx, syncErr);
@@ -152,6 +165,7 @@ export class SyncController {
         }
         attempt += 1;
         ctx.attempt = attempt;
+        this.logger.warn("准备重试 #" + ctx.id + " 第 " + attempt + " 次,分类=" + syncErr.category);
         try {
           transition(ctx, SyncState.RETRYING);
         } catch (e) {

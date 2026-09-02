@@ -22,6 +22,10 @@ export class RuntimeLogs {
     this.append("info", text);
   }
 
+  warn(text) {
+    this.append("warn", text);
+  }
+
   error(text) {
     this.append("error", text);
   }
@@ -33,19 +37,38 @@ export class RuntimeLogs {
   }
 }
 
-/** 打开运行日志对话框 */
+/** 打开运行日志对话框。
+ * 注意思源 Dialog 的 DOM: dialog.element 的 firstElementChild 是 .b3-dialog(整层遮罩容器),
+ * 直接把内容 append 到它上面会成为 flex 子项,排在对话框旁边(显示在左侧且不在弹窗内)。
+ * 内容必须挂到 .b3-dialog__body(旧版为 .b3-dialog__content)里。
+ */
 export function openLogsDialog({ q, i18n, logs }) {
   const dialog = new q.Dialog({
     title: (i18n && i18n.gSyncRuntimeLogsTitle) || "SY-GSP 运行日志",
-    content: '<div style="padding:12px;display:flex;height:100%;"></div>',
+    content: '<div id="sygspLogsRoot" class="fn__flex fn__flex-column" style="height:100%;"></div>',
     width: "720px",
     height: "60vh",
   });
-  const root = dialog.element.firstElementChild;
+  const root = dialog.element.querySelector("#sygspLogsRoot");
+  if (!root) return dialog;
+
+  const bar = document.createElement("div");
+  bar.style.cssText = "display:flex;justify-content:flex-end;gap:8px;padding-bottom:8px;";
+  const refresh = document.createElement("button");
+  refresh.className = "b3-button b3-button--outline";
+  refresh.type = "button";
+  refresh.textContent = (i18n && i18n.sygspLogsRefresh) || "刷新";
   const textarea = document.createElement("textarea");
   textarea.className = "b3-text-field fn__flex-1";
   textarea.readOnly = true;
-  textarea.style.fontFamily = "monospace";
-  textarea.value = logs.render() || "暂无日志";
-  root.appendChild(textarea);
+  textarea.style.cssText = "font-family:monospace;font-size:12px;min-height:0;resize:none;";
+  const fill = () => {
+    textarea.value = logs.render() || "暂无日志";
+    textarea.scrollTop = textarea.scrollHeight;
+  };
+  refresh.addEventListener("click", fill);
+  fill();
+  bar.appendChild(refresh);
+  root.append(bar, textarea);
+  return dialog;
 }

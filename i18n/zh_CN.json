@@ -254,5 +254,8 @@
   "localVersion": "本地当前版本",
   "localCommitLabel": "本机上次提交",
   "noLocalCommit": "本机还没有提交记录,已切换到远端提交",
-  "fileLoadFailed": "文件内容加载失败"
+  "fileLoadFailed": "文件内容加载失败",
+  "sygspQueueBusy": "已有同步任务在执行,本次请求已排队",
+  "sygspConflictSetMissing": "未找到冲突明细,已打开诊断面板,可重新同步以重建冲突集",
+  "sygspLogsRefresh": "刷新"
 }

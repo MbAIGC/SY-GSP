@@ -57,3 +57,22 @@ test("不同键并行", async () => {
 test("keyOf 格式", () => {
   assert.equal(SyncQueue.keyOf({ provider: "github", owner: "o", repo: "r", branch: "b" }), "github:o/r:b");
 });
+
+test("isBusy: 运行或排队中返回 true,空闲返回 false", async () => {
+  const { SyncQueue } = await import("../src/sync/sync-queue.js");
+  const q = new SyncQueue();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const busy = q.enqueue("k", () => gate, { label: "t1" });
+  assert.equal(q.isBusy("k"), true, "运行中应判定忙");
+  // 忙时再次非合并入队应可排队(不抛错)
+  const second = q.enqueue("k", async () => "second", { label: "t2" });
+  assert.equal(q.isBusy("k"), true, "排队中应判定忙");
+  release({ ok: true });
+  const r1 = await busy;
+  const r2 = await second;
+  assert.deepEqual(r1.result, { ok: true });
+  assert.equal(r2.result, "second");
+  assert.equal(q.isBusy("k"), false, "完成后应判定空闲");
+  assert.equal(q.isBusy("other"), false, "未知通道应判定空闲");
+});

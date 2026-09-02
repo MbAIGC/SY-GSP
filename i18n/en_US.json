@@ -254,5 +254,8 @@
   "localVersion": "Local current version",
   "localCommitLabel": "Last local commit",
   "noLocalCommit": "No local commit yet, switched to remote commits",
-  "fileLoadFailed": "Failed to load file content"
+  "fileLoadFailed": "Failed to load file content",
+  "sygspQueueBusy": "A sync task is already running; this request has been queued",
+  "sygspConflictSetMissing": "Conflict details not found; diagnosis panel opened, resync to rebuild the conflict set",
+  "sygspLogsRefresh": "Refresh"
 }

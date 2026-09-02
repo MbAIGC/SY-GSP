@@ -24,7 +24,7 @@ function check(name, fn) {
 }
 
 // ---------- siyuan 存根(按官方 Plugin.addIcons/addTopBar 语义模拟) ----------
-const stubCalls = { addTopBar: 0, showMessage: 0, dialog: 0, settingOpen: 0, topBarIconId: null, menuOpen: null, menuFullscreen: false, submenuCount: 0 };
+const stubCalls = { addTopBar: 0, showMessage: 0, dialog: 0, settingOpen: 0, topBarIconId: null, menuOpen: null, menuFullscreen: false, submenuCount: 0, dialogMisplaced: 0, lastMenu: null };
 const stubEnv = { symbols: new Set() }; // 已注入的 <symbol id> 集合
 function registerSymbolIds(svg) {
   const re = /<symbol\s+id="([^"]+)"/g;
@@ -81,18 +81,49 @@ class StubSetting {
   }
 }
 class StubDialog {
+  static instances = [];
   constructor(opts) {
+    StubDialog.instances.push(this);
     stubCalls.dialog += 1;
     this.opts = opts;
+    this._nodes = new Map();
+    const self = this;
+    // 官方 DOM 语义: dialog.element.firstElementChild 是 .b3-dialog 整层容器,
+    // 内容必须通过 querySelector(#id/.b3-dialog__body) 挂进对话框内容区
     this.element = {
-      querySelector: () => ({ textContent: "", appendChild: () => {} }),
+      firstElementChild: {
+        appendChild: () => { stubCalls.dialogMisplaced = (stubCalls.dialogMisplaced || 0) + 1; },
+        append: () => { stubCalls.dialogMisplaced = (stubCalls.dialogMisplaced || 0) + 1; },
+      },
+      querySelector: (sel) => {
+        if (!self._nodes.has(sel)) self._nodes.set(sel, self._mk(sel));
+        return self._nodes.get(sel);
+      },
     };
+  }
+  _mk(sel) {
+    const node = {
+      sel,
+      children: [],
+      style: { cssText: "" },
+      dataset: {},
+      classList: { add() {}, remove() {}, toggle() {} },
+      addEventListener() {},
+      appendChild(c) { node.children.push(c); },
+      append(...cs) { node.children.push(...cs); },
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      textContent: "",
+      value: "",
+    };
+    return node;
   }
   destroy() {}
 }
 class StubMenu {
   constructor() {
     this.items = [];
+    stubCalls.lastMenu = this;
   }
   addItem(option) {
     this.items.push(option);
@@ -236,6 +267,27 @@ plugin.data = {
     plugin._topBarCb();
     if (!stubCalls.menuOpen) throw new Error("menu.open 未被调用(点击无效)");
     if (stubCalls.submenuCount < 4) throw new Error("二级菜单缺失: 仅 " + stubCalls.submenuCount + " 组");
+  });
+
+  check("运行日志: 菜单点击后正确挂载到对话框内容区", () => {
+    stubCalls.dialogMisplaced = 0;
+    const before = stubCalls.dialog;
+    stubCalls.lastMenu = null;
+    plugin._topBarCb();
+    const menu = stubCalls.lastMenu;
+    if (!menu) throw new Error("顶栏菜单未创建");
+    const item = menu.items.find((it) => it && typeof it.click === "function" &&
+      /运行日志|Runtime Log|Runtime Logs/.test(String(it.label || "")));
+    if (!item) throw new Error("菜单缺少运行日志入口");
+    item.click();
+    if (stubCalls.dialog !== before + 1) throw new Error("日志对话框未创建");
+    if (stubCalls.dialogMisplaced > 0) throw new Error("内容被误挂到 firstElementChild(会显示在弹窗左侧)");
+    // 找到最近创建的日志对话框并校验挂载
+    const dlg = StubDialog.instances && StubDialog.instances[StubDialog.instances.length - 1];
+    if (dlg) {
+      const root = dlg.element.querySelector("#sygspLogsRoot");
+      if (!root || root.children.length < 2) throw new Error("日志内容未挂载");
+    }
   });
 
   // 路径一: 配置缺失(临时清空) → 提示并打开设置,不触发引擎

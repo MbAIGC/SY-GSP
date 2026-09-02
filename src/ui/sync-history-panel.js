@@ -71,7 +71,7 @@ export class SyncHistoryPanel {
   _buildDom() {
     const i18n = this._i18n;
     const root = this._el("div", "history__root fn__flex fn__flex-column", "height:100%;min-height:0;box-sizing:border-box");
-    const toolbar = this._el("div", "history__toolbar fn__flex fn__space", "padding:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--b3-theme-background-light)");
+    root.append(row1, row2);
     const sourceSelect = this._el("select", "b3-select history__source");
     sourceSelect.appendChild(this._option("0", i18n.dataSourceLocal));
     sourceSelect.appendChild(this._option("1", i18n.dataSourceRemote));
@@ -82,19 +82,24 @@ export class SyncHistoryPanel {
     localInfo.textContent = i18n.localCommitLabel + ": " + (sha ? sha.slice(0, 8) : "-");
     if (this._opts.localCommitTime) localInfo.title = this._opts.localCommitTime;
     const notebookSelect = this._el("select", "b3-select history__notebook");
-    const pathInput = this._el("input", "b3-text-field history__path", "width:160px");
+    const pathInput = this._el("input", "b3-text-field history__path", "width:180px;flex:1 1 160px;min-width:120px");
     pathInput.type = "text";
     pathInput.placeholder = i18n.fileSearchPlaceholder;
     const sinceLabel = this._el("span", "ft__on-surface ft__smaller", "", i18n.startTime);
-    const sinceInput = this._el("input", "b3-text-field history__since", "width:150px");
+    const sinceInput = this._el("input", "b3-text-field history__since", "width:170px");
     sinceInput.type = "datetime-local";
     const untilLabel = this._el("span", "ft__on-surface ft__smaller", "", i18n.endTime);
-    const untilInput = this._el("input", "b3-text-field history__until", "width:150px");
+    const untilInput = this._el("input", "b3-text-field history__until", "width:170px");
     untilInput.type = "datetime-local";
     const searchBtn = this._el("button", "b3-button b3-button--outline history__search", "", i18n.search);
     searchBtn.type = "button";
-    toolbar.append(sourceSelect, countEl, localInfo, notebookSelect, pathInput,
-      sinceLabel, sinceInput, untilLabel, untilInput, searchBtn);
+    // 工具栏固定两行: 第一行=数据源/统计,第二行=筛选条件
+    // (旧版单行用 fn__space 均分,窗口变窄换行后间距散乱,视觉上界面错乱)
+    const rowStyle = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 8px 0;";
+    const row1 = this._el("div", "history__row", rowStyle + "padding-bottom:4px");
+    row1.append(sourceSelect, countEl, localInfo);
+    const row2 = this._el("div", "history__row", rowStyle + "padding-bottom:8px;border-bottom:1px solid var(--b3-theme-background-light)");
+    row2.append(notebookSelect, pathInput, sinceLabel, sinceInput, untilLabel, untilInput, searchBtn);
     const body = this._el("div", "history__body fn__flex fn__flex-1", "min-height:0");
     const commitsEl = this._el("div", "history__commits b3-list b3-list--background",
       "flex:0 0 320px;width:320px;overflow-y:auto;position:relative;margin:0;border-right:1px solid var(--b3-theme-background-light)");
@@ -107,7 +112,7 @@ export class SyncHistoryPanel {
     diffEl.append(leftCol.el, rightCol.el);
     right.append(filesEl, diffEl);
     body.append(commitsEl, right);
-    root.append(toolbar, body);
+    root.append(body);
     [this._rootEl, this._sourceSelect, this._countEl, this._notebookSelect, this._pathInput] =
       [root, sourceSelect, countEl, notebookSelect, pathInput];
     [this._sinceInput, this._untilInput, this._searchBtn, this._commitsEl, this._filesEl, this._diffEl] =
@@ -239,7 +244,7 @@ export class SyncHistoryPanel {
   }
   /** 列表项：第一行提交信息首行，第二行小字灰色=作者+本地时间 */
   _createCommitItem(commit) {
-    const item = this._el("div", "b3-list-item history__commit", "cursor:pointer;display:flex;align-items:center");
+    const item = this._el("div", "b3-list-item history__commit", "cursor:pointer;display:flex;align-items:center;height:auto;min-height:0;padding:6px 8px");
     item.dataset.sha = commit.sha;
     item.title = commit.message || commit.sha;
     const wrap = this._el("div", "fn__flex fn__flex-column fn__flex-1", "min-width:0");
@@ -303,7 +308,7 @@ export class SyncHistoryPanel {
   /** 文件行：状态徽标 + 可点击文件名 + 行尾操作按钮（removed 无按钮） */
   _createFileRow(file) {
     const i18n = this._i18n;
-    const row = this._el("div", "b3-list-item history__file", "display:flex;align-items:center;gap:6px;padding:4px 8px");
+    const row = this._el("div", "b3-list-item history__file", "display:flex;align-items:center;gap:6px;height:auto;min-height:0;padding:4px 8px");
     const status = SyncHistoryPanel.STATUS_MAP[file.status] || { key: null, cls: "ft__primary" };
     const badge = this._el("span", "history__status " + status.cls, "min-width:3em",
       status.key ? i18n[status.key] : file.status);

@@ -25,6 +25,12 @@ export class SyncQueue {
    * @returns {Promise<{merged:boolean, queued:boolean, result:any}>}
    *   merged=true 表示该触发被合并进运行中/已排队的任务,未创建新任务。
    */
+  /** 该仓库分支通道是否有任务在运行或排队 */
+  isBusy(key) {
+    const lane = this.lanes.get(key);
+    return !!lane && (lane.running || lane.pending > 0);
+  }
+
   enqueue(key, task, { mergeable = false, label = "" } = {}) {
     let lane = this.lanes.get(key);
     if (!lane) {

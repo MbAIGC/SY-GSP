@@ -218,6 +218,11 @@ export default class SyGspPlugin extends q.Plugin {
         resume: () => this._restartAutoSyncIfConfigured(),
       },
       makeEngineDeps: (ctx) => self._makeEngineDeps(ctx),
+      logger: {
+        info: (t) => this.logs.info(t),
+        warn: (t) => this.logs.warn(t),
+        error: (t) => this.logs.error(t),
+      },
     });
   }
 
@@ -323,8 +328,18 @@ export default class SyGspPlugin extends q.Plugin {
     });
     this.events.on("conflict:reopen", () => {
       const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
-      if (set) this.conflictDialog.show(set);
-      else this.diagnosisPanel.show({ mode: "base_recovery" });
+      if (set) {
+        this.conflictDialog.show(set);
+        return;
+      }
+      // 冲突集丢失时必须有可见兜底,否则手动同步点击后无任何反馈
+      const paused = this.controller && this.controller.conflictPaused;
+      if (!paused || paused.kind === "BASE_UNRESOLVED") {
+        this.diagnosisPanel.show({ mode: "base_recovery" });
+      } else {
+        this.diagnosisPanel.show({ mode: "diagnosis" });
+        this.notification.toast(this.i18n.sygspConflictSetMissing || "未找到冲突明细,已打开诊断面板,可重新同步以重建冲突集", "info");
+      }
     });
   }
 
