@@ -3722,7 +3722,10 @@ var SettingUtils = class {
     this.plugin.setting.addItem({
       title: item.title,
       description: item.description,
-      direction: item.direction || "rows",
+      // 官方语义(siYuan Setting.addItem): direction 缺省时由内核按控件类型推断——
+      // TEXTAREA/无控件 → "row"(标题上、控件全宽在下),其余 → "column"(标题左、控件右 200px)。
+      // 这里原样透传,与旧版 SGSP 的面板布局保持一致,不得强加默认值。
+      direction: item.direction,
       createActionElement: () => element
     });
     return element;
@@ -3866,6 +3869,14 @@ var SettingsPanelBuilder = class {
       const current = u.get(key);
       return current === void 0 ? SETTING_DEFAULTS[key] : current;
     };
+    u.addItem({
+      key: "disclaimHint",
+      type: "hint",
+      direction: "row",
+      value: "",
+      title: t.disclaimeTitle,
+      description: t.disclaimeDesc
+    });
     u.addItem({
       key: "upload_platform",
       type: "select",
@@ -4017,22 +4028,28 @@ var SettingsPanelBuilder = class {
     });
     u.addItem({
       key: "latest_commit_sha",
-      type: "hint",
+      type: "textinput",
       value: t.noCommitFile || "暂无提交",
       title: t.latestCommitSha,
-      description: t.latestCommitShaDesc,
-      direction: "rows"
+      description: t.latestCommitShaDesc
     });
     u.addItem({
       key: "latest_commit_time",
-      type: "hint",
+      type: "textinput",
       value: "",
       title: t.latestCommitTime,
-      description: t.latestCommitTimeDesc,
-      direction: "rows"
+      description: t.latestCommitTimeDesc
+    });
+    u.addItem({
+      key: "aboutHint",
+      type: "hint",
+      direction: "row",
+      value: "",
+      title: t.hintTitle,
+      description: t.hintDesc
     });
   }
-  /** 载入完成后刷新基准展示项 */
+  /** 载入完成后刷新基准展示项并置为只读 */
   _refreshBaseHints() {
     if (!this.utils || !this.metadataStore) return;
     const info = this._parsedRepo();
@@ -4048,6 +4065,8 @@ var SettingsPanelBuilder = class {
       base && base.lastConfirmedCommit ? base.lastConfirmedCommit : this.i18n.noCommitFile || "暂无提交"
     );
     this.utils.set("latest_commit_time", base && base.lastSuccessfulAt ? base.lastSuccessfulAt : "");
+    this.utils.disable("latest_commit_sha");
+    this.utils.disable("latest_commit_time");
   }
   async _confirmResetBase() {
     const t = this.i18n;
@@ -5545,18 +5564,17 @@ var SyGspPlugin = class extends q.Plugin {
   _registerTopBar() {
     if (this.isMobile) {
       this.topBarElement = document.querySelector("#toolbarMore");
-    } else if (typeof q.addTopBar === "function") {
-      q.addTopBar({
+    } else {
+      this.topBarElement = this.addTopBar({
         icon: "iconGmailSync",
         title: this.i18n.addTopBarIcon || "SY-GSP",
         position: "right",
-        callback: (event) => this._openMenu(event)
+        callback: () => this._openMenu()
       });
-      this.topBarElement = document.querySelector('button[data-id="iconGmailSync"]');
     }
     if (this.notification) this.notification.setTopBarElement(this.topBarElement);
   }
-  _openMenu(event) {
+  _openMenu() {
     const actions = {
       startSync: () => this.syncNow({ trigger: "manual" }),
       refreshWorkspaceTree: () => this.kernel.refreshFiletree(),
@@ -5580,13 +5598,20 @@ var SyGspPlugin = class extends q.Plugin {
       actions,
       conflictPaused: this.controller.isConflictPaused()
     });
-    const anchor = event && event.target ? event.target : this.topBarElement;
-    if (anchor && anchor.getBoundingClientRect) {
-      const rect = anchor.getBoundingClientRect();
-      menu.open({ x: rect.right, y: rect.bottom });
-    } else {
-      menu.open({ x: window.innerWidth - 220, y: 32 });
+    if (this.isMobile) {
+      if (typeof menu.fullscreen === "function") menu.fullscreen();
+      else menu.open({ x: 0, y: 0 });
+      return;
     }
+    const rectOf = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el || typeof el.getBoundingClientRect !== "function") return null;
+      const rect2 = el.getBoundingClientRect();
+      return rect2 && rect2.width > 0 ? rect2 : null;
+    };
+    const rect = (this.topBarElement && typeof this.topBarElement.getBoundingClientRect === "function" ? this.topBarElement.getBoundingClientRect() : null) || rectOf("#barMore") || rectOf("#barPlugins");
+    if (rect) menu.open({ x: rect.right, y: rect.bottom, isLeft: true });
+    else menu.open({ x: window.innerWidth - 220, y: 32 });
   }
   openSetting() {
     const setting = this.setting;

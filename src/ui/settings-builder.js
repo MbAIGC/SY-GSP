@@ -57,6 +57,15 @@ export class SettingsPanelBuilder {
       const current = u.get(key);
       return current === undefined ? SETTING_DEFAULTS[key] : current;
     };
+    // 顶部数据安全提示(与旧版 SGSP 一致,放首行)
+    u.addItem({
+      key: "disclaimHint",
+      type: "hint",
+      direction: "row",
+      value: "",
+      title: t.disclaimeTitle,
+      description: t.disclaimeDesc,
+    });
     u.addItem({
       key: "upload_platform",
       type: "select",
@@ -207,26 +216,33 @@ export class SettingsPanelBuilder {
       description: (t.sygspSuccessNotifyDesc) || "关闭后自动同步成功不打扰(手动同步始终提示)",
     });
 
-    // 基准展示(只读,来自元数据而非旧版字段)
+    // 基准展示(只读输入框,来自元数据而非旧版字段;direction 缺省 → 官方 column 布局,控件在右)
     u.addItem({
       key: "latest_commit_sha",
-      type: "hint",
+      type: "textinput",
       value: t.noCommitFile || "暂无提交",
       title: t.latestCommitSha,
       description: t.latestCommitShaDesc,
-      direction: "rows",
     });
     u.addItem({
       key: "latest_commit_time",
-      type: "hint",
+      type: "textinput",
       value: "",
       title: t.latestCommitTime,
       description: t.latestCommitTimeDesc,
-      direction: "rows",
+    });
+    // 底部「关于」(与旧版 SGSP 一致,放末行)
+    u.addItem({
+      key: "aboutHint",
+      type: "hint",
+      direction: "row",
+      value: "",
+      title: t.hintTitle,
+      description: t.hintDesc,
     });
   }
 
-  /** 载入完成后刷新基准展示项 */
+  /** 载入完成后刷新基准展示项并置为只读 */
   _refreshBaseHints() {
     if (!this.utils || !this.metadataStore) return;
     const info = this._parsedRepo();
@@ -242,6 +258,8 @@ export class SettingsPanelBuilder {
       base && base.lastConfirmedCommit ? base.lastConfirmedCommit : this.i18n.noCommitFile || "暂无提交"
     );
     this.utils.set("latest_commit_time", base && base.lastSuccessfulAt ? base.lastSuccessfulAt : "");
+    this.utils.disable("latest_commit_sha");
+    this.utils.disable("latest_commit_time");
   }
 
   async _confirmResetBase() {

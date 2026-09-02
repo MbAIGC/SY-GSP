@@ -131,7 +131,10 @@ export class SettingUtils {
     this.plugin.setting.addItem({
       title: item.title,
       description: item.description,
-      direction: item.direction || "rows",
+      // 官方语义(siYuan Setting.addItem): direction 缺省时由内核按控件类型推断——
+      // TEXTAREA/无控件 → "row"(标题上、控件全宽在下),其余 → "column"(标题左、控件右 200px)。
+      // 这里原样透传,与旧版 SGSP 的面板布局保持一致,不得强加默认值。
+      direction: item.direction,
       createActionElement: () => element,
     });
     return element;

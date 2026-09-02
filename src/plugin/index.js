@@ -454,19 +454,20 @@ export default class SyGspPlugin extends q.Plugin {
   _registerTopBar() {
     if (this.isMobile) {
       this.topBarElement = document.querySelector("#toolbarMore");
-    } else if (typeof q.addTopBar === "function") {
-      q.addTopBar({
+    } else {
+      // 官方 API(siYuan Plugin.addTopBar): 实例方法,返回顶栏按钮元素;
+      // icon 必须是 addIcons 注册过的 symbol id(iconGmailSync 在 createIcons 中注册)
+      this.topBarElement = this.addTopBar({
         icon: "iconGmailSync",
         title: this.i18n.addTopBarIcon || "SY-GSP",
         position: "right",
-        callback: (event) => this._openMenu(event),
+        callback: () => this._openMenu(),
       });
-      this.topBarElement = document.querySelector('button[data-id="iconGmailSync"]');
     }
     if (this.notification) this.notification.setTopBarElement(this.topBarElement);
   }
 
-  _openMenu(event) {
+  _openMenu() {
     const actions = {
       startSync: () => this.syncNow({ trigger: "manual" }),
       refreshWorkspaceTree: () => this.kernel.refreshFiletree(),
@@ -490,13 +491,26 @@ export default class SyGspPlugin extends q.Plugin {
       actions,
       conflictPaused: this.controller.isConflictPaused(),
     });
-    const anchor = event && event.target ? event.target : this.topBarElement;
-    if (anchor && anchor.getBoundingClientRect) {
-      const rect = anchor.getBoundingClientRect();
-      menu.open({ x: rect.right, y: rect.bottom });
-    } else {
-      menu.open({ x: window.innerWidth - 220, y: 32 });
+    if (this.isMobile) {
+      if (typeof menu.fullscreen === "function") menu.fullscreen();
+      else menu.open({ x: 0, y: 0 });
+      return;
     }
+    // 与官方示例一致: 优先按顶栏按钮定位;按钮被折叠时依次回退到「更多/插件」按钮
+    const rectOf = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el || typeof el.getBoundingClientRect !== "function") return null;
+      const rect = el.getBoundingClientRect();
+      return rect && rect.width > 0 ? rect : null;
+    };
+    const rect =
+      (this.topBarElement && typeof this.topBarElement.getBoundingClientRect === "function"
+        ? this.topBarElement.getBoundingClientRect()
+        : null) ||
+      rectOf("#barMore") ||
+      rectOf("#barPlugins");
+    if (rect) menu.open({ x: rect.right, y: rect.bottom, isLeft: true });
+    else menu.open({ x: window.innerWidth - 220, y: 32 });
   }
 
   openSetting() {
