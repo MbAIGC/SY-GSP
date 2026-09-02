@@ -23,17 +23,42 @@ function check(name, fn) {
   }
 }
 
-// ---------- siyuan 存根 ----------
-const stubCalls = { addTopBar: 0, showMessage: 0, dialog: 0, settingOpen: 0 };
+// ---------- siyuan 存根(按官方 Plugin.addIcons/addTopBar 语义模拟) ----------
+const stubCalls = { addTopBar: 0, showMessage: 0, dialog: 0, settingOpen: 0, topBarIconId: null };
+const stubEnv = { symbols: new Set() }; // 已注入的 <symbol id> 集合
+function registerSymbolIds(svg) {
+  const re = /<symbol\s+id="([^"]+)"/g;
+  let m;
+  while ((m = re.exec(svg))) stubEnv.symbols.add(m[1]);
+}
 class StubPlugin {
   constructor() {
     this.data = {};
     this.i18n = {};
+    this.name = "SY-GSP"; // 思源装载时会按 plugin.json 设置插件名
+    this.topBarIcons = [];
   }
-  addIcons() {}
-  addTopBar(opts) {
+  // 官方行为: 注入 <svg data-name="${name}"><defs>…</defs></svg>
+  addIcons(svg) {
+    registerSymbolIds(svg);
+  }
+  // 官方行为: 校验 icon 为 svg id/标签且已注册,返回按钮元素
+  addTopBar(options) {
+    if (!options || typeof options.icon !== "string") throw new Error("addTopBar 缺少 icon");
+    options.icon = options.icon.trim();
+    if (!options.icon.startsWith("icon") && !options.icon.startsWith("<svg")) {
+      throw new Error("addTopBar icon 必须是 svg id 或 svg 标签");
+    }
+    if (!stubEnv.symbols.has(options.icon)) {
+      throw new Error(`顶栏图标 ${options.icon} 未通过 addIcons 注册(按钮将无图标)`);
+    }
+    if (typeof options.callback !== "function") throw new Error("addTopBar 缺少 callback");
     stubCalls.addTopBar += 1;
-    if (opts && typeof opts.callback === "function") this._topBarCb = opts.callback;
+    stubCalls.topBarIconId = options.icon;
+    this._topBarCb = options.callback;
+    return {
+      getBoundingClientRect: () => ({ right: 120, bottom: 40, width: 32 }),
+    };
   }
   async loadData(name) {
     return this.data[name] === undefined ? null : JSON.parse(JSON.stringify(this.data[name]));
@@ -188,6 +213,9 @@ plugin.data = {
   await plugin.onLayoutReady();
   check("onLayoutReady: 顶栏注册", () => {
     if (stubCalls.addTopBar < 1) throw new Error("addTopBar 未调用");
+    if (stubCalls.topBarIconId !== "iconGmailSync") throw new Error("顶栏图标 id 不是 iconGmailSync");
+    if (!stubEnv.symbols.has("iconGmailSync")) throw new Error("iconGmailSync symbol 未通过 addIcons 注入");
+    if (typeof plugin._topBarCb !== "function") throw new Error("顶栏按钮未绑定回调");
   });
 
   // 路径一: 配置缺失(临时清空) → 提示并打开设置,不触发引擎

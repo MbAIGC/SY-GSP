@@ -47,6 +47,9 @@ export default class SyGspPlugin extends q.Plugin {
 
   async onload() {
     try {
+      // 官方示例做法: 图标注册放最前,不依赖后续装配步骤
+      // (若后续步骤抛错导致 createIcons 未执行,顶栏按钮将无图标可引用)
+      this.createIcons();
       this.kernel = createKernel(q);
       await this._initStores();
       this.notification = new NotificationService({ q, i18n: this.i18n });
@@ -84,7 +87,6 @@ export default class SyGspPlugin extends q.Plugin {
       });
       this.controller = this._buildController();
       await this.controller.restore();
-      this.createIcons();
     } catch (err) {
       this.logs.error("onload 失败: " + ((err && err.stack) || err));
       console.error("[SY-GSP] onload 失败:", err);
@@ -456,8 +458,10 @@ export default class SyGspPlugin extends q.Plugin {
       this.topBarElement = document.querySelector("#toolbarMore");
     } else {
       // 官方 API(siYuan Plugin.addTopBar): 实例方法,返回顶栏按钮元素;
-      // icon 必须是 addIcons 注册过的 symbol id(iconGmailSync 在 createIcons 中注册)
+      // icon 必须是 addIcons 注册过的 symbol id(onload 首步已在 createIcons 注册);
+      // 传官方 id 选项,重复调用 onLayoutReady 时按 data-id 幂等复用
       this.topBarElement = this.addTopBar({
+        id: "iconGmailSync",
         icon: "iconGmailSync",
         title: this.i18n.addTopBarIcon || "SY-GSP",
         position: "right",

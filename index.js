@@ -5191,6 +5191,7 @@ var SyGspPlugin = class extends q.Plugin {
   }
   async onload() {
     try {
+      this.createIcons();
       this.kernel = createKernel(q);
       await this._initStores();
       this.notification = new NotificationService({ q, i18n: this.i18n });
@@ -5228,7 +5229,6 @@ var SyGspPlugin = class extends q.Plugin {
       });
       this.controller = this._buildController();
       await this.controller.restore();
-      this.createIcons();
     } catch (err) {
       this.logs.error("onload 失败: " + (err && err.stack || err));
       console.error("[SY-GSP] onload 失败:", err);
@@ -5566,6 +5566,7 @@ var SyGspPlugin = class extends q.Plugin {
       this.topBarElement = document.querySelector("#toolbarMore");
     } else {
       this.topBarElement = this.addTopBar({
+        id: "iconGmailSync",
         icon: "iconGmailSync",
         title: this.i18n.addTopBarIcon || "SY-GSP",
         position: "right",

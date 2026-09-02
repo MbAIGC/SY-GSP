@@ -41,3 +41,27 @@
 
 - 免责声明/关于的富文本（`<br>`、`<a>`）由思源 Setting 的 description 插槽按 HTML 渲染，与旧版 SGSP 行为一致；如思源后续版本变更该插槽的转义策略，需同步调整。
 - 顶栏菜单图标使用思源内置图标 id（iconRefresh/iconHistory 等），未随主题变化的自定义图标仅顶栏主图标一个（与 SGSP 相同）。
+
+## 六、第二轮修复: 顶栏图标仍缺失(v0.1.2)
+
+### 根因
+
+`createIcons()`(注入 `iconGmailSync` symbol)位于 `onload` **末尾**,排在内核装配、旧版迁移、
+冲突对话框、控制器恢复之后。真实环境里上述任一步骤抛错都会中断 onload,导致 symbol 永远
+不注入;而设置面板在更早步骤已装配完成——形成「设置面板可用但顶栏无图标」的症状。
+官方示例(plugin-sample-vite-svelte)正是在 `onload` 开头调用 `addIcons`。
+
+### 修复
+
+1. `createIcons()` 移到 `onload` 首行,图标注册不再依赖后续装配步骤;
+2. `addTopBar` 传入官方 `id` 选项,重复调用 onLayoutReady 时按 `data-id` 幂等复用。
+
+### 冒烟加固
+
+按官方源码语义重写冒烟存根:`addIcons` 解析并记录 `<symbol id>`;`addTopBar` 校验
+icon 为 svg id/标签、**必须已注册**、callback 必须为函数,并返回按钮元素。顶栏图标
+一旦缺失或未注册,冒烟直接失败,此类问题不再可能静默发布。
+
+### 验证
+
+- 单元测试 100/100;构建 214 KB;冒烟 7/7(含新增图标注册断言)。
