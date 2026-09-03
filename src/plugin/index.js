@@ -84,9 +84,13 @@ export default class SyGspPlugin extends q.Plugin {
         runChecks: () => this._runDiagnosis(),
         previewPlan: () => this._previewPlan(),
         onChooseBase: (choice) => this.controller.resolveConflicts({ __base__: choice }),
-        getPausedConflicts: () => (this.controller && this.controller.conflictPaused && this.controller.conflictPaused.conflicts) || [],
-        // 暂停状态与解除出口: 诊断不再「全绿却无从下手」(陈旧/无冲突集的暂停记录可通过此出口解除)
-        getPausedInfo: () => (this.controller && this.controller.conflictPaused) || null,
+        getPausedConflicts: () => {
+          const paused = this._currentPausedInfo();
+          return (paused && paused.conflicts) || [];
+        },
+        // 暂停状态与解除出口: 除控制器状态外，open conflict set 也是持久化事实来源。
+        // 避免 engine-state 丢失时诊断全绿、但同步仍提示处理冲突。
+        getPausedInfo: () => this._currentPausedInfo(),
         onClearPause: () => this._clearPauseAndSync(),
         onFirstWriteConfirmed: async () => {
           await this._saveEngineState({ firstWriteConfirmed: true });
@@ -528,6 +532,24 @@ export default class SyGspPlugin extends q.Plugin {
     return !this.metadataStore.getBaseCommit(this._repoKey(this._repoInfo()));
   }
 
+  /** 当前仓库的暂停事实：控制器状态优先，open conflict set 用于状态文件丢失后的只读诊断。 */
+  _currentPausedInfo() {
+    const paused = this.controller && this.controller.conflictPaused;
+    if (paused) return paused;
+    const repoKey = this._repoKey(this._repoInfo());
+    const set = this.conflictService && this.conflictService.openSet(repoKey);
+    if (!set) return null;
+    const conflicts = (set.conflicts || []).filter((c) => c && c.path);
+    return {
+      kind: "FILE_CONFLICTS",
+      repoKey,
+      operationId: set.operationId,
+      reason: "存在未处理冲突集",
+      conflictCount: conflicts.length,
+      conflicts: conflicts.slice(0, 20).map((c) => ({ path: c.path, reason: c.reason || "" })),
+    };
+  }
+
   /** 诊断面板「解除暂停并手动同步一次」: 先清除暂停状态,再立即跑一次手动同步。
    * 若冲突真实存在,引擎会重新检测并再次暂停(重建冲突集),安全可逆;
    * 若为陈旧/无出口的暂停记录,一次同步即恢复正常并推进状态。 */
@@ -778,9 +800,9 @@ export default class SyGspPlugin extends q.Plugin {
       });
       return checks;
     }
-    // 同步状态置顶: 冲突/基准暂停时诊断必须如实呈现(此前只查配置/连通/基准,
-    // 出现「全绿却提示处理冲突」的困惑——暂停记录与只读检查项本可独立存在)
-    const pausedInfo = (this.controller && this.controller.conflictPaused) || null;
+    // 同步状态置顶: 控制器暂停记录与 open conflict set 都要参与判定。
+    // 后者是状态文件丢失/旧格式迁移失败时的持久化事实，不能出现全绿诊断。
+    const pausedInfo = this._currentPausedInfo();
     checks.push({
       name: "同步状态",
       ok: !pausedInfo,

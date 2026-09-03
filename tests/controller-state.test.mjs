@@ -60,6 +60,40 @@ test("状态合并写: 冲突暂停的存取不清掉 firstWriteConfirmed", asyn
   assert.equal(store.data.conflictByRepo, undefined, "暂停键应随清除移除");
 });
 
+test("恢复: engine-state 缺少暂停记录时，以 open conflict set 补齐当前仓库暂停状态", async () => {
+  const store = { data: {} };
+  const openSet = {
+    repoKey: KEY,
+    operationId: "op-open",
+    status: "open",
+    conflicts: [
+      { path: "data/note.sy", reason: "双方同时新增了不同内容" },
+      { path: "data/.siyuan/conf.json", reason: "双方同时新增了不同内容" },
+    ],
+  };
+  const c = new SyncController({
+    plugin: {
+      loadData: async () => store.data,
+      saveData: async (f, v) => { store.data = JSON.parse(JSON.stringify(v)); },
+    },
+    events: { emit() {} },
+    logger: { info() {}, warn() {}, error() {} },
+    notify() {},
+    autoSync: { pause() {}, resume() {} },
+    repoInfo: () => REPO,
+    conflictService: { allOpenSets: () => [openSet] },
+  });
+
+  await c.restore();
+
+  assert.equal(c.isConflictPaused(), true, "open conflict set 必须恢复同步暂停");
+  assert.equal(c.conflictPaused.operationId, "op-open");
+  assert.equal(c.conflictPaused.conflictCount, 2);
+  assert.equal(c.conflictPaused.conflicts[1].path, "data/.siyuan/conf.json");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(store.data.conflictByRepo[KEY].operationId, "op-open", "补齐状态应写回新格式");
+});
+
 test("patchEngineState: 插件经唯一入口写入,不再整文件覆盖", async () => {
   const store = { data: { conflictPaused: { kind: "FILE_CONFLICTS", repoKey: KEY, conflicts: [] } } };
   const c = makeController(store);

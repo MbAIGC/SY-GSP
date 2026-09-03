@@ -77,7 +77,16 @@ function createKernel(q2) {
     form.append("file", blob);
     const resp = await fetch("/api/file/putFile", { method: "POST", body: form });
     if (!resp.ok) throw new Error("写入本地文件失败 " + path + ": HTTP " + resp.status);
-    return resp.json();
+    let json;
+    try {
+      json = await resp.json();
+    } catch (e) {
+      throw new Error("写入本地文件失败 " + path + ": 响应无法解析");
+    }
+    if (json && typeof json.code === "number" && json.code !== 0) {
+      throw new Error("写入本地文件失败 " + path + ": " + (json.msg || json.code));
+    }
+    return json;
   }
   async function removeFile(path) {
     return post("/api/file/removeFile", { path });
@@ -430,7 +439,10 @@ var ContentAdapter = class {
       return { conflictPath: "data/" + (info.box || notebookIdOf(path)) + conflictDocPath + ".sy", docId: res };
     }
     const ext = extname(path);
-    const conflictPath = path.replace(basename(path), basename(path, ext) + stamp + ext);
+    const slash = String(path).lastIndexOf("/");
+    const dir = slash >= 0 ? String(path).slice(0, slash + 1) : "";
+    const file = slash >= 0 ? String(path).slice(slash + 1) : String(path);
+    const conflictPath = dir + basename(file, ext) + stamp + ext;
     await this.kernel.putFile(conflictPath, localBlob, false);
     await this.kernel.putFile(path, remoteBlob, false);
     return { conflictPath };
@@ -682,9 +694,22 @@ var HttpClient = class {
     } finally {
       clearTimeout(timer);
     }
-    const data = await this._parse(response, opts.responseType || "json");
+    const responseType = opts.responseType || "json";
+    const data = await this._parse(response, responseType);
     if (!response.ok) {
-      const apiMessage = data && typeof data === "object" ? data.message || data.errors || "" : "";
+      let apiMessage = "";
+      if (responseType === "arraybuffer") {
+        try {
+          const buf = data instanceof ArrayBuffer ? data : data && typeof data === "object" && typeof data.byteLength === "number" ? data.buffer || data : null;
+          if (buf) apiMessage = new TextDecoder().decode(new Uint8Array(buf));
+        } catch (e) {
+          apiMessage = "";
+        }
+      } else if (data && typeof data === "object") {
+        apiMessage = data.message || data.errors || "";
+      }
+      const message = String(apiMessage).trim();
+      apiMessage = message ? message : apiMessage;
       throw new SyncError({
         category: SyncErrorCategory.GIT,
         code: "HTTP_" + response.status,
@@ -1073,6 +1098,18 @@ var GitHubProvider = class _GitHubProvider extends GitProvider {
         path: this._repoPath() + "/git/trees/" + treeSha,
         query: { recursive: "1" }
       });
+      if (res.data && res.data.truncated) {
+        throw new SyncError({
+          category: SyncErrorCategory.GIT,
+          code: "TREE_TRUNCATED",
+          operation: "getTree",
+          httpStatus: res.status,
+          treeSha,
+          message: "远端目录树过大被截断(truncated),无法安全规划本轮同步,请换用更小的同步范围或减少单目录文件数",
+          retryable: false,
+          recoverable: true
+        });
+      }
       return (res.data.tree || []).map((t) => ({
         path: t.path,
         mode: t.mode,
@@ -1124,7 +1161,8 @@ var GitHubProvider = class _GitHubProvider extends GitProvider {
       });
       const bytes = new Uint8Array(res.data || 0);
       return {
-        sha: "",
+        sha: null,
+        // raw 接口不返回对象 sha,显式置空,避免调用方误用空串做内容等价判断
         size: bytes.length,
         contentBase64: GitProvider.bytesToBase64(bytes),
         bytes,
@@ -1210,7 +1248,8 @@ var GitHubProvider = class _GitHubProvider extends GitProvider {
       const mb = res.data.merge_base_commit;
       return mb && mb.sha ? mb.sha : null;
     } catch (err) {
-      return null;
+      if (err instanceof SyncError && err.httpStatus === 404) return null;
+      throw this._wrap(err, "getMergeBase", "读取共同祖先失败");
     }
   }
   async createBlob(bytes) {
@@ -1280,337 +1319,6 @@ function encodePath(path) {
   return String(path).split("/").map((seg) => encodeURIComponent(seg)).join("/");
 }
 
-// src/git/gitee-provider.js
-var GiteeProvider = class _GiteeProvider extends GitProvider {
-  constructor(opts) {
-    super(Object.assign({ platform: "gitee" }, opts));
-  }
-  baseUrl() {
-    return "https://gitee.com/api/v5";
-  }
-  displayName() {
-    return "Gitee";
-  }
-  _repoPath() {
-    return "/repos/" + this.owner + "/" + this.repo;
-  }
-  _wrap(err, operation, message) {
-    if (err instanceof SyncError) return err;
-    const status = err && err.httpStatus || 0;
-    return new SyncError({
-      category: status === 404 ? SyncErrorCategory.REPOSITORY : SyncErrorCategory.GIT,
-      operation,
-      httpStatus: status,
-      message: message || err && err.message || String(err),
-      detail: String(err && err.detail || err && err.message || err),
-      retryable: status >= 500,
-      recoverable: false,
-      cause: err
-    });
-  }
-  static _mapCommit(data) {
-    return {
-      sha: data.sha,
-      treeSha: data.commit && data.commit.tree && data.commit.tree.sha,
-      message: data.commit && data.commit.message || "",
-      author: data.commit && data.commit.author && data.commit.author.name || "",
-      email: data.commit && data.commit.author && data.commit.author.email || "",
-      date: data.commit && data.commit.author && data.commit.author.date || "",
-      parents: (data.parents || []).map((p) => p.sha)
-    };
-  }
-  async getBranchHead() {
-    try {
-      const res = await this.http.request({
-        path: this._repoPath() + "/branches/" + encodeURIComponent(this.branch)
-      });
-      const sha = res.data && res.data.commit && res.data.commit.sha;
-      if (!sha) throw new Error("分支响应缺少 commit.sha");
-      return { sha };
-    } catch (err) {
-      throw this._wrap(err, "getBranchHead", "读取分支 HEAD 失败");
-    }
-  }
-  async getCommit(shaOrRef) {
-    try {
-      const res = await this.http.request({
-        path: this._repoPath() + "/commits/" + encodeURIComponent(shaOrRef)
-      });
-      return _GiteeProvider._mapCommit(res.data);
-    } catch (err) {
-      throw this._wrap(err, "getCommit", "读取提交失败(" + shaOrRef + ")");
-    }
-  }
-  async getTree(treeSha) {
-    try {
-      const res = await this.http.request({
-        path: this._repoPath() + "/git/trees/" + treeSha,
-        query: { recursive: 1 }
-      });
-      return (res.data.tree || res.data || []).map((t) => ({
-        path: t.path,
-        mode: t.mode,
-        type: t.type,
-        sha: t.sha,
-        size: t.size || 0
-      }));
-    } catch (err) {
-      throw this._wrap(err, "getTree", "读取远端目录树失败");
-    }
-  }
-  async getBlob(blobSha) {
-    try {
-      const res = await this.http.request({
-        path: this._repoPath() + "/git/blobs/" + blobSha
-      });
-      const b64 = res.data.content || "";
-      return {
-        sha: res.data.sha,
-        size: res.data.size,
-        contentBase64: b64,
-        bytes: GitProvider.base64ToBytes(b64)
-      };
-    } catch (err) {
-      throw this._wrap(err, "getBlob", "读取远端文件内容失败");
-    }
-  }
-  async getFileContent(path, ref) {
-    try {
-      const res = await this.http.request({
-        path: this._repoPath() + "/contents/" + encodePath(path),
-        query: { ref }
-      });
-      const data = res.data;
-      const b64 = data && data.content || "";
-      const bytes = GitProvider.base64ToBytes(b64);
-      return {
-        sha: data && data.sha || "",
-        size: data && data.size || 0,
-        contentBase64: b64,
-        bytes,
-        text: GitProvider.bytesToText(bytes)
-      };
-    } catch (err) {
-      if (err instanceof SyncError && err.httpStatus === 404) {
-        throw new SyncError({
-          category: SyncErrorCategory.GIT,
-          code: "FILE_NOT_FOUND",
-          operation: "getFileContent",
-          httpStatus: 404,
-          path,
-          message: "远端文件不存在: " + path,
-          retryable: false,
-          recoverable: true,
-          cause: err
-        });
-      }
-      throw this._wrap(err, "getFileContent", "读取远端文件失败(" + path + ")");
-    }
-  }
-  async compareCommits(baseRef, headRef) {
-    try {
-      const res = await this.http.request({
-        path: this._repoPath() + "/compare",
-        query: { base: baseRef, head: headRef }
-      });
-      return (res.data.files || []).map((f) => ({ filename: f.filename, status: f.status, sha: f.sha }));
-    } catch (err) {
-      if (err instanceof SyncError && err.httpStatus === 404) return [];
-      throw this._wrap(err, "compareCommits", "提交对比失败");
-    }
-  }
-  async listCommits(query = {}) {
-    try {
-      const res = await this.http.request({
-        path: this._repoPath() + "/commits",
-        query: {
-          sha: query.sha,
-          path: query.path,
-          since: query.since,
-          until: query.until,
-          per_page: query.perPage,
-          page: query.page
-        }
-      });
-      return (res.data || []).map((c) => _GiteeProvider._mapCommit(c));
-    } catch (err) {
-      throw this._wrap(err, "listCommits", "读取提交列表失败");
-    }
-  }
-  /** Gitee: listCommits 响应头含 total_page/total_count,首提交取最后一页 */
-  async getInitialCommit() {
-    try {
-      const first = await this.http.request({
-        path: this._repoPath() + "/commits",
-        query: { sha: this.branch, per_page: 1, page: 1 }
-      });
-      if (!Array.isArray(first.data) || first.data.length === 0) return null;
-      let lastPage = 1;
-      if (first.headers && typeof first.headers.get === "function") {
-        const tp = Number(first.headers.get("total_page"));
-        const tc = Number(first.headers.get("total_count"));
-        lastPage = !isNaN(tp) && tp > 0 ? tp : !isNaN(tc) && tc > 0 ? tc : 1;
-      }
-      if (lastPage <= 1) return _GiteeProvider._mapCommit(first.data[0]);
-      const last = await this.http.request({
-        path: this._repoPath() + "/commits",
-        query: { sha: this.branch, per_page: 1, page: lastPage }
-      });
-      return _GiteeProvider._mapCommit(last.data[0]);
-    } catch (err) {
-      throw this._wrap(err, "getInitialCommit", "读取分支首个提交失败");
-    }
-  }
-  // ---------- 写入: 逐文件 contents API ----------
-  /** 单文件创建/更新。existingSha 为空表示创建,否则更新 */
-  async putFileContent(path, bytes, { message, branch, existingSha }) {
-    const body = {
-      content: GitProvider.bytesToBase64(bytes),
-      branch: branch || this.branch,
-      message: message || "sync: update " + path
-    };
-    if (existingSha) body.sha = existingSha;
-    try {
-      const res = await this.http.request({
-        path: this._repoPath() + "/contents/" + encodePath(path),
-        method: existingSha ? "PUT" : "POST",
-        body
-      });
-      const commit = res.data && res.data.commit;
-      return { path, sha: res.data && res.data.content && res.data.content.sha, commitSha: commit && commit.sha };
-    } catch (err) {
-      if (err instanceof SyncError && err.httpStatus === 404 && existingSha) {
-        throw new SyncError({
-          category: SyncErrorCategory.REMOTE_CHANGED,
-          code: "TARGET_GONE",
-          operation: "putFileContent",
-          httpStatus: 404,
-          path,
-          message: "远端文件在写入前已不存在: " + path,
-          retryable: true,
-          recoverable: false,
-          cause: err
-        });
-      }
-      if (err instanceof SyncError && (err.httpStatus === 409 || err.httpStatus === 422)) {
-        throw new SyncError({
-          category: SyncErrorCategory.REMOTE_CHANGED,
-          code: "NON_FAST_FORWARD",
-          operation: "putFileContent",
-          httpStatus: err.httpStatus,
-          path,
-          message: "远端已更新,写入被拒绝: " + path,
-          retryable: true,
-          recoverable: false,
-          cause: err
-        });
-      }
-      throw this._wrap(err, "putFileContent", "远端文件写入失败(" + path + ")");
-    }
-  }
-  /** 单文件删除 */
-  async deleteFileContent(path, { message, branch, sha }) {
-    try {
-      await this.http.request({
-        path: this._repoPath() + "/contents/" + encodePath(path),
-        method: "DELETE",
-        query: { sha, branch: branch || this.branch, message: message || "sync: delete " + path },
-        body: { sha, branch: branch || this.branch, message: message || "sync: delete " + path }
-      });
-      return { path };
-    } catch (err) {
-      if (err instanceof SyncError && err.httpStatus === 404) {
-        throw new SyncError({
-          category: SyncErrorCategory.REMOTE_CHANGED,
-          code: "TARGET_GONE",
-          operation: "deleteFileContent",
-          httpStatus: 404,
-          path,
-          message: "远端文件已不存在,无需删除: " + path,
-          retryable: true,
-          recoverable: false,
-          cause: err
-        });
-      }
-      throw this._wrap(err, "deleteFileContent", "远端文件删除失败(" + path + ")");
-    }
-  }
-  /**
-   * 原子能力声明: Gitee 无服务端 CAS,拒绝走 updateRef 契约,
-   * 引擎据此选择逐文件写入 + 操作日志路径。
-   */
-  async _updateRefRaw() {
-    throw new SyncError({
-      category: SyncErrorCategory.GIT,
-      code: "ATOMIC_WRITE_UNSUPPORTED",
-      operation: "updateBranchRef",
-      message: "Gitee 不支持原子引用更新,请使用逐文件写入路径",
-      retryable: false,
-      recoverable: false
-    });
-  }
-  /**
-   * 执行逐文件操作序列(确定性顺序,不并行)。
-   * @param {Array<{op:"create"|"update"|"delete", path, bytes?, remoteSha?}>} operations
-   * @param {object} opts {message, branch}
-   * @returns {Promise<{operations:Array, partialFailure:SyncError|null}>}
-   *   任一失败时: 已完成的操作保留在日志中,错误抛出 PARTIAL_REMOTE_WRITE。
-   */
-  async applyFileOperations(operations, { message, branch } = {}) {
-    const log = [];
-    let headBefore = { sha: "" };
-    try {
-      headBefore = await this.getBranchHead();
-    } catch (err) {
-      if (!(err instanceof SyncError && err.httpStatus === 404)) throw err;
-    }
-    for (const op of operations) {
-      const entry = {
-        op: op.op,
-        path: op.path,
-        beforeSha: op.remoteSha || null,
-        afterSha: null,
-        headBefore: headBefore.sha,
-        headAfter: null,
-        at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-      try {
-        if (op.op === "delete") {
-          await this.deleteFileContent(op.path, { message, branch, sha: op.remoteSha });
-        } else {
-          const result = await this.putFileContent(op.path, op.bytes, {
-            message,
-            branch,
-            existingSha: op.op === "update" ? op.remoteSha : void 0
-          });
-          entry.afterSha = result.sha;
-          entry.commitSha = result.commitSha;
-        }
-      } catch (err) {
-        entry.error = err && err.message || String(err);
-        log.push(entry);
-        const headAfter2 = await this.getBranchHead().catch(() => ({ sha: "" }));
-        for (const e of log) e.headAfter = headAfter2.sha;
-        throw new SyncError({
-          category: SyncErrorCategory.GIT,
-          code: "PARTIAL_REMOTE_WRITE",
-          operation: "applyFileOperations",
-          path: op.path,
-          message: "远端写入中途失败(" + log.length + "/" + operations.length + " 已完成),本轮不标记成功: " + op.path,
-          detail: JSON.stringify(log).slice(0, 2e3),
-          retryable: false,
-          recoverable: true,
-          cause: err
-        });
-      }
-      log.push(entry);
-    }
-    const headAfter = await this.getBranchHead().catch(() => ({ sha: "" }));
-    for (const e of log) e.headAfter = headAfter.sha;
-    return { operations: log, partialFailure: null, remoteHead: headAfter.sha };
-  }
-};
-
 // src/sync/sync-planner.js
 var PlanAction = Object.freeze({
   UPLOAD_CREATE: "upload_create",
@@ -1666,41 +1374,27 @@ var SyncPlanner = class {
     };
     for (const path of allPaths) {
       const override = overrides.get(path);
-      if (override) {
-        this._applyOverride(plan, path, override, {
-          baseEntry: baseEntries.get(path),
-          remoteEntry: remoteEntries.get(path),
-          localExists: localSet.has(path),
-          localShas
-        });
-        continue;
-      }
-      if (mode === "remote_over_local") {
-        this._applyOverride(plan, path, "keep_remote", {
-          baseEntry: baseEntries.get(path),
-          remoteEntry: remoteEntries.get(path),
-          localExists: localSet.has(path),
-          localShas
-        });
-        continue;
-      }
-      if (mode === "local_over_remote") {
-        this._applyOverride(plan, path, "keep_local", {
-          baseEntry: baseEntries.get(path),
-          remoteEntry: remoteEntries.get(path),
-          localExists: localSet.has(path),
-          localShas
-        });
-        continue;
-      }
-      await this._decideAuto(plan, path, {
+      const ctx = {
         baseEntry: baseEntries.get(path),
         remoteEntry: remoteEntries.get(path),
         localExists: localSet.has(path),
         localShas,
         enumErrorOccurred,
         bootstrap: opts.bootstrap === true
-      });
+      };
+      if (override) {
+        this._applyOverride(plan, path, override, ctx);
+        continue;
+      }
+      if (mode === "remote_over_local") {
+        this._applyOverride(plan, path, "keep_remote", ctx);
+        continue;
+      }
+      if (mode === "local_over_remote") {
+        this._applyOverride(plan, path, "keep_local", ctx);
+        continue;
+      }
+      await this._decideAuto(plan, path, ctx);
     }
     return plan;
   }
@@ -1768,7 +1462,7 @@ var SyncPlanner = class {
     if (localState === "changed" && remoteState === "changed") {
       const localSha = localShas.get(path);
       if (localSha && localSha === remoteEntry.sha) {
-        plan.uploads.push({ path, op: "update" });
+        plan.unchanged += 1;
         return;
       }
       if (isMergeable(path)) {
@@ -1807,9 +1501,10 @@ var SyncPlanner = class {
   }
   /**
    * 用户显式决策/强制方向: 覆盖三方矩阵。
-   * 「接受本地/远端」不是无条件覆盖: 仍受删除守卫与枚举异常约束。
+   * 「接受本地/远端」不是无条件覆盖: 删除远端仍受枚举完整性约束——
+   * 本地枚举异常时"以本地为准"可能漏扫真实存在的本地文件,禁止据此删除远端(#2)。
    */
-  _applyOverride(plan, path, decision, { baseEntry, remoteEntry, localExists, localShas }) {
+  _applyOverride(plan, path, decision, { baseEntry, remoteEntry, localExists, localShas, enumErrorOccurred }) {
     if (decision === "keep_local") {
       if (localExists) {
         const sha = localShas.get(path);
@@ -1820,6 +1515,10 @@ var SyncPlanner = class {
         }
         plan.uploads.push({ path, op: baseEntry ? "update" : "create" });
       } else if (remoteEntry) {
+        if (enumErrorOccurred) {
+          plan.skippedDeletes.push({ path, reasons: ["本地枚举异常,拒绝按强制方向删除远端"] });
+          return;
+        }
         plan.deletionsRemote.push({ path, remoteSha: remoteEntry.sha });
       } else {
         plan.unchanged += 1;
@@ -2157,10 +1856,10 @@ var CommitBuilder = class {
    * 构建提交批次。
    * @param {object} opts {operationId, uploads:[{path, bytes}], deletionsRemote:[{path, remoteSha}]}
    * @returns {{batches:Array, skipped:Array}}
-   *   github 批次: {entries:[{path,sha,mode}], deletePaths:[...], size, message, part, total}
-   *   gitee 批次:  {operations:[{op,path,bytes,remoteSha}], message, part, total}
+   *   批次: {uploads, deletions, deletePaths, size, message, part, total}
+   *   deletePaths: [{path, sha}] 供 GitHub 树删除(sha=null 表示删除)
    */
-  build({ operationId, uploads = [], deletionsRemote = [], provider }) {
+  build({ operationId, uploads = [], deletionsRemote = [] }) {
     const skipped = [];
     const oversize = uploads.filter((u) => this._encodedSize(u.bytes) > this.requestLimit);
     for (const item of oversize) {
@@ -2180,31 +1879,27 @@ var CommitBuilder = class {
       uploads: chunk.uploads,
       deletions: chunk.deletions,
       message: this._message(operationId, chunk, idx + 1, chunks.length),
-      github: provider === "github" ? chunk.github : null,
-      gitee: provider === "gitee" ? chunk.gitee : null
+      deletePaths: chunk.deletePaths
     }));
     return { batches, skipped };
   }
   _chunk(uploads, deletions) {
     const chunks = [];
-    let current = { uploads: [], deletions: [], size: 0, github: { entries: [], deletePaths: [] }, gitee: { operations: [] } };
+    let current = { uploads: [], deletions: [], size: 0, deletePaths: [] };
     const flush = () => {
       if (current.uploads.length === 0 && current.deletions.length === 0) return;
       chunks.push(current);
-      current = { uploads: [], deletions: [], size: 0, github: { entries: [], deletePaths: [] }, gitee: { operations: [] } };
+      current = { uploads: [], deletions: [], size: 0, deletePaths: [] };
     };
     for (const item of uploads) {
       const size = item.bytes ? item.bytes.length : 0;
       if (current.size + size > this.batchByteLimit && current.uploads.length > 0) flush();
       current.uploads.push(item);
       current.size += size;
-      current.github.entries.push({ path: item.path, sha: null, mode: "100644" });
-      current.gitee.operations.push({ op: item.op === "create" ? "create" : "update", path: item.path, bytes: item.bytes, remoteSha: item.remoteSha || null });
     }
     for (const d of deletions) {
       current.deletions.push(d);
-      current.github.deletePaths.push({ path: d.path, sha: d.remoteSha });
-      current.gitee.operations.push(d);
+      current.deletePaths.push({ path: d.path, sha: d.remoteSha });
     }
     flush();
     return chunks;
@@ -2226,6 +1921,7 @@ var CommitBuilder = class {
 // src/sync/conflict-service.js
 var CONFLICT_FILE = "sync-conflicts.json";
 var SNAPSHOT_BYTE_LIMIT = 5 * 1024 * 1024;
+var KEEP_HISTORY_PER_REPO = 16;
 var ConflictService = class {
   constructor(plugin) {
     this.plugin = plugin;
@@ -2274,6 +1970,7 @@ var ConflictService = class {
     }
     this.sets[opts.operationId] = set;
     await this._persist();
+    await this.prune(opts.repoKey);
     return set;
   }
   /** 单文件决策: keep_local | keep_remote | resolved(用户已编辑) */
@@ -2304,6 +2001,27 @@ var ConflictService = class {
       set.status = "closed";
       await this._persist();
     }
+  }
+  /**
+   * 清理单仓库的历史冲突集(#4): 保留所有 open 集与最近的若干历史集,
+   * 删除更早的 closed/decided/superseded 集,避免文件随冲突轮次无限增长。
+   */
+  async prune(repoKey) {
+    const entries = Object.values(this.sets).filter((s) => s.repoKey === repoKey);
+    if (entries.length <= KEEP_HISTORY_PER_REPO) return;
+    entries.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    const keep = /* @__PURE__ */ new Set();
+    let keptHistory = 0;
+    for (const s of entries) {
+      if (s.status === "open" || keptHistory < KEEP_HISTORY_PER_REPO) {
+        keep.add(s.operationId);
+        if (s.status !== "open") keptHistory += 1;
+      }
+    }
+    for (const key of Object.keys(this.sets)) {
+      if (this.sets[key].repoKey === repoKey && !keep.has(key)) delete this.sets[key];
+    }
+    await this._persist();
   }
   _capSnapshots(snapshots) {
     if (!snapshots) return null;
@@ -2499,6 +2217,8 @@ var TRANSITIONS = Object.freeze({
   ],
   [SyncState.FETCHING_REMOTE]: [
     SyncState.RESOLVING_BASE,
+    SyncState.CONFLICT_PAUSED,
+    // 远端读取 404 但已有确认基准(H1): 拒绝按空仓库处理,交恢复向导
     SyncState.FAILED,
     SyncState.CANCELLED
   ],
@@ -2656,6 +2376,10 @@ var SyncEngine = class {
   _emit(name, payload) {
     if (this.events) this.events.emit(name, payload);
   }
+  /** markdown 模式仅影响思源笔记文档,其余文件恒为 raw */
+  _docFormat(path) {
+    return this.config.syncFileType === "markdown" && /\.sy$/i.test(path) ? "markdown" : "raw";
+  }
   async run(ctx) {
     try {
       transition(ctx, SyncState.CHECKING);
@@ -2665,36 +2389,51 @@ var SyncEngine = class {
       this._emit("engine:phase", { ctx, state: SyncState.SNAPSHOTTING_LOCAL });
       const scan = await this.workspace.scan({ range: this.config.syncRange });
       const localShas = /* @__PURE__ */ new Map();
+      const rawShas = /* @__PURE__ */ new Map();
       for (const file of scan.files) {
         const bytes = await this._readLocalBytes(file.path);
-        localShas.set(file.path, bytes ? await this.provider.gitBlobSha(bytes) : null);
+        const rawSha = bytes ? await this.provider.gitBlobSha(bytes) : null;
+        rawShas.set(file.path, rawSha);
+        localShas.set(file.path, await this._planSha(file.path, rawSha));
       }
+      ctx.localShas = localShas;
+      ctx.snapshotRawShas = rawShas;
       ctx.localSnapshotId = ctx.id;
       transition(ctx, SyncState.FETCHING_REMOTE);
       this._emit("engine:phase", { ctx, state: SyncState.FETCHING_REMOTE });
+      const confirmedBaseSha = this.metadataStore.getBaseCommit(this.config.repoKey);
+      const forcedByWizard = (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution") && (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
       let remoteHead = null;
+      let remoteEntries = /* @__PURE__ */ new Map();
       try {
         remoteHead = await this.provider.getBranchHead();
         ctx.observedRemoteHead = remoteHead.sha;
         const remoteCommit = await this.provider.getCommit(remoteHead.sha);
-        var remoteEntries = await this._treeMap(await this.provider.getTree(remoteCommit.treeSha));
+        remoteEntries = await this._treeMap(await this.provider.getTree(remoteCommit.treeSha));
       } catch (err) {
-        if (err instanceof SyncError && err.httpStatus === 404) {
-          ctx.remoteHeadless = true;
-          remoteHead = null;
-          var remoteEntries = /* @__PURE__ */ new Map();
-        } else {
-          throw err;
+        if (!(err instanceof SyncError && err.httpStatus === 404)) throw err;
+        if (confirmedBaseSha && !forcedByWizard) {
+          ctx.baseUnresolved = true;
+          ctx.conflicts = [{
+            path: "__base__",
+            reason: "BASE_UNRESOLVED",
+            detail: "远端状态读取返回 404(分支/提交/树),但本机已有确认基准 " + String(confirmedBaseSha).slice(0, 8) + ",拒绝按空仓库处理。请确认远端分支/仓库状态后通过恢复向导处理"
+          }];
+          transition(ctx, SyncState.CONFLICT_PAUSED, "BASE_UNRESOLVED");
+          finish(ctx, { state: SyncState.CONFLICT_PAUSED, result: { paused: true, kind: "BASE_UNRESOLVED" } });
+          return ctx.result;
         }
+        ctx.remoteHeadless = true;
+        remoteHead = null;
+        remoteEntries = /* @__PURE__ */ new Map();
       }
       remoteEntries = this._withoutIgnoredEntries(remoteEntries);
-      const forcedByWizard = (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution") && (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
       if (forcedByWizard) {
         return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas);
       }
       transition(ctx, SyncState.RESOLVING_BASE);
       this._emit("engine:phase", { ctx, state: SyncState.RESOLVING_BASE });
-      const baseResolution = await this._resolveBase(ctx, remoteHead ? remoteHead.sha : null);
+      const baseResolution = await this._resolveBase(ctx, remoteHead ? remoteHead.sha : null, remoteEntries, scan);
       if (baseResolution.unresolved) {
         ctx.baseUnresolved = true;
         ctx.conflicts = [{ path: "__base__", reason: "BASE_UNRESOLVED", detail: baseResolution.reason }];
@@ -2723,9 +2462,9 @@ var SyncEngine = class {
       ctx.plan = plan;
       transition(ctx, SyncState.MERGING);
       this._emit("engine:phase", { ctx, state: SyncState.MERGING });
-      await this._runMerges(ctx, plan, baseEntries, remoteEntries);
+      await this._runMerges(ctx, plan, baseEntries);
       if (plan.conflicts.length > 0) {
-        await this._saveConflicts(ctx, plan, baseEntries, remoteEntries);
+        await this._saveConflicts(ctx, plan);
         transition(ctx, SyncState.CONFLICT_PAUSED, "conflicts=" + plan.conflicts.length);
         finish(ctx, {
           state: SyncState.CONFLICT_PAUSED,
@@ -2741,7 +2480,7 @@ var SyncEngine = class {
       const remoteWrites = plan.uploads.length + plan.deletionsRemote.length;
       if (remoteWrites === 0) {
         await this._applyLocalChanges(ctx, plan);
-        await this._rebuildManifest(ctx, plan);
+        await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
         if (remoteHead) {
           await this.metadataStore.setConfirmedCommit(this.config.repoKey, remoteHead.sha, ctx.id);
         }
@@ -2754,19 +2493,16 @@ var SyncEngine = class {
       const { batches, skipped } = this.commitBuilder.build({
         operationId: ctx.id,
         uploads: await this._materializeUploads(ctx, plan),
-        deletionsRemote: plan.deletionsRemote,
-        provider: this.provider.platform
+        deletionsRemote: plan.deletionsRemote
       });
       ctx.skippedLarge = skipped;
-      let finalSha;
       if (batches.length === 0) {
-        finalSha = remoteHead ? remoteHead.sha : null;
-      } else if (this.provider.platform === "github") {
-        finalSha = await this._pushAtomic(ctx, batches, remoteEntries);
-      } else {
-        finalSha = await this._pushPerFile(ctx, batches);
+        await this._applyLocalChanges(ctx, plan);
+        await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
+        throw this._skippedError(skipped, plan, "远端写入全部被跳过");
       }
-      if (batches.length > 0 && !finalSha) {
+      const push = await this._pushAtomic(ctx, batches);
+      if (!push || !push.finalSha) {
         throw new SyncError({
           category: SyncErrorCategory.REMOTE_CHANGED,
           code: "PUSH_UNCONFIRMED",
@@ -2777,8 +2513,14 @@ var SyncEngine = class {
         });
       }
       await this._applyLocalChanges(ctx, plan);
-      await this._rebuildManifest(ctx, plan);
-      const confirmedSha = finalSha || (remoteHead ? remoteHead.sha : null);
+      await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: plan.deletionsRemote.length > 0 });
+      if (skipped.length > 0) {
+        if (push.baseSha) {
+          await this.metadataStore.setConfirmedCommit(this.config.repoKey, push.baseSha, ctx.id);
+        }
+        throw this._skippedError(skipped, plan, "部分大文件未上传,本轮不标记完整成功");
+      }
+      const confirmedSha = push.baseSha || push.finalSha;
       if (confirmedSha) {
         await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
       }
@@ -2818,6 +2560,17 @@ var SyncEngine = class {
       throw new SyncError({ category: SyncErrorCategory.AUTH, phase: SyncState.CHECKING, message: "Token 未配置", recoverable: true });
     }
   }
+  _skippedError(skipped, plan, prefix) {
+    const paths = (skipped || []).map((s) => s.path).slice(0, 20).join(", ");
+    return new SyncError({
+      category: SyncErrorCategory.LARGE_FILE,
+      code: skipped && skipped.length > 0 && plan && plan.uploads.length + plan.deletionsRemote.length === skipped.length ? "SKIPPED_ALL_UPLOADS" : "SKIPPED_LARGE_FILES",
+      operation: "commit",
+      message: prefix + "(" + (skipped || []).length + " 个): " + paths,
+      retryable: false,
+      recoverable: true
+    });
+  }
   async _treeMap(entries) {
     const map = /* @__PURE__ */ new Map();
     for (const e of entries || []) {
@@ -2827,55 +2580,79 @@ var SyncEngine = class {
     return map;
   }
   /**
-   * BASE 解析(2.0 方案 §7.3):
-   * - 确认基准存在且远端可达 → 使用;
-   * - 提交丢失 → 尝试合并基重建;
-   * - 无法证明共同祖先 → BASE_UNRESOLVED(不自动选边);
-   * - 首次同步: 空仓库(BASE=null)直接进入;远端已有内容则交由首同步向导。
+   * 本地内容的规划 sha:
+   * - raw 模式: 原始 .sy/文件字节的 git blob sha(与远端一致);
+   * - markdown 模式的 .sy: 以"内核导出 md(去 front-matter)"为 canonical 表示计算 sha,
+   *   保证与远端 md 内容可直接比较(M4: 不得一边比 raw、一边比 md)。
+   * 导出失败(文档缺失/非文档)时返回 null,由规划器退化为字节比较并显式进入冲突/失败路径。
    */
-  async _resolveBase(ctx, remoteHeadSha) {
+  async _planSha(path, rawSha) {
+    if (this._docFormat(path) !== "markdown" || rawSha === null) return rawSha;
+    try {
+      const blob = await this.contentAdapter.readFileBlob(path, "markdown");
+      if (!blob) return null;
+      return await this.provider.gitBlobSha(new Uint8Array(await blob.arrayBuffer()));
+    } catch (err) {
+      return null;
+    }
+  }
+  /** 合并/冲突快照用的本地内容(与 _planSha 同一种 canonical 表示) */
+  async _mergeLocalBytes(path) {
+    if (this._docFormat(path) !== "markdown") return this._readLocalBytes(path);
+    try {
+      const blob = await this.contentAdapter.readFileBlob(path, "markdown");
+      return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+    } catch (err) {
+      return null;
+    }
+  }
+  /**
+   * BASE 解析:
+   * - 确认基准存在且远端可达 → 使用;
+   * - 仅 404(提交丢失)才尝试合并基重建;5xx/限流/网络错误必须上抛进入重试,不得折叠为 BASE_UNRESOLVED;
+   * - 无法证明共同祖先 → BASE_UNRESOLVED(不自动选边);
+   * - 首次同步: 本地为空且远端有内容 → 以远端 HEAD 树为事实做引导下载(H2: 绝不取"最早提交"当基准);
+   *   空仓库(无 HEAD)允许首推;双方都有内容则交向导。
+   */
+  async _resolveBase(ctx, remoteHeadSha, remoteEntries, scan) {
     const repoKey = this.config.repoKey;
     const baseSha = this.metadataStore.getBaseCommit(repoKey);
     if (baseSha) {
+      let baseCommit;
       try {
-        const baseCommit = await this.provider.getCommit(baseSha);
-        return { baseEntries: await this._treeMap(await this.provider.getTree(baseCommit.treeSha)), baseSha };
+        baseCommit = await this.provider.getCommit(baseSha);
       } catch (err) {
-        const mergeBase = await this.provider.getMergeBase(baseSha, remoteHeadSha);
-        if (mergeBase) {
-          const mbCommit = await this.provider.getCommit(mergeBase);
-          ctx.baseRebuiltFrom = mergeBase;
-          return { baseEntries: await this._treeMap(await this.provider.getTree(mbCommit.treeSha)), baseSha: mergeBase };
+        if (!(err instanceof SyncError && err.httpStatus === 404)) throw err;
+        let mergeBase;
+        try {
+          mergeBase = await this.provider.getMergeBase(baseSha, remoteHeadSha);
+        } catch (mergeErr) {
+          throw mergeErr;
         }
-        return { unresolved: true, reason: "确认基准 " + baseSha.slice(0, 8) + " 在远端不可访问,且找不到共同祖先" };
+        if (!mergeBase) {
+          return { unresolved: true, reason: "确认基准 " + baseSha.slice(0, 8) + " 在远端不可访问,且找不到共同祖先" };
+        }
+        const mbCommit = await this.provider.getCommit(mergeBase);
+        ctx.baseRebuiltFrom = mergeBase;
+        return { baseEntries: await this._treeMap(await this.provider.getTree(mbCommit.treeSha)), baseSha: mergeBase };
       }
+      return { baseEntries: await this._treeMap(await this.provider.getTree(baseCommit.treeSha)), baseSha };
     }
-    let initial = null;
-    try {
-      initial = await this.provider.getInitialCommit();
-    } catch (err) {
-      if (err instanceof SyncError && err.httpStatus === 404) initial = null;
-      else throw err;
-    }
-    if (!initial) {
+    if (!remoteHeadSha) {
       return { baseEntries: /* @__PURE__ */ new Map(), baseSha: null };
     }
-    const scan = await this.workspace.scan({ range: this.config.syncRange });
     if (scan.files.length === 0) {
-      return { baseEntries: await this._treeMap(await this.provider.getTree(initial.treeSha)), baseSha: initial.sha, bootstrapDownload: true };
+      return {
+        baseEntries: new Map(remoteEntries),
+        baseSha: remoteHeadSha,
+        bootstrapDownload: true
+      };
     }
     return {
       unresolved: true,
       reason: "首次同步: 本地与远端都有内容,无法证明共同基准,需要通过首同步向导明确选择"
     };
   }
-  /**
-   * 强制方向同步(2.0 方案 §7.3 恢复向导的执行体):
-   * - LOCAL_OVER_REMOTE(以本地为准): 上传全部本地文件,删除远端多余文件;
-   * - REMOTE_OVER_LOCAL(以远端为准): 下载全部远端文件,删除本地多余文件;
-   * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
-   * 空仓库 + 以远端为准 无远端事实可依,显式报错而非清空本地。
-   */
   /** 过滤基准树/远端树中的被忽略路径(匹配器由工作区适配器提供;缺失时不过滤) */
   _withoutIgnoredEntries(entries) {
     const matcher = this.workspace && typeof this.workspace.ignoreMatcher === "function" ? this.workspace.ignoreMatcher() : null;
@@ -2886,6 +2663,13 @@ var SyncEngine = class {
     }
     return out;
   }
+  /**
+   * 强制方向同步(恢复向导的执行体):
+   * - LOCAL_OVER_REMOTE(以本地为准): 上传全部本地文件,删除远端多余文件;
+   * - REMOTE_OVER_LOCAL(以远端为准): 下载全部远端文件,删除本地多余文件;
+   * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
+   * 本地为准方向若本地枚举异常,禁止删远端(可能因漏扫而误删)。
+   */
   async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {
@@ -2893,6 +2677,16 @@ var SyncEngine = class {
         category: SyncErrorCategory.REPOSITORY,
         phase: SyncState.RESOLVING_BASE,
         message: "远端分支为空,无法以远端为准同步",
+        recoverable: true
+      });
+    }
+    if (keepLocal && scan.enumErrorOccurred) {
+      throw new SyncError({
+        category: SyncErrorCategory.LOCAL_FILE,
+        code: "LOCAL_SCAN_INCOMPLETE",
+        phase: SyncState.RESOLVING_BASE,
+        message: "本地目录枚举异常,无法确认本地全貌,已中止'以本地为准'的覆盖同步",
+        retryable: false,
         recoverable: true
       });
     }
@@ -2908,7 +2702,7 @@ var SyncEngine = class {
       merges: [],
       conflicts: [],
       unchanged: 0,
-      skippedDeletes: 0
+      skippedDeletes: []
     };
     const localPaths = new Set(localShas.keys());
     const remotePaths = new Set(remoteEntries.keys());
@@ -2942,39 +2736,46 @@ var SyncEngine = class {
       }
     }
     ctx.plan = plan;
-    let finalSha = remoteHead ? remoteHead.sha : null;
+    let confirmedSha = remoteHead ? remoteHead.sha : null;
     if (keepLocal) {
-      transition(ctx, SyncState.COMMITTING);
-      this._emit("engine:phase", { ctx, state: SyncState.COMMITTING });
-      const { batches, skipped } = this.commitBuilder.build({
-        operationId: ctx.id,
-        uploads: await this._materializeUploads(ctx, plan),
-        deletionsRemote: plan.deletionsRemote,
-        provider: this.provider.platform
-      });
-      ctx.skippedLarge = skipped;
-      if (batches.length === 0) {
-        finalSha = remoteHead ? remoteHead.sha : null;
-      } else if (this.provider.platform === "github") {
-        finalSha = await this._pushAtomic(ctx, batches, remoteEntries);
-      } else {
-        finalSha = await this._pushPerFile(ctx, batches);
-      }
-      if (batches.length > 0 && !finalSha) {
-        throw new SyncError({
-          category: SyncErrorCategory.REMOTE_CHANGED,
-          code: "PUSH_UNCONFIRMED",
-          operation: "push",
-          message: "推送后无法确认远端引用状态,本轮不标记成功",
-          retryable: true,
-          recoverable: false
+      const remoteWrites = plan.uploads.length + plan.deletionsRemote.length;
+      if (remoteWrites > 0) {
+        transition(ctx, SyncState.COMMITTING);
+        this._emit("engine:phase", { ctx, state: SyncState.COMMITTING });
+        const { batches, skipped } = this.commitBuilder.build({
+          operationId: ctx.id,
+          uploads: await this._materializeUploads(ctx, plan),
+          deletionsRemote: plan.deletionsRemote
         });
+        ctx.skippedLarge = skipped;
+        if (batches.length === 0) {
+          await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
+          throw this._skippedError(skipped, plan, "强制方向(以本地为准)的远端写入全部被跳过");
+        }
+        const push = await this._pushAtomic(ctx, batches);
+        if (!push || !push.finalSha) {
+          throw new SyncError({
+            category: SyncErrorCategory.REMOTE_CHANGED,
+            code: "PUSH_UNCONFIRMED",
+            operation: "push",
+            message: "推送后无法确认远端引用状态,本轮不标记成功",
+            retryable: true,
+            recoverable: false
+          });
+        }
+        await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: plan.deletionsRemote.length > 0 });
+        if (skipped.length > 0) {
+          if (push.baseSha) {
+            await this.metadataStore.setConfirmedCommit(this.config.repoKey, push.baseSha, ctx.id);
+          }
+          throw this._skippedError(skipped, plan, "强制方向(以本地为准)部分大文件未上传,本轮不标记完整成功");
+        }
+        confirmedSha = push.baseSha || push.finalSha;
       }
     } else {
       await this._applyLocalChanges(ctx, plan);
+      await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
     }
-    await this._rebuildManifest(ctx, plan);
-    const confirmedSha = finalSha || (remoteHead ? remoteHead.sha : null);
     if (confirmedSha) {
       await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
     }
@@ -2982,12 +2783,22 @@ var SyncEngine = class {
     finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, confirmedSha, plan) });
     return ctx.result;
   }
-  async _runMerges(ctx, plan, baseEntries, remoteEntries) {
+  async _runMerges(ctx, plan) {
     for (const mergeItem of plan.merges) {
       const path = mergeItem.path;
       const baseBytes = mergeItem.baseSha ? (await this.provider.getBlob(mergeItem.baseSha)).bytes : null;
       const remoteBytes = (await this.provider.getBlob(mergeItem.remoteSha)).bytes;
-      const localBytes = await this._readLocalBytes(path);
+      const localBytes = await this._mergeLocalBytes(path);
+      if (!localBytes || localBytes.length === 0) {
+        plan.conflicts.push({
+          path,
+          reason: "本地内容读取失败(canonical 表示不可用),无法自动合并",
+          baseSha: mergeItem.baseSha,
+          localSha: null,
+          remoteSha: mergeItem.remoteSha
+        });
+        continue;
+      }
       const result = await this.merger.merge({
         path,
         base: baseBytes ? { bytes: baseBytes } : null,
@@ -2995,9 +2806,9 @@ var SyncEngine = class {
         remote: { bytes: remoteBytes }
       });
       if (result.merged) {
-        await this.contentAdapter.writeFileBlob(path, new Blob([result.content]), "raw", "update");
+        const format = this._docFormat(path);
+        await this.contentAdapter.writeFileBlob(path, new Blob([result.content]), format, "update");
         plan.uploads.push({ path, bytes: result.content, op: "update", merged: true });
-        plan.unchanged += 0;
       } else {
         plan.conflicts.push({
           path,
@@ -3010,12 +2821,12 @@ var SyncEngine = class {
     }
     plan.merges.length = 0;
   }
-  async _saveConflicts(ctx, plan, baseEntries, remoteEntries) {
+  async _saveConflicts(ctx, plan) {
     const conflicts = [];
     for (const c of plan.conflicts) {
       let snapshots = null;
       try {
-        const localBytes = await this._readLocalBytes(c.path);
+        const localBytes = await this._mergeLocalBytes(c.path);
         const remoteBytes = c.remoteSha ? (await this.provider.getBlob(c.remoteSha)).bytes : null;
         const baseBytes = c.baseSha ? (await this.provider.getBlob(c.baseSha)).bytes : null;
         snapshots = {
@@ -3043,7 +2854,7 @@ var SyncEngine = class {
         uploads.push(item);
         continue;
       }
-      const format = this._uploadFormat(item.path);
+      const format = this._docFormat(item.path);
       const blob = await this.contentAdapter.readFileBlob(item.path, format);
       if (!blob) {
         throw new SyncError({
@@ -3072,15 +2883,18 @@ var SyncEngine = class {
     }
     return uploads;
   }
-  _uploadFormat(path) {
-    if (this.config.syncFileType === "markdown" && /\.sy$/i.test(path)) return "markdown";
-    return "raw";
-  }
-  /** GitHub: 原子树提交 + 引用 CAS + 回读确认(空仓库时首推创建引用) */
-  async _pushAtomic(ctx, batches, remoteEntries) {
+  /**
+   * GitHub: 原子树提交 + 引用 CAS + 回读确认(空仓库时首推创建引用)。
+   * 漂移语义(H3): 我方提交已进入远端父链(并发写手已推进)时,确认成功但远端头包含
+   * 未在本机物化的并发内容——BASE 必须写"我方提交"(本地实际已物化的事实),
+   * 不能写未物化的并发远端头,否则下一轮会把本地旧内容当成"本地修改"重传、回滚并发修改。
+   * @returns {Promise<{finalSha:string, baseSha:string}>}
+   */
+  async _pushAtomic(ctx, batches) {
     let finalSha = null;
+    let baseSha = null;
     for (const batch of batches) {
-      if (batch.uploads.length === 0 && batch.github.deletePaths.length === 0) continue;
+      if (batch.uploads.length === 0 && batch.deletePaths.length === 0) continue;
       let headNow = null;
       try {
         headNow = await this.provider.getBranchHead();
@@ -3107,7 +2921,7 @@ var SyncEngine = class {
         const blobSha = await this.provider.createBlob(upload.bytes);
         entries.push({ path: upload.path, sha: blobSha, mode: "100644" });
       }
-      for (const dp of batch.github.deletePaths) {
+      for (const dp of batch.deletePaths) {
         entries.push({ path: dp.path, sha: null, mode: "100644" });
       }
       const tree = await this.provider.createTree(treeBaseSha, entries);
@@ -3121,11 +2935,12 @@ var SyncEngine = class {
       if (!headNow) {
         const confirmed = await this.provider.ensureBranchRef(commit.sha);
         finalSha = confirmed.confirmedSha;
+        baseSha = confirmed.drifted ? commit.sha : confirmed.confirmedSha;
         ctx.expectedRemoteHead = finalSha;
       } else {
+        let confirmed;
         try {
-          const confirmed = await this.provider.updateBranchRef(commit.sha, { expectedHead: headNow.sha });
-          finalSha = confirmed.confirmedSha;
+          confirmed = await this.provider.updateBranchRef(commit.sha, { expectedHead: headNow.sha });
         } catch (err) {
           const mapped = this.provider.mapUpdateRefFailure(err);
           try {
@@ -3136,43 +2951,31 @@ var SyncEngine = class {
           }
           throw mapped;
         }
+        finalSha = confirmed.confirmedSha;
+        baseSha = confirmed.drifted ? commit.sha : confirmed.confirmedSha;
       }
-      if (finalSha) ctx.expectedRemoteHead = finalSha;
+      ctx.expectedRemoteHead = finalSha;
     }
-    return finalSha;
+    return { finalSha, baseSha };
   }
-  /** Gitee: 逐文件写入 + 操作日志 + 部分失败显式化(空仓库由 Gitee 分支参数自动建分支) */
-  async _pushPerFile(ctx, batches) {
-    let lastHead = "";
-    let lastCommitSha = "";
-    for (const batch of batches) {
-      if (batch.gitee.operations.length === 0) continue;
-      if (ctx.state === SyncState.COMMITTING) {
-        transition(ctx, SyncState.PUSHING);
-      }
-      const result = await this.provider.applyFileOperations(batch.gitee.operations, { message: batch.message });
-      lastHead = result.remoteHead || lastHead;
-      const commits = (result.operations || []).map((o) => o.commitSha).filter(Boolean);
-      if (commits.length > 0) lastCommitSha = commits[commits.length - 1];
-    }
-    if (!lastHead) {
-      lastHead = lastCommitSha;
-    }
-    if (!lastHead) {
-      const head = await this.provider.getBranchHead();
-      lastHead = head.sha;
-    }
-    return lastHead;
-  }
-  /** 远端确认后应用本地侧变更(下载/本地删除),破坏性动作先备份 */
+  /**
+   * 远端确认后应用本地侧变更(下载/本地删除)。
+   * M5: 破坏性写入前复查本地与快照是否一致,同步期间被用户修改/新建的文件一律
+   * 中止覆盖,抛出可恢复错误,下一轮重新规划。
+   */
   async _applyLocalChanges(ctx, plan) {
-    const formatOf = (path) => this.config.syncFileType === "markdown" && /\.sy$/i.test(path) ? "markdown" : "raw";
     for (const item of plan.downloads) {
+      if (item.op === "update") {
+        await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
+      } else {
+        await this._assertLocalStillAbsent(ctx, item.path);
+      }
       const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
       const blob = new Blob([src.bytes]);
-      await this.contentAdapter.writeFileBlob(item.path, blob, formatOf(item.path), item.op === "create" ? "create" : "update");
+      await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), item.op === "create" ? "create" : "update");
     }
     for (const item of plan.deletionsLocal) {
+      await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
       await this.contentAdapter.removeFileWithBackup(item.path);
     }
     if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0) {
@@ -3180,9 +2983,60 @@ var SyncEngine = class {
       });
     }
   }
-  async _rebuildManifest(ctx, plan) {
+  /** 断言本地文件自快照以来未变化(sha 级复查);缺失即视为变化 */
+  async _assertLocalUnchanged(ctx, path, message) {
+    const snapshotSha = (ctx.snapshotRawShas || /* @__PURE__ */ new Map()).get(path);
+    if (snapshotSha === void 0) return;
+    await this._localShaOrThrow(path, snapshotSha, message);
+  }
+  /** 断言下载-create 目标在快照后仍未出现(出现即视为同步期间的新建,不得覆盖) */
+  async _assertLocalStillAbsent(ctx, path) {
+    const snapshotSha = (ctx.snapshotRawShas || /* @__PURE__ */ new Map()).get(path);
+    if (snapshotSha !== void 0 && snapshotSha !== null) return;
+    const bytes = await this._readLocalBytes(path);
+    if (bytes === null) return;
+    throw new SyncError({
+      category: SyncErrorCategory.CONFLICT,
+      code: "LOCAL_CHANGED",
+      operation: "applyLocalChanges",
+      path,
+      message: "同步期间本地新建了同名文件,拒绝用远端版本覆盖: " + path,
+      retryable: false,
+      recoverable: true
+    });
+  }
+  async _localShaOrThrow(path, snapshotSha, message) {
+    const bytes = await this._readLocalBytes(path);
+    const nowSha = bytes ? await this.provider.gitBlobSha(bytes) : null;
+    if (nowSha === snapshotSha) return;
+    throw new SyncError({
+      category: SyncErrorCategory.CONFLICT,
+      code: "LOCAL_CHANGED",
+      operation: "applyLocalChanges",
+      path,
+      message: message + ": " + path,
+      retryable: false,
+      recoverable: true
+    });
+  }
+  /**
+   * 重建本地清单(#1): manifest = 「当前本地存在的路径 ∪ 曾拥有且远端仍存在、本轮未删除的路径」。
+   * 语义区分"当前存在"与"曾经同步拥有": 本地删除被守卫拦下(枚举异常/范围变化)时,
+   * 路径不能从 manifest 消失——否则守卫证据永久丢失,该远端文件将永远无法再删除。
+   * 仅当远端已无此文件(删除已执行或远端本就没有)时才放弃拥有记录。
+   */
+  async _rebuildManifest(ctx, plan, remoteEntries = /* @__PURE__ */ new Map(), { deletionsExecuted = false } = {}) {
     const scan = await this.workspace.scan({ range: this.config.syncRange });
-    await this.manifestStore.replaceAll(scan.files.map((f) => f.path));
+    const localPaths = new Set(scan.files.map((f) => f.path));
+    const executedDeletes = deletionsExecuted ? new Set((plan.deletionsRemote || []).map((d) => d.path)) : /* @__PURE__ */ new Set();
+    const candidates = /* @__PURE__ */ new Set([...this.manifestStore.paths, ...remoteEntries.keys()]);
+    const retained = [];
+    for (const path of candidates) {
+      if (localPaths.has(path)) continue;
+      if (remoteEntries.has(path) && !executedDeletes.has(path)) retained.push(path);
+    }
+    const merged = scan.files.map((f) => f.path).concat(retained);
+    await this.manifestStore.replaceAll(merged);
   }
   _result(ctx, sha, plan) {
     return {
@@ -3194,8 +3048,9 @@ var SyncEngine = class {
       downloads: plan.downloads.length,
       deletionsRemote: plan.deletionsRemote.length,
       deletionsLocal: plan.deletionsLocal.length,
-      skippedDeletes: plan.skippedDeletes,
-      skippedLarge: ctx.skippedLarge || [],
+      skippedDeletes: plan.skippedDeletes.length,
+      skippedDeleteReasons: plan.skippedDeletes,
+      skippedLarge: (ctx.skippedLarge || []).length,
       unchanged: plan.unchanged,
       conflicts: 0
     };
@@ -3216,7 +3071,8 @@ var SyncController = class {
    *   makeEngineDeps: (ctx) => {provider, workspace, contentAdapter, metadataStore,
    *     manifestStore, conflictService, planner, merger, commitBuilder, events, config},
    *   repoInfo: () => {provider, owner, repo, branch, token},
-   *   autoSync: {pause(), resume(), markAutoTick()}
+   *   autoSync: {pause(), resume(), markAutoTick()},
+   *   conflictService?: 冲突集管理(成功后关闭该次操作集并清理)
    * }
    */
   constructor(deps) {
@@ -3228,6 +3084,7 @@ var SyncController = class {
     this.makeEngineDeps = deps.makeEngineDeps;
     this.repoInfo = deps.repoInfo;
     this.autoSync = deps.autoSync;
+    this.conflictService = deps.conflictService || null;
     this.logger = deps.logger || { info() {
     }, warn() {
     }, error() {
@@ -3236,7 +3093,7 @@ var SyncController = class {
     this.retryPolicy = new RetryPolicy({ enabled: false });
     this.state = SyncState.IDLE;
     this.lastContext = null;
-    this.conflictPaused = null;
+    this._conflictByRepo = /* @__PURE__ */ new Map();
     this._engineState = {};
     this.autoTick = false;
     this._autoSkipNotified = false;
@@ -3247,8 +3104,35 @@ var SyncController = class {
     try {
       const saved = await this.plugin.loadData(ENGINE_STATE_FILE);
       this._engineState = saved && typeof saved === "object" ? saved : {};
-      if (saved && saved.conflictPaused) {
-        this.conflictPaused = saved.conflictPaused;
+      const map = /* @__PURE__ */ new Map();
+      if (saved && saved.conflictByRepo && typeof saved.conflictByRepo === "object") {
+        for (const [key, record] of Object.entries(saved.conflictByRepo)) {
+          if (record && record.kind) map.set(key, record);
+        }
+      }
+      if (saved && saved.conflictPaused && saved.conflictPaused.kind) {
+        const legacy = saved.conflictPaused;
+        const target = legacy.repoKey || this.repoKey();
+        if (!map.has(target)) map.set(target, legacy);
+        delete this._engineState.conflictPaused;
+      }
+      if (this.conflictService) {
+        for (const set of this.conflictService.allOpenSets()) {
+          if (!set || !set.repoKey || map.has(set.repoKey)) continue;
+          const conflicts = (set.conflicts || []).filter((c) => c && c.path);
+          map.set(set.repoKey, {
+            kind: "FILE_CONFLICTS",
+            repoKey: set.repoKey,
+            operationId: set.operationId,
+            reason: "存在未处理冲突",
+            conflictCount: conflicts.length,
+            conflicts: conflicts.slice(0, 20).map((c) => ({ path: c.path, reason: c.reason || "" }))
+          });
+        }
+      }
+      this._conflictByRepo = map;
+      if (map.size > 0) {
+        this._persistState();
         this.state = SyncState.CONFLICT_PAUSED;
         this.events.emit("state:changed", { state: this.state, conflictPaused: this.conflictPaused });
       }
@@ -3266,8 +3150,13 @@ var SyncController = class {
   }
   _persistState(patch = {}) {
     this._engineState = Object.assign({}, this._engineState || {}, patch);
-    if (this.conflictPaused) this._engineState.conflictPaused = this.conflictPaused;
-    else delete this._engineState.conflictPaused;
+    const serialized = {};
+    for (const [key, record] of this._conflictByRepo) {
+      if (record) serialized[key] = record;
+    }
+    if (Object.keys(serialized).length > 0) this._engineState.conflictByRepo = serialized;
+    else delete this._engineState.conflictByRepo;
+    delete this._engineState.conflictPaused;
     this.plugin.saveData(ENGINE_STATE_FILE, this._engineState).catch((err) => {
       this.notify(this.i18n("sygspPersistFailed", "⚠️ 状态保存失败,重启后可能丢失暂停状态"), "error");
       console.warn("[SY-GSP] 状态持久化失败:", err && err.message);
@@ -3276,6 +3165,14 @@ var SyncController = class {
   /** 自动同步定时器回调前打标: 区分定时触发与手动触发 */
   markAutoTick() {
     this.autoTick = true;
+  }
+  repoKey() {
+    const info = this.repoInfo();
+    return SyncQueue.keyOf(info);
+  }
+  /** 当前仓库分支的暂停记录(旧插件代码依赖的字段形状保持不变) */
+  get conflictPaused() {
+    return this._conflictByRepo.get(this.repoKey()) || null;
   }
   isConflictPaused() {
     return !!this.conflictPaused;
@@ -3287,7 +3184,8 @@ var SyncController = class {
   async syncNow({ trigger = SyncTrigger.MANUAL, mode = SyncMode.AUTO, overrides = null } = {}) {
     const info = this.repoInfo();
     const key = SyncQueue.keyOf(info);
-    if (this.conflictPaused) {
+    const pausedRecord = this._conflictByRepo.get(key);
+    if (pausedRecord) {
       const isResolution = overrides !== null || mode !== SyncMode.AUTO;
       if (!isResolution) {
         const wasAuto = this.autoTick;
@@ -3297,9 +3195,11 @@ var SyncController = class {
             this._autoSkipNotified = true;
             this.notify(this.i18n("sygspPausedMsg", "⚠️ 同步冲突未处理,自动同步已暂停,请先处理冲突"), "error");
           }
+          this.logger.info("自动同步被暂停门拦截(" + pausedRecord.kind + "): " + key + " 未处理冲突,本轮跳过");
           return { skipped: true };
         }
-        this.events.emit("conflict:reopen", { conflictPaused: this.conflictPaused });
+        this.logger.warn("手动同步被暂停门拦截(" + pausedRecord.kind + "): " + key + ",已重新打开冲突处理入口;若确认冲突已处理,可用诊断面板的「解除暂停并手动同步一次」");
+        this.events.emit("conflict:reopen", { conflictPaused: pausedRecord });
         return { skipped: true, conflict: true };
       }
     }
@@ -3310,7 +3210,7 @@ var SyncController = class {
     }
     const ctx = createSyncContext({
       trigger,
-      mode: this.conflictPaused && overrides ? SyncMode.AUTO : mode,
+      mode: pausedRecord && overrides ? SyncMode.AUTO : mode,
       provider: info.provider,
       owner: info.owner,
       repo: info.repo,
@@ -3343,7 +3243,7 @@ var SyncController = class {
           }));
           return result;
         }
-        this.logger.info("同步完成 #" + ctx.id + " ↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) + " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0));
+        this.logger.info("同步完成 #" + ctx.id + " ↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) + " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) + " 拦删" + (result.skippedDeletes || 0) + " 超大" + (result.skippedLarge || 0));
         await this._onFinished(ctx, result);
         return result;
       } catch (err) {
@@ -3378,6 +3278,7 @@ var SyncController = class {
           });
         }
         const originTrigger = ctx.originTrigger || ctx.trigger;
+        const overrides = ctx.overrides || null;
         ctx = createSyncContext({
           trigger: SyncTrigger.RETRY,
           mode: ctx.mode,
@@ -3388,16 +3289,28 @@ var SyncController = class {
         });
         ctx.originTrigger = originTrigger;
         ctx.attempt = attempt;
+        if (overrides) ctx.overrides = overrides;
         this.lastContext = ctx;
       }
     }
   }
   async _onFinished(ctx, result) {
     this.state = SyncState.SUCCESS;
-    if (this.conflictPaused) {
-      this.conflictPaused = null;
+    const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+    const hadPause = this._conflictByRepo.has(key);
+    const pausedRecord = this._conflictByRepo.get(key) || null;
+    if (hadPause) {
+      this._conflictByRepo.delete(key);
       this._autoSkipNotified = false;
       this._persistState();
+      if (this.conflictService && pausedRecord) {
+        try {
+          await this.conflictService.closeSet(pausedRecord.operationId);
+          await this.conflictService.prune(key);
+        } catch (err) {
+          this.logger.warn("冲突集清理失败: " + (err && err.message || err));
+        }
+      }
       this.autoSync.resume();
       this.notify(this.i18n("sygspResolvedMsg", "✅ 冲突已处理,自动同步已恢复"), "info");
     }
@@ -3408,14 +3321,15 @@ var SyncController = class {
     if (ctx.state === SyncState.CONFLICT_PAUSED) {
       const kind = ctx.baseUnresolved ? "BASE_UNRESOLVED" : "FILE_CONFLICTS";
       const conflictList = (ctx.conflicts || []).filter((c) => c && c.path && c.path !== "__base__");
-      this.conflictPaused = {
+      const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+      this._conflictByRepo.set(key, {
         kind,
-        repoKey: this.repoKey(),
+        repoKey: key,
         operationId: ctx.id,
         reason: kind === "BASE_UNRESOLVED" ? ctx.conflicts[0] && ctx.conflicts[0].detail || "基准无法解析" : "存在未处理冲突",
         conflictCount: kind === "FILE_CONFLICTS" ? (ctx.conflicts || []).length : 0,
         conflicts: conflictList.slice(0, 20).map((c) => ({ path: c.path, reason: c.reason || c.detail || "" }))
-      };
+      });
       this._persistState();
       if (conflictList.length > 0) {
         this.logger.warn("冲突文件(" + conflictList.length + " 个): " + conflictList.slice(0, 20).map((c) => c.path + " (" + (c.reason || "") + ")").join("; ") + (conflictList.length > 20 ? " 等共 " + conflictList.length + " 个" : ""));
@@ -3429,10 +3343,6 @@ var SyncController = class {
     this.state = SyncState.FAILED;
     this.events.emit("state:changed", { state: this.state, ctx, error: syncErr });
     this.events.emit("sync:error", { ctx, error: syncErr });
-  }
-  repoKey() {
-    const info = this.repoInfo();
-    return SyncQueue.keyOf(info);
   }
   /** 用户冲突决策: 逐文件 keep_local/keep_remote → 重新规划执行 */
   async resolveConflicts(decisions) {
@@ -3455,13 +3365,17 @@ var SyncController = class {
     const mode = choice === "keep_local" ? SyncMode.LOCAL_OVER_REMOTE : SyncMode.REMOTE_OVER_LOCAL;
     const result = await this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, mode });
     if (result && result.result && result.result.success) {
-      this.conflictPaused = null;
-      this._persistState();
+      const key = this.repoKey();
+      if (this._conflictByRepo.has(key)) {
+        this._conflictByRepo.delete(key);
+        this._persistState();
+      }
     }
     return result;
   }
   dismissConflictPause() {
-    this.conflictPaused = null;
+    const key = this.repoKey();
+    this._conflictByRepo.delete(key);
     this._persistState();
     this.events.emit("state:changed", { state: this.state });
   }
@@ -3519,19 +3433,36 @@ var SyncMetadataStore = class {
   }
   /**
    * 写入确认基准(仅允许在远端确认成功后调用)。
+   * L5: 先改内存后持久化,持久化失败必须回滚内存——否则本轮"未确认成功"
+   * 的基准会留在内存里,被后续轮次当作已确认基准使用。
    */
   async setConfirmedCommit(repoKey, commitSha, operationId) {
+    const previous = this.data.repositories[repoKey];
     this.data.repositories[repoKey] = {
       lastConfirmedCommit: commitSha,
       lastSuccessfulAt: (/* @__PURE__ */ new Date()).toISOString(),
       lastOperationId: operationId || ""
     };
-    await this._persist();
+    try {
+      await this._persist();
+    } catch (err) {
+      if (previous === void 0) delete this.data.repositories[repoKey];
+      else this.data.repositories[repoKey] = previous;
+      throw err;
+    }
   }
   /** 记录旧版基准线索(仅诊断用,不作为基准) */
   async setLegacyHint(repoKey, hint) {
+    const hadKey = Object.prototype.hasOwnProperty.call(this.data.legacyHints, repoKey);
+    const previous = this.data.legacyHints[repoKey];
     if (hint) this.data.legacyHints[repoKey] = hint;
-    await this._persist();
+    try {
+      await this._persist();
+    } catch (err) {
+      if (!hadKey) delete this.data.legacyHints[repoKey];
+      else this.data.legacyHints[repoKey] = previous;
+      throw err;
+    }
   }
   getLegacyHint(repoKey) {
     return this.data.legacyHints[repoKey] || null;
@@ -3836,8 +3767,7 @@ function parseRepoAddress(addr) {
 
 // src/ui/settings-panel.js
 var PLATFORM_CONFIG_FILES = {
-  github: "plugin_config_git_sync_github",
-  gitee: "plugin_config_git_sync_gitee"
+  github: "plugin_config_git_sync_github"
 };
 var SETTING_DEFAULTS = Object.freeze({
   upload_platform: 0,
@@ -4062,8 +3992,9 @@ var SettingsPanelBuilder = class {
     this.onRepoFieldChanged = deps.onRepoFieldChanged;
     this.metadataStore = deps.metadataStore;
   }
+  /** 当前远端平台。Gitee 暂不支持,恒为 github */
   currentPlatform() {
-    return this.utils && Number(this.utils.get("upload_sub_platform")) === 1 ? "gitee" : "github";
+    return "github";
   }
   async build() {
     const t = this.i18n;
@@ -4077,6 +4008,11 @@ var SettingsPanelBuilder = class {
     });
     this._registerItems(t);
     await this.utils.load();
+    if (Number(this.utils.get("upload_sub_platform")) === 1) {
+      this.utils.set("upload_sub_platform", 0);
+      await this.utils.save();
+      this._legacyGiteeNormalized = true;
+    }
     const platform = this.currentPlatform();
     const platformFile = PLATFORM_CONFIG_FILES[platform] + ".json";
     const saved = await this.plugin.loadData(platformFile);
@@ -4085,6 +4021,16 @@ var SettingsPanelBuilder = class {
     }
     this._platformFile = platformFile;
     this._refreshBaseHints();
+    if (this._legacyGiteeNormalized) {
+      this.utils.addItem({
+        key: "giteeUnsupportedHint",
+        type: "hint",
+        direction: "row",
+        value: "",
+        title: "Gitee 暂不支持",
+        description: "检测到旧版 Gitee 配置,已切换为 GitHub 通道。Gitee 支持将在后续版本恢复;当前请填写 GitHub 仓库地址(历史 Gitee 数据文件已保留)"
+      });
+    }
     return this.utils;
   }
   _registerItems(t) {
@@ -4112,27 +4058,12 @@ var SettingsPanelBuilder = class {
       } }
     });
     u.addItem({
-      key: "upload_sub_platform",
-      type: "select",
-      value: val("upload_sub_platform"),
-      title: t.subGitPlatformType,
-      description: t.subGitplatformTypeDesc,
-      options: {
-        0: t.platform && t.platform.subPlatform && t.platform.subPlatform.git.githubAPI || "GitHub API",
-        1: t.platform && t.platform.subPlatform && t.platform.subPlatform.git.giteeAPI || "Gitee API"
-      },
-      action: {
-        callback: async () => {
-          const next = Number(u.take("upload_sub_platform"));
-          await this._savePlatformFile();
-          const nextFile = PLATFORM_CONFIG_FILES[next === 1 ? "gitee" : "github"] + ".json";
-          const data = await this.plugin.loadData(nextFile) || {};
-          for (const key of PER_PLATFORM_KEYS) u.set(key, data[key] !== void 0 ? data[key] : "");
-          this._platformFile = nextFile;
-          await this.utils.save();
-          if (this.onPlatformChanged) await this.onPlatformChanged();
-        }
-      }
+      key: "platformNote",
+      type: "hint",
+      direction: "row",
+      value: "",
+      title: t.platform && t.platform.git || "Git 仓库",
+      description: t.platform && t.platform.subPlatform && t.platform.subPlatform.git.githubAPI || "GitHub API(当前唯一支持的远端平台)"
     });
     u.addItem({
       key: "repository_address",
@@ -4359,12 +4290,16 @@ var NotificationService = class {
     this._badge("syncing");
   }
   syncSuccess(result, { automatic = false, successNotify = true } = {}) {
-    const detail = result ? " (↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) + " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) + ")" : "";
+    let detail = result ? " (↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) + " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) + ")" : "";
+    if (result && result.skippedDeletes > 0) detail += " 拦删" + result.skippedDeletes;
+    if (result && result.skippedLarge > 0) detail += " 超大跳过" + result.skippedLarge;
     if (automatic) {
       if (successNotify) this.toast(this.i18n && this.i18n.gSyncSuccessMsg || "✅ 同步成功" + detail, "info");
     } else {
       this.toast(this.i18n && this.i18n.gSyncSuccessMsg || "✅ 同步成功" + detail, "info");
     }
+    this._autoFailNotified = false;
+    this._lastAutoFailCategory = void 0;
     this._badge("success");
   }
   syncError(syncErr, { automatic = false } = {}) {
@@ -4591,6 +4526,9 @@ var DiagnosisPanel = class {
     this.runChecks = deps.runChecks;
     this.previewPlan = deps.previewPlan;
     this.getPausedConflicts = deps.getPausedConflicts || (() => []);
+    this.getPausedInfo = deps.getPausedInfo || (() => null);
+    this.onClearPause = deps.onClearPause || (async () => {
+    });
     this.onChooseBase = deps.onChooseBase;
     this.onFirstWriteConfirmed = deps.onFirstWriteConfirmed;
     this.notify = deps.notify;
@@ -4599,6 +4537,14 @@ var DiagnosisPanel = class {
   show({ mode = "diagnosis" } = {}) {
     const q2 = this.q;
     const t = this.i18n;
+    if (this.dialog) {
+      try {
+        this.dialog.destroy();
+      } catch (err) {
+        console.warn("[SY-GSP] 关闭旧诊断面板失败:", err && err.message);
+      }
+      this.dialog = null;
+    }
     this.dialog = new q2.Dialog({
       title: t && t.sygspDiagnosisTitle || "SY-GSP 只读诊断",
       content: '<div id="sygspDiagnosis" class="fn__flex-column" style="padding:16px;gap:8px;"></div>',
@@ -4681,6 +4627,33 @@ var DiagnosisPanel = class {
       }
       root.appendChild(box);
     }
+    const pausedInfo = this.getPausedInfo();
+    if (mode === "diagnosis" && pausedInfo && pausedInfo.kind) {
+      const bar = document.createElement("div");
+      bar.className = "b3-label fn__flex-column";
+      bar.style.cssText = "gap:8px;margin-top:8px;padding:10px;border:1px solid var(--b3-theme-error,#d23f31);border-radius:6px;";
+      const warn = document.createElement("div");
+      warn.className = "b3-label__text";
+      warn.style.color = "var(--b3-theme-error,#d23f31)";
+      warn.textContent = "⚠️ 当前处于同步暂停(" + pausedInfo.kind + (pausedInfo.conflictCount ? ", " + pausedInfo.conflictCount + " 个冲突文件" : "") + ")。请先通过菜单「处理冲突/恢复同步」解决;" + (pausedInfo.reason ? "\n原因: " + pausedInfo.reason : "");
+      bar.appendChild(warn);
+      const hint = document.createElement("div");
+      hint.className = "b3-label__text ft__smaller";
+      hint.textContent = "若确认冲突/基准问题已经处理(例如远端已恢复、冲突文件已手工对齐),可解除暂停立即同步一次;若仍存在冲突,引擎会重新检测并再次进入冲突处理。";
+      bar.appendChild(hint);
+      const clearBtn = this._btn("解除暂停并手动同步一次(请确认冲突已处理)", async () => {
+        clearBtn.disabled = true;
+        try {
+          await this.onClearPause();
+        } catch (err) {
+          this.notify("❌ " + String(err && err.message || err), "error");
+        } finally {
+          this.close();
+        }
+      }, "b3-button b3-button--text");
+      bar.appendChild(clearBtn);
+      root.appendChild(bar);
+    }
     if (mode === "base_recovery") {
       root.appendChild(this._baseRecoveryActions());
     } else if (mode === "first_sync") {
@@ -4749,18 +4722,43 @@ var DiagnosisPanel = class {
 };
 
 // src/ui/runtime-logs.js
+function formatLocalTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+}
 var RuntimeLogs = class {
   constructor(limit = 200) {
     this.limit = limit;
     this.entries = [];
+    this._subscribers = [];
+  }
+  /** 订阅新增条目(用于打开面板时实时刷新);返回退订函数 */
+  subscribe(fn) {
+    if (typeof fn !== "function") return () => {
+    };
+    this._subscribers.push(fn);
+    return () => {
+      const i = this._subscribers.indexOf(fn);
+      if (i >= 0) this._subscribers.splice(i, 1);
+    };
   }
   append(level, text) {
-    this.entries.push({
+    const entry = {
       at: (/* @__PURE__ */ new Date()).toISOString(),
       level,
       text: String(text).slice(0, 1e3)
-    });
+    };
+    this.entries.push(entry);
     while (this.entries.length > this.limit) this.entries.shift();
+    for (const fn of this._subscribers) {
+      try {
+        fn(entry);
+      } catch (err) {
+        console.warn("[SY-GSP] 日志订阅回调异常:", err && err.message);
+      }
+    }
   }
   info(text) {
     this.append("info", text);
@@ -4772,10 +4770,11 @@ var RuntimeLogs = class {
     this.append("error", text);
   }
   render() {
-    return this.entries.map((e) => "[" + e.at.replace("T", " ").slice(0, 19) + "] [" + e.level + "] " + e.text).join("\n");
+    return this.entries.map((e) => "[" + formatLocalTime(e.at) + "] [" + e.level + "] " + e.text).join("\n");
   }
 };
 function openLogsDialog({ q: q2, i18n, logs }) {
+  const emptyHint = i18n && i18n.sygspLogsEmpty || "暂无日志。手动同步、自动同步与状态变化(含被暂停门拦截的原因)会实时记录在这里";
   const dialog = new q2.Dialog({
     title: i18n && i18n.gSyncRuntimeLogsTitle || "SY-GSP 运行日志",
     content: '<div id="sygspLogsRoot" class="fn__flex fn__flex-column" style="height:100%;"></div>',
@@ -4795,13 +4794,21 @@ function openLogsDialog({ q: q2, i18n, logs }) {
   textarea.readOnly = true;
   textarea.style.cssText = "font-family:monospace;font-size:12px;min-height:0;resize:none;";
   const fill = () => {
-    textarea.value = logs.render() || "暂无日志";
+    textarea.value = logs.render() || emptyHint;
     textarea.scrollTop = textarea.scrollHeight;
   };
   refresh.addEventListener("click", fill);
   fill();
   bar.appendChild(refresh);
   root.append(bar, textarea);
+  const unsubscribe = logs.subscribe(fill);
+  const origDestroy = typeof dialog.destroy === "function" ? dialog.destroy.bind(dialog) : null;
+  if (origDestroy) {
+    dialog.destroy = () => {
+      unsubscribe();
+      origDestroy();
+    };
+  }
   return dialog;
 }
 
@@ -5457,7 +5464,14 @@ var SyGspPlugin = class extends q.Plugin {
         runChecks: () => this._runDiagnosis(),
         previewPlan: () => this._previewPlan(),
         onChooseBase: (choice) => this.controller.resolveConflicts({ __base__: choice }),
-        getPausedConflicts: () => this.controller && this.controller.conflictPaused && this.controller.conflictPaused.conflicts || [],
+        getPausedConflicts: () => {
+          const paused = this._currentPausedInfo();
+          return paused && paused.conflicts || [];
+        },
+        // 暂停状态与解除出口: 除控制器状态外，open conflict set 也是持久化事实来源。
+        // 避免 engine-state 丢失时诊断全绿、但同步仍提示处理冲突。
+        getPausedInfo: () => this._currentPausedInfo(),
+        onClearPause: () => this._clearPauseAndSync(),
         onFirstWriteConfirmed: async () => {
           await this._saveEngineState({ firstWriteConfirmed: true });
           this.logs.info("首次写入已确认");
@@ -5582,8 +5596,19 @@ var SyGspPlugin = class extends q.Plugin {
       this.logs.error("旧版迁移错误: " + report.errors.join("; "));
     }
   }
+  /**
+   * 远端平台。Gitee 暂不支持(代码/UI/测试已移除,git 历史保留,后续再补充):
+   * 恒为 GitHub。
+   */
   _platform() {
-    return this.settingUtils && Number(this.settingUtils.take("upload_sub_platform")) === 1 ? "gitee" : "github";
+    return "github";
+  }
+  /** 历史 Gitee 配置检测: 旧版平台标记(upload_sub_platform=1)或 gitee.com 仓库地址 */
+  _isGiteeConfigured() {
+    if (!this.settingUtils) return false;
+    if (Number(this.settingUtils.take("upload_sub_platform")) === 1) return true;
+    const addr = String(this.settingUtils.take("repository_address") || "");
+    return /gitee\.com/i.test(addr);
   }
   _repoInfo() {
     if (!this.settingUtils) {
@@ -5616,6 +5641,7 @@ var SyGspPlugin = class extends q.Plugin {
         resume: () => this._restartAutoSyncIfConfigured()
       },
       makeEngineDeps: (ctx) => self._makeEngineDeps(ctx),
+      conflictService: this.conflictService,
       logger: {
         info: (t) => this.logs.info(t),
         warn: (t) => this.logs.warn(t),
@@ -5626,7 +5652,7 @@ var SyGspPlugin = class extends q.Plugin {
   _makeEngineDeps(ctx) {
     const info = this._repoInfo();
     const self = this;
-    const provider = info.provider === "gitee" ? new GiteeProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token }) : new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
+    const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
     const workspace = new WorkspaceAdapter(this.kernel, {
       getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
       getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
@@ -5694,7 +5720,7 @@ var SyGspPlugin = class extends q.Plugin {
     });
     this.events.on("sync:success", ({ ctx, result }) => {
       this.logs.info(
-        "同步成功 " + result.operationId + " ↑" + result.uploads + " ↓" + result.downloads + " 删远" + result.deletionsRemote + " 删本" + result.deletionsLocal
+        "同步成功 " + result.operationId + " ↑" + result.uploads + " ↓" + result.downloads + " 删远" + result.deletionsRemote + " 删本" + result.deletionsLocal + " 拦删" + (result.skippedDeletes || 0) + " 超大跳过" + (result.skippedLarge || 0)
       );
       this._recordHistory(ctx, "SUCCESS", null, result);
       this.notification.syncSuccess(result, {
@@ -5725,13 +5751,16 @@ var SyGspPlugin = class extends q.Plugin {
     this.events.on("conflict:reopen", () => {
       const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
       if (set) {
+        this.logs.info("重新打开冲突处理: 已加载冲突集 " + set.operationId);
         this.conflictDialog.show(set);
         return;
       }
       const paused = this.controller && this.controller.conflictPaused;
       if (!paused || paused.kind === "BASE_UNRESOLVED") {
+        this.logs.warn("冲突处理入口: 无可用冲突集(基准类暂停),已打开基准恢复向导");
         this.diagnosisPanel.show({ mode: "base_recovery" });
       } else {
+        this.logs.warn("冲突处理入口: 暂停记录存在但冲突集缺失(历史遗留或已被清理),已打开诊断面板;可用「解除暂停并手动同步一次」重建");
         this.diagnosisPanel.show({ mode: "diagnosis" });
         this.notification.toast(this.i18n.sygspConflictSetMissing || "未找到冲突明细,已打开诊断面板,可重新同步以重建冲突集", "info");
       }
@@ -5739,18 +5768,42 @@ var SyGspPlugin = class extends q.Plugin {
   }
   // ---------- 同步入口 ----------
   async syncNow({ trigger = "manual", mode = "auto" } = {}) {
+    const automatic = trigger === "automatic" || trigger === "startup";
     const info = this._repoInfo();
+    if (this._isGiteeConfigured()) {
+      this.logs.warn("检测到 Gitee 配置(旧版平台标记或 gitee.com 地址): Gitee 暂不支持,本轮同步已跳过");
+      if (!automatic) {
+        this.notification.toast(this.i18n.giteeUnsupported || "Gitee 暂不支持,已停止同步。请改用 GitHub 仓库地址", "error", 6e3);
+      }
+      return { skipped: true, unsupported: true };
+    }
     if (!info.owner || !info.repo || !info.branch || !info.token) {
+      if (automatic) {
+        this.logs.info("自动同步跳过: 设置未完整填写(" + (!info.owner ? "仓库地址" : !info.token ? "Token" : "分支") + "缺失)");
+        if (!this._autoConfigWarned) {
+          this._autoConfigWarned = true;
+          this.notification.toast(this.i18n.warnFinishSettingConfig || "请先完整填写设置,再手动发起首次同步", "error");
+        }
+        return { skipped: true };
+      }
       this.notification.toast(this.i18n.warnFinishSettingConfig || "请先完整填写设置", "error");
       this.openSetting();
       return { skipped: true };
     }
     if (this._hasUnresolvedBase() && mode === "auto" && trigger !== "conflict_resolution") {
+      if (automatic) {
+        this.logs.info("自动同步跳过: 尚无确认基准,首次同步需要手动发起(进入首同步向导)");
+        return { skipped: true, firstRun: true };
+      }
       this.diagnosisPanel.show({ mode: "first_sync" });
       return { skipped: true, firstRun: true };
     }
     const strategy = Number(this.settingUtils.get("sync_strategy")) || 0;
     if (mode === "auto" && strategy === 1) {
+      if (automatic) {
+        this.logs.info("自动同步跳过: 同步策略为'每次选择方向',需手动触发");
+        return { skipped: true, chooseDirection: true };
+      }
       this._openDirectionDialog();
       return { skipped: true, chooseDirection: true };
     }
@@ -5816,6 +5869,41 @@ var SyGspPlugin = class extends q.Plugin {
   }
   _hasUnresolvedBase() {
     return !this.metadataStore.getBaseCommit(this._repoKey(this._repoInfo()));
+  }
+  /** 当前仓库的暂停事实：控制器状态优先，open conflict set 用于状态文件丢失后的只读诊断。 */
+  _currentPausedInfo() {
+    const paused = this.controller && this.controller.conflictPaused;
+    if (paused) return paused;
+    const repoKey = this._repoKey(this._repoInfo());
+    const set = this.conflictService && this.conflictService.openSet(repoKey);
+    if (!set) return null;
+    const conflicts = (set.conflicts || []).filter((c) => c && c.path);
+    return {
+      kind: "FILE_CONFLICTS",
+      repoKey,
+      operationId: set.operationId,
+      reason: "存在未处理冲突集",
+      conflictCount: conflicts.length,
+      conflicts: conflicts.slice(0, 20).map((c) => ({ path: c.path, reason: c.reason || "" }))
+    };
+  }
+  /** 诊断面板「解除暂停并手动同步一次」: 先清除暂停状态,再立即跑一次手动同步。
+   * 若冲突真实存在,引擎会重新检测并再次暂停(重建冲突集),安全可逆;
+   * 若为陈旧/无出口的暂停记录,一次同步即恢复正常并推进状态。 */
+  async _clearPauseAndSync() {
+    if (!this.controller) return null;
+    if (!this.controller.isConflictPaused()) {
+      this.notification.toast("当前没有暂停状态,无需解除", "info");
+      return null;
+    }
+    const kind = this.controller.conflictPaused && this.controller.conflictPaused.kind;
+    this.controller.dismissConflictPause();
+    this.logs.info("用户确认冲突已处理,解除暂停状态(" + kind + "),立即执行一次手动同步");
+    this.notification.toast("已解除暂停,开始一次手动同步(若仍存在冲突会重新进入冲突处理)", "info");
+    return this.syncNow({ trigger: "manual" }).catch((err) => {
+      this.logs.error("解除暂停后的手动同步失败: " + String(err && err.message || err));
+      this.notification.toast("❌ 同步失败: " + String(err && err.message || err), "error");
+    });
   }
   // ---------- 自动同步 ----------
   _restartAutoSyncIfConfigured() {
@@ -5900,7 +5988,11 @@ var SyGspPlugin = class extends q.Plugin {
       resolveConflict: () => {
         const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
         if (set) this.conflictDialog.show(set);
-        else this.diagnosisPanel.show({ mode: this.controller.conflictPaused && this.controller.conflictPaused.kind === "BASE_UNRESOLVED" ? "base_recovery" : "diagnosis" });
+        else {
+          const paused = this.controller && this.controller.conflictPaused;
+          this.logs.warn("菜单处理冲突: 无可用冲突集(kind=" + (paused && paused.kind) + "),已打开诊断面板");
+          this.diagnosisPanel.show({ mode: paused && paused.kind === "BASE_UNRESOLVED" ? "base_recovery" : "diagnosis" });
+        }
       },
       getSetting: (key) => this.settingUtils.take(key),
       setSettingAndSave: (key, value) => this.settingUtils.setAndSave(key, value)
@@ -5933,6 +6025,10 @@ var SyGspPlugin = class extends q.Plugin {
   }
   openSyncHistoryPanel() {
     const info = this._repoInfo();
+    if (this._isGiteeConfigured()) {
+      this.notification.toast(this.i18n.giteeUnsupported || "Gitee 暂不支持,无法打开同步历史。请改用 GitHub 仓库地址", "error", 6e3);
+      return;
+    }
     if (!info.owner || !info.repo || !info.branch || !info.token) {
       this.notification.toast(this.i18n.warnFinishSettingConfig || "请先完整填写设置", "error");
       return;
@@ -5973,7 +6069,7 @@ var SyGspPlugin = class extends q.Plugin {
     });
   }
   _makeProvider(info) {
-    return info.provider === "gitee" ? new GiteeProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token }) : new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
+    return new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
   }
   /** 历史面板: 回滚(覆盖本地)/下载(另存到隔离目录) */
   async _writeCommitFile(path, ref, provider, overwrite) {
@@ -6006,6 +6102,20 @@ var SyGspPlugin = class extends q.Plugin {
   async _runDiagnosis() {
     const checks = [];
     const info = this._repoInfo();
+    if (this._isGiteeConfigured()) {
+      checks.push({
+        name: "Gitee 支持状态",
+        ok: false,
+        detail: "检测到旧版 Gitee 配置: Gitee 暂不支持,请在设置中改用 GitHub 仓库地址(历史代码与数据保留,后续版本再补充)"
+      });
+      return checks;
+    }
+    const pausedInfo = this._currentPausedInfo();
+    checks.push({
+      name: "同步状态",
+      ok: !pausedInfo,
+      detail: pausedInfo ? "暂停中: " + pausedInfo.kind + (pausedInfo.conflictCount ? "(" + pausedInfo.conflictCount + " 个文件)" : "") + (pausedInfo.reason ? " — " + pausedInfo.reason : "") + "。请先处理冲突;若确认冲突已处理,可用面板底部「解除暂停并手动同步一次」" : "正常(无未处理冲突或暂停)"
+    });
     checks.push({
       name: "仓库配置",
       ok: !!(info.owner && info.repo && info.branch),
@@ -6054,6 +6164,9 @@ var SyGspPlugin = class extends q.Plugin {
   async _previewPlan() {
     const info = this._repoInfo();
     const rows = [];
+    if (this._isGiteeConfigured()) {
+      return [{ name: "Gitee 支持状态", detail: "Gitee 暂不支持,请改用 GitHub 仓库地址" }];
+    }
     if (!info.owner || !info.branch) {
       return [{ name: "同步计划", detail: "配置不完整,无法预览" }];
     }
@@ -6108,6 +6221,8 @@ var SyGspPlugin = class extends q.Plugin {
           downloads: result.downloads,
           deletionsRemote: result.deletionsRemote,
           deletionsLocal: result.deletionsLocal,
+          skippedDeletes: result.skippedDeletes || 0,
+          skippedLarge: result.skippedLarge || 0,
           commitSha: result.commitSha
         } : null,
         error: error ? error.toSerializable() : null,

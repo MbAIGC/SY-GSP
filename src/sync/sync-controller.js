@@ -68,8 +68,27 @@ export class SyncController {
         if (!map.has(target)) map.set(target, legacy);
         delete this._engineState.conflictPaused;
       }
+      // engine-state 写入失败、旧版本覆盖状态文件时，冲突集仍是已持久化的
+      // 事实来源。用其中所有 open 集补齐暂停记录，不能让诊断显示正常而同步门
+      // 仍从冲突集入口提示处理冲突。
+      if (this.conflictService) {
+        for (const set of this.conflictService.allOpenSets()) {
+          if (!set || !set.repoKey || map.has(set.repoKey)) continue;
+          const conflicts = (set.conflicts || []).filter((c) => c && c.path);
+          map.set(set.repoKey, {
+            kind: "FILE_CONFLICTS",
+            repoKey: set.repoKey,
+            operationId: set.operationId,
+            reason: "存在未处理冲突",
+            conflictCount: conflicts.length,
+            conflicts: conflicts.slice(0, 20).map((c) => ({ path: c.path, reason: c.reason || "" })),
+          });
+        }
+      }
       this._conflictByRepo = map;
       if (map.size > 0) {
+        // 将补齐后的状态回写为当前格式，后续重启不再依赖冲突集兜底恢复。
+        this._persistState();
         this.state = SyncState.CONFLICT_PAUSED;
         this.events.emit("state:changed", { state: this.state, conflictPaused: this.conflictPaused });
       }
