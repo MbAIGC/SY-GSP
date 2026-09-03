@@ -126,26 +126,40 @@ export class ConflictDialog {
   }
 
   async _decideOne(path, decision) {
-    await this.conflictService.decide(this.set.operationId, path, decision);
-    this.set.conflicts = this.set.conflicts.filter((c) => c.path !== path);
+    const operationId = this.set.operationId;
+    await this.conflictService.decide(operationId, path, decision);
+    // ConflictService 内部持有 set 对象;不能原地替换/清空其 conflicts,
+    // 否则 collectOverrides 会读到空数组,导致决策未执行。
+    this.set = this._viewSetAfterDecisions(operationId);
     if (this.dialog && this.dialog.element) {
       const root = this.dialog.element.querySelector("#sygspConflictDialog");
       this._render(root, this.set);
     }
-    await this._flushIfAllDecided();
+    await this._flushIfAllDecided(operationId);
   }
 
   async _decideAll(decision) {
-    for (const conflict of [...this.set.conflicts]) {
-      await this.conflictService.decide(this.set.operationId, conflict.path, decision);
+    const operationId = this.set.operationId;
+    this.notify("已选择全部" + (decision === "keep_remote" ? "保留远端" : "保留本地") + "，正在重新规划执行", "info");
+    const conflicts = this.set.conflicts.filter((c) => c && (!c.status || c.status === "open"));
+    for (const conflict of conflicts) {
+      await this.conflictService.decide(operationId, conflict.path, decision);
     }
-    this.set.conflicts = [];
     this.close();
-    await this._flushIfAllDecided();
+    await this._flushIfAllDecided(operationId);
   }
 
-  async _flushIfAllDecided() {
-    const overrides = this.conflictService.collectOverrides(this.set.operationId);
+  _viewSetAfterDecisions(operationId) {
+    const source = this.conflictService.sets[operationId];
+    if (!source) return { ...this.set, conflicts: [] };
+    return {
+      ...source,
+      conflicts: source.conflicts.filter((c) => c && c.status === "open"),
+    };
+  }
+
+  async _flushIfAllDecided(operationId = this.set.operationId) {
+    const overrides = this.conflictService.collectOverrides(operationId);
     if (overrides.size === 0) return;
     if (this.dialog) this.close();
     try {

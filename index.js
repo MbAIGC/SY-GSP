@@ -3286,7 +3286,7 @@ var SyncController = class {
       branch: info.branch
     });
     if (overrides) ctx.overrides = overrides;
-    this.logger.info("开始同步 #" + ctx.id + " trigger=" + trigger + " mode=" + mode + " repo=" + info.owner + "/" + info.repo + " branch=" + info.branch);
+    this.logger.info("开始同步 #" + ctx.id + " trigger=" + trigger + " mode=" + mode + " overrides=" + (overrides ? overrides.size : 0) + " repo=" + info.owner + "/" + info.repo + " branch=" + info.branch);
     return this.queue.enqueue(
       key,
       () => this._runWithRetry(ctx),
@@ -3427,6 +3427,7 @@ var SyncController = class {
   /** 用户冲突决策: 逐文件 keep_local/keep_remote → 重新规划执行 */
   async resolveConflicts(decisions) {
     const overrides = new Map(Object.entries(decisions || {}));
+    this.logger.info("冲突处理: 收到 " + overrides.size + " 个文件决策(" + [...overrides.values()].filter((v) => v === "keep_remote").length + " 个保留远端, " + [...overrides.values()].filter((v) => v === "keep_local").length + " 个保留本地),开始重新规划");
     if (this.conflictPaused && this.conflictPaused.kind === "BASE_UNRESOLVED") {
       return this._resolveBaseUnresolved(overrides);
     }
@@ -4522,24 +4523,35 @@ var ConflictDialog = class {
     return btn;
   }
   async _decideOne(path, decision) {
-    await this.conflictService.decide(this.set.operationId, path, decision);
-    this.set.conflicts = this.set.conflicts.filter((c) => c.path !== path);
+    const operationId = this.set.operationId;
+    await this.conflictService.decide(operationId, path, decision);
+    this.set = this._viewSetAfterDecisions(operationId);
     if (this.dialog && this.dialog.element) {
       const root = this.dialog.element.querySelector("#sygspConflictDialog");
       this._render(root, this.set);
     }
-    await this._flushIfAllDecided();
+    await this._flushIfAllDecided(operationId);
   }
   async _decideAll(decision) {
-    for (const conflict of [...this.set.conflicts]) {
-      await this.conflictService.decide(this.set.operationId, conflict.path, decision);
+    const operationId = this.set.operationId;
+    this.notify("已选择全部" + (decision === "keep_remote" ? "保留远端" : "保留本地") + "，正在重新规划执行", "info");
+    const conflicts = this.set.conflicts.filter((c) => c && (!c.status || c.status === "open"));
+    for (const conflict of conflicts) {
+      await this.conflictService.decide(operationId, conflict.path, decision);
     }
-    this.set.conflicts = [];
     this.close();
-    await this._flushIfAllDecided();
+    await this._flushIfAllDecided(operationId);
   }
-  async _flushIfAllDecided() {
-    const overrides = this.conflictService.collectOverrides(this.set.operationId);
+  _viewSetAfterDecisions(operationId) {
+    const source = this.conflictService.sets[operationId];
+    if (!source) return { ...this.set, conflicts: [] };
+    return {
+      ...source,
+      conflicts: source.conflicts.filter((c) => c && c.status === "open")
+    };
+  }
+  async _flushIfAllDecided(operationId = this.set.operationId) {
+    const overrides = this.conflictService.collectOverrides(operationId);
     if (overrides.size === 0) return;
     if (this.dialog) this.close();
     try {
@@ -5863,6 +5875,9 @@ var SyGspPlugin = class extends q.Plugin {
       }
     });
     this.events.on("sync:success", ({ ctx, result }) => {
+      if (ctx && ctx.trigger === "conflict_resolution") {
+        this.logs.info("冲突处理执行完成 #" + ctx.id + "：上传 " + (result.uploads || 0) + "、下载 " + (result.downloads || 0) + "、删远 " + (result.deletionsRemote || 0) + "、删本 " + (result.deletionsLocal || 0));
+      }
       this.logs.info(
         "同步成功 " + result.operationId + " ↑" + result.uploads + " ↓" + result.downloads + " 删远" + result.deletionsRemote + " 删本" + result.deletionsLocal + " 拦删" + (result.skippedDeletes || 0) + " 超大跳过" + (result.skippedLarge || 0)
       );
@@ -5873,6 +5888,9 @@ var SyGspPlugin = class extends q.Plugin {
       });
     });
     this.events.on("sync:error", ({ ctx, error }) => {
+      if (ctx && ctx.trigger === "conflict_resolution") {
+        this.logs.error("冲突处理执行失败 #" + ctx.id + "：" + error.toDisplayText());
+      }
       this.logs.error("同步失败[" + error.category + "] " + error.toDisplayText());
       this._recordHistory(ctx, "FAILED", error, null);
       this.notification.syncError(error, { automatic: ctx.trigger === "automatic" });

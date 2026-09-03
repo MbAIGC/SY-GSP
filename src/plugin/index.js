@@ -368,6 +368,10 @@ export default class SyGspPlugin extends q.Plugin {
       }
     });
     this.events.on("sync:success", ({ ctx, result }) => {
+      if (ctx && ctx.trigger === "conflict_resolution") {
+        this.logs.info("冲突处理执行完成 #" + ctx.id + "：上传 " + (result.uploads || 0) + "、下载 " +
+          (result.downloads || 0) + "、删远 " + (result.deletionsRemote || 0) + "、删本 " + (result.deletionsLocal || 0));
+      }
       this.logs.info(
         "同步成功 " + result.operationId + " ↑" + result.uploads + " ↓" + result.downloads +
         " 删远" + result.deletionsRemote + " 删本" + result.deletionsLocal +
@@ -380,6 +384,9 @@ export default class SyGspPlugin extends q.Plugin {
       });
     });
     this.events.on("sync:error", ({ ctx, error }) => {
+      if (ctx && ctx.trigger === "conflict_resolution") {
+        this.logs.error("冲突处理执行失败 #" + ctx.id + "：" + error.toDisplayText());
+      }
       this.logs.error("同步失败[" + error.category + "] " + error.toDisplayText());
       this._recordHistory(ctx, "FAILED", error, null);
       this.notification.syncError(error, { automatic: ctx.trigger === "automatic" });

@@ -65,6 +65,27 @@ test("清空: 清除内存与持久化日志", async () => {
   assert.deepEqual(store["runtime-logs.json"], []);
 });
 
+test("批量决策视图不清空冲突服务原始集合", async () => {
+  const { ConflictDialog } = await import("../src/ui/conflict-dialog.js");
+  const set = { operationId: "op", conflicts: [
+    { path: "a.md", status: "open" }, { path: "b.md", status: "open" },
+  ] };
+  const service = {
+    sets: { op: set },
+    async decide(_op, path, decision) {
+      const item = set.conflicts.find((c) => c.path === path);
+      item.status = "decided";
+      item.decision = decision;
+    },
+    collectOverrides: () => new Map([["a.md", "keep_remote"], ["b.md", "keep_remote"]]),
+  };
+  const dialog = new ConflictDialog({ conflictService: service, i18n: {}, notify() {}, onDecide: async () => {} });
+  dialog.set = set;
+  await dialog._decideAll("keep_remote");
+  assert.equal(set.conflicts.length, 2, "决策后仍须保留原始冲突集合");
+  assert.equal(set.conflicts.every((c) => c.decision === "keep_remote"), true);
+});
+
 test("容量上限: 超过 limit 丢弃最旧条目", () => {
   const logs = new RuntimeLogs(3);
   for (let i = 0; i < 6; i++) logs.info("行" + i);
