@@ -39,18 +39,27 @@ export class DiagnosisPanel {
       }
       this.dialog = null;
     }
-    this.dialog = new q.Dialog({
-      title: (t && t.sygspDiagnosisTitle) || "SY-GSP 只读诊断",
-      content: '<div id="sygspDiagnosis" class="fn__flex-column" style="padding:16px;gap:8px;"></div>',
-      width: "640px",
-      height: "70vh",
-      destroyCallback: () => {
-        this.dialog = null;
-      },
-    });
-    const root = this.dialog.element.querySelector("#sygspDiagnosis");
-    this._renderLoading(root);
-    this._run(mode, root);
+    try {
+      this.dialog = new q.Dialog({
+        title: (t && t.sygspDiagnosisTitle) || "SY-GSP 只读诊断",
+        content: '<div id="sygspDiagnosis" class="fn__flex-column" style="padding:16px;gap:8px;"></div>',
+        width: "640px",
+        height: "70vh",
+        destroyCallback: () => {
+          this.dialog = null;
+        },
+      });
+      const dialog = this.dialog;
+      const root = dialog.element.querySelector("#sygspDiagnosis");
+      this._renderLoading(root);
+      this._run(mode, root, dialog).catch((err) => {
+        this._renderError(root, err);
+      });
+    } catch (err) {
+      this.dialog = null;
+      console.error("[SY-GSP] 打开诊断面板失败:", err);
+      if (this.notify) this.notify("❌ 只读诊断打开失败: " + String((err && err.message) || err), "error");
+    }
   }
 
   close() {
@@ -60,9 +69,20 @@ export class DiagnosisPanel {
     }
   }
 
-  async _run(mode, root) {
+  async _run(mode, root, dialog) {
     const checks = await this._safe(this.runChecks);
-    this._render(root, mode, checks);
+    if (this.dialog !== dialog) return;
+    await this._render(root, mode, checks);
+  }
+
+  _renderError(root, err) {
+    if (!root) return;
+    root.textContent = "";
+    const line = document.createElement("div");
+    line.className = "b3-label__text ft__breakword";
+    line.style.color = "var(--b3-theme-error,#d23f31)";
+    line.textContent = "❌ 只读诊断执行失败: " + String((err && err.message) || err);
+    root.appendChild(line);
   }
 
   async _safe(fn) {
@@ -83,6 +103,7 @@ export class DiagnosisPanel {
 
   async _render(root, mode, checks) {
     const t = this.i18n;
+    if (!root) throw new Error("诊断面板内容区域不存在");
     root.textContent = "";
 
     const title = document.createElement("div");

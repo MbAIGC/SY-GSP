@@ -43,7 +43,7 @@ export default class SyGspPlugin extends q.Plugin {
     this.isMobile = String(q.getFrontend ? q.getFrontend() : "desktop").indexOf("mobile") >= 0;
     this.timerTask = null;
     this.topBarElement = null;
-    this.logs = new RuntimeLogs(200);
+    this.logs = new RuntimeLogs(500);
     this.events = createEventBus();
   }
 
@@ -57,6 +57,7 @@ export default class SyGspPlugin extends q.Plugin {
       // onLayoutReady 不会再执行——图标注册不能依赖它
       this._registerTopBar();
       this.kernel = createKernel(q);
+      await this.logs.load(this);
       await this._initStores();
       this.notification = new NotificationService({ q, i18n: this.i18n });
       this.settingsBuilder = new SettingsPanelBuilder({
@@ -357,6 +358,9 @@ export default class SyGspPlugin extends q.Plugin {
   _bindEngineEvents() {
     if (this._eventsBound) return; // onload 与 onLayoutReady 双入口,只绑一次
     this._eventsBound = true;
+    this.events.on("engine:phase", ({ ctx, state }) => {
+      this.logs.info("同步阶段 #" + (ctx && ctx.id ? ctx.id : "?") + ": " + state);
+    });
     this.events.on("state:changed", ({ state, conflictPaused }) => {
       this.logs.info("状态: " + state + (conflictPaused ? " (冲突暂停: " + conflictPaused.kind + ")" : ""));
       if (this.notification) {

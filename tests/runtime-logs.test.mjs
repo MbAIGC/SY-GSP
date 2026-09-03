@@ -37,6 +37,34 @@ test("subscribe: 新日志实时回调;退订后不再回调", () => {
   assert.deepEqual(seen, ["第一条", "第二条"], "退订后不再收到");
 });
 
+test("持久化: 启动恢复日志并限制容量", async () => {
+  const store = {};
+  const plugin = {
+    async loadData(name) { return store[name] || null; },
+    async saveData(name, value) { store[name] = value; },
+  };
+  const logs = new RuntimeLogs(2);
+  await logs.load(plugin);
+  logs.info("新日志");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(store["runtime-logs.json"].length, 1);
+  const restored = new RuntimeLogs(2);
+  await restored.load(plugin);
+  assert.equal(restored.entries[0].text, "新日志");
+});
+
+test("清空: 清除内存与持久化日志", async () => {
+  const store = {};
+  const plugin = { async saveData(name, value) { store[name] = value; } };
+  const logs = new RuntimeLogs(3);
+  await logs.load(plugin);
+  logs.info("待清除");
+  logs.clear();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(logs.entries.length, 0);
+  assert.deepEqual(store["runtime-logs.json"], []);
+});
+
 test("容量上限: 超过 limit 丢弃最旧条目", () => {
   const logs = new RuntimeLogs(3);
   for (let i = 0; i < 6; i++) logs.info("行" + i);

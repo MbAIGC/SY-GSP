@@ -16,10 +16,31 @@ export function formatLocalTime(iso) {
 }
 
 export class RuntimeLogs {
-  constructor(limit = 200) {
+  constructor(limit = 500) {
     this.limit = limit;
     this.entries = [];
     this._subscribers = [];
+    this.plugin = null;
+    this._saveChain = Promise.resolve();
+  }
+
+  async load(plugin) {
+    this.plugin = plugin || this.plugin;
+    if (!this.plugin || typeof this.plugin.loadData !== "function") return;
+    try {
+      const saved = await this.plugin.loadData("runtime-logs.json");
+      if (Array.isArray(saved)) this.entries = saved.filter((e) => e && e.at && e.level && e.text).slice(-this.limit);
+    } catch (err) {
+      console.warn("[SY-GSP] 运行日志读取失败:", err && err.message);
+    }
+  }
+
+  _persist() {
+    if (!this.plugin || typeof this.plugin.saveData !== "function") return;
+    const snapshot = this.entries.slice(-this.limit).map((e) => ({ ...e }));
+    this._saveChain = this._saveChain.then(() => this.plugin.saveData("runtime-logs.json", snapshot)).catch((err) => {
+      console.warn("[SY-GSP] 运行日志保存失败:", err && err.message);
+    });
   }
 
   /** 订阅新增条目(用于打开面板时实时刷新);返回退订函数 */
@@ -40,7 +61,8 @@ export class RuntimeLogs {
     };
     this.entries.push(entry);
     while (this.entries.length > this.limit) this.entries.shift();
-    for (const fn of this._subscribers) {
+    this._persist();
+    for (const fn of [...this._subscribers]) {
       try {
         fn(entry);
       } catch (err) {
@@ -59,6 +81,14 @@ export class RuntimeLogs {
 
   error(text) {
     this.append("error", text);
+  }
+
+  clear() {
+    this.entries = [];
+    this._persist();
+    for (const fn of [...this._subscribers]) {
+      try { fn(null); } catch (err) { console.warn("[SY-GSP] 日志清空回调异常:", err && err.message); }
+    }
   }
 
   render() {
@@ -88,6 +118,14 @@ export function openLogsDialog({ q, i18n, logs }) {
 
   const bar = document.createElement("div");
   bar.style.cssText = "display:flex;justify-content:flex-end;gap:8px;padding-bottom:8px;";
+  const clear = document.createElement("button");
+  clear.className = "b3-button b3-button--outline";
+  clear.type = "button";
+  clear.textContent = (i18n && i18n.sygspLogsClear) || "清空";
+  clear.addEventListener("click", () => {
+    logs.clear();
+    fill();
+  });
   const refresh = document.createElement("button");
   refresh.className = "b3-button b3-button--outline";
   refresh.type = "button";
@@ -102,6 +140,7 @@ export function openLogsDialog({ q, i18n, logs }) {
   };
   refresh.addEventListener("click", fill);
   fill();
+  bar.appendChild(clear);
   bar.appendChild(refresh);
   root.append(bar, textarea);
 

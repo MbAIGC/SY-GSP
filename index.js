@@ -4625,18 +4625,27 @@ var DiagnosisPanel = class {
       }
       this.dialog = null;
     }
-    this.dialog = new q2.Dialog({
-      title: t && t.sygspDiagnosisTitle || "SY-GSP 只读诊断",
-      content: '<div id="sygspDiagnosis" class="fn__flex-column" style="padding:16px;gap:8px;"></div>',
-      width: "640px",
-      height: "70vh",
-      destroyCallback: () => {
-        this.dialog = null;
-      }
-    });
-    const root = this.dialog.element.querySelector("#sygspDiagnosis");
-    this._renderLoading(root);
-    this._run(mode, root);
+    try {
+      this.dialog = new q2.Dialog({
+        title: t && t.sygspDiagnosisTitle || "SY-GSP 只读诊断",
+        content: '<div id="sygspDiagnosis" class="fn__flex-column" style="padding:16px;gap:8px;"></div>',
+        width: "640px",
+        height: "70vh",
+        destroyCallback: () => {
+          this.dialog = null;
+        }
+      });
+      const dialog = this.dialog;
+      const root = dialog.element.querySelector("#sygspDiagnosis");
+      this._renderLoading(root);
+      this._run(mode, root, dialog).catch((err) => {
+        this._renderError(root, err);
+      });
+    } catch (err) {
+      this.dialog = null;
+      console.error("[SY-GSP] 打开诊断面板失败:", err);
+      if (this.notify) this.notify("❌ 只读诊断打开失败: " + String(err && err.message || err), "error");
+    }
   }
   close() {
     if (this.dialog) {
@@ -4644,9 +4653,19 @@ var DiagnosisPanel = class {
       this.dialog = null;
     }
   }
-  async _run(mode, root) {
+  async _run(mode, root, dialog) {
     const checks = await this._safe(this.runChecks);
-    this._render(root, mode, checks);
+    if (this.dialog !== dialog) return;
+    await this._render(root, mode, checks);
+  }
+  _renderError(root, err) {
+    if (!root) return;
+    root.textContent = "";
+    const line = document.createElement("div");
+    line.className = "b3-label__text ft__breakword";
+    line.style.color = "var(--b3-theme-error,#d23f31)";
+    line.textContent = "❌ 只读诊断执行失败: " + String(err && err.message || err);
+    root.appendChild(line);
   }
   async _safe(fn) {
     try {
@@ -4664,6 +4683,7 @@ var DiagnosisPanel = class {
   }
   async _render(root, mode, checks) {
     const t = this.i18n;
+    if (!root) throw new Error("诊断面板内容区域不存在");
     root.textContent = "";
     const title = document.createElement("div");
     title.className = "b3-label";
@@ -4809,10 +4829,29 @@ function formatLocalTime(iso) {
   return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
 }
 var RuntimeLogs = class {
-  constructor(limit = 200) {
+  constructor(limit = 500) {
     this.limit = limit;
     this.entries = [];
     this._subscribers = [];
+    this.plugin = null;
+    this._saveChain = Promise.resolve();
+  }
+  async load(plugin) {
+    this.plugin = plugin || this.plugin;
+    if (!this.plugin || typeof this.plugin.loadData !== "function") return;
+    try {
+      const saved = await this.plugin.loadData("runtime-logs.json");
+      if (Array.isArray(saved)) this.entries = saved.filter((e) => e && e.at && e.level && e.text).slice(-this.limit);
+    } catch (err) {
+      console.warn("[SY-GSP] 运行日志读取失败:", err && err.message);
+    }
+  }
+  _persist() {
+    if (!this.plugin || typeof this.plugin.saveData !== "function") return;
+    const snapshot = this.entries.slice(-this.limit).map((e) => ({ ...e }));
+    this._saveChain = this._saveChain.then(() => this.plugin.saveData("runtime-logs.json", snapshot)).catch((err) => {
+      console.warn("[SY-GSP] 运行日志保存失败:", err && err.message);
+    });
   }
   /** 订阅新增条目(用于打开面板时实时刷新);返回退订函数 */
   subscribe(fn) {
@@ -4832,7 +4871,8 @@ var RuntimeLogs = class {
     };
     this.entries.push(entry);
     while (this.entries.length > this.limit) this.entries.shift();
-    for (const fn of this._subscribers) {
+    this._persist();
+    for (const fn of [...this._subscribers]) {
       try {
         fn(entry);
       } catch (err) {
@@ -4848,6 +4888,17 @@ var RuntimeLogs = class {
   }
   error(text) {
     this.append("error", text);
+  }
+  clear() {
+    this.entries = [];
+    this._persist();
+    for (const fn of [...this._subscribers]) {
+      try {
+        fn(null);
+      } catch (err) {
+        console.warn("[SY-GSP] 日志清空回调异常:", err && err.message);
+      }
+    }
   }
   render() {
     return this.entries.map((e) => "[" + formatLocalTime(e.at) + "] [" + e.level + "] " + e.text).join("\n");
@@ -4865,6 +4916,14 @@ function openLogsDialog({ q: q2, i18n, logs }) {
   if (!root) return dialog;
   const bar = document.createElement("div");
   bar.style.cssText = "display:flex;justify-content:flex-end;gap:8px;padding-bottom:8px;";
+  const clear = document.createElement("button");
+  clear.className = "b3-button b3-button--outline";
+  clear.type = "button";
+  clear.textContent = i18n && i18n.sygspLogsClear || "清空";
+  clear.addEventListener("click", () => {
+    logs.clear();
+    fill();
+  });
   const refresh = document.createElement("button");
   refresh.className = "b3-button b3-button--outline";
   refresh.type = "button";
@@ -4879,6 +4938,7 @@ function openLogsDialog({ q: q2, i18n, logs }) {
   };
   refresh.addEventListener("click", fill);
   fill();
+  bar.appendChild(clear);
   bar.appendChild(refresh);
   root.append(bar, textarea);
   const unsubscribe = logs.subscribe(fill);
@@ -5509,7 +5569,7 @@ var SyGspPlugin = class extends q.Plugin {
     this.isMobile = String(q.getFrontend ? q.getFrontend() : "desktop").indexOf("mobile") >= 0;
     this.timerTask = null;
     this.topBarElement = null;
-    this.logs = new RuntimeLogs(200);
+    this.logs = new RuntimeLogs(500);
     this.events = createEventBus();
   }
   async onload() {
@@ -5517,6 +5577,7 @@ var SyGspPlugin = class extends q.Plugin {
       this.createIcons();
       this._registerTopBar();
       this.kernel = createKernel(q);
+      await this.logs.load(this);
       await this._initStores();
       this.notification = new NotificationService({ q, i18n: this.i18n });
       this.settingsBuilder = new SettingsPanelBuilder({
@@ -5792,6 +5853,9 @@ var SyGspPlugin = class extends q.Plugin {
   _bindEngineEvents() {
     if (this._eventsBound) return;
     this._eventsBound = true;
+    this.events.on("engine:phase", ({ ctx, state }) => {
+      this.logs.info("同步阶段 #" + (ctx && ctx.id ? ctx.id : "?") + ": " + state);
+    });
     this.events.on("state:changed", ({ state, conflictPaused }) => {
       this.logs.info("状态: " + state + (conflictPaused ? " (冲突暂停: " + conflictPaused.kind + ")" : ""));
       if (this.notification) {
