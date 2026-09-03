@@ -143,9 +143,12 @@ export class SyncController {
             this._autoSkipNotified = true;
             this.notify(this.i18n("sygspPausedMsg", "⚠️ 同步冲突未处理,自动同步已暂停,请先处理冲突"), "error");
           }
+          // 可观察性: 自动轮次被暂停门拦截必须留痕,否则用户无从得知自动同步为何静止
+          this.logger.info("自动同步被暂停门拦截(" + pausedRecord.kind + "): " + key + " 未处理冲突,本轮跳过");
           return { skipped: true };
         }
-        // 手动触发: 重新打开冲突处理入口
+        // 手动触发: 重新打开冲突处理入口(留痕,避免「点击同步却无日志」的盲区)
+        this.logger.warn("手动同步被暂停门拦截(" + pausedRecord.kind + "): " + key + ",已重新打开冲突处理入口;若确认冲突已处理,可用诊断面板的「解除暂停并手动同步一次」");
         this.events.emit("conflict:reopen", { conflictPaused: pausedRecord });
         return { skipped: true, conflict: true };
       }

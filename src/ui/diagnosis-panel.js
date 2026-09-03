@@ -19,6 +19,8 @@ export class DiagnosisPanel {
     this.runChecks = deps.runChecks;
     this.previewPlan = deps.previewPlan;
     this.getPausedConflicts = deps.getPausedConflicts || (() => []);
+    this.getPausedInfo = deps.getPausedInfo || (() => null);
+    this.onClearPause = deps.onClearPause || (async () => {});
     this.onChooseBase = deps.onChooseBase;
     this.onFirstWriteConfirmed = deps.onFirstWriteConfirmed;
     this.notify = deps.notify;
@@ -128,6 +130,40 @@ export class DiagnosisPanel {
         box.appendChild(line);
       }
       root.appendChild(box);
+    }
+
+    // 暂停状态出口: 诊断模式(BASE_UNRESOLVED 亦无冲突明细)下,
+    // 只要存在暂停记录就给出红色状态条与「解除暂停并手动同步一次」,
+    // 避免陈旧/无冲突集的暂停记录形成无出口循环(此前只能看全绿诊断)
+    const pausedInfo = this.getPausedInfo();
+    if (mode === "diagnosis" && pausedInfo && pausedInfo.kind) {
+      const bar = document.createElement("div");
+      bar.className = "b3-label fn__flex-column";
+      bar.style.cssText = "gap:8px;margin-top:8px;padding:10px;border:1px solid var(--b3-theme-error,#d23f31);border-radius:6px;";
+      const warn = document.createElement("div");
+      warn.className = "b3-label__text";
+      warn.style.color = "var(--b3-theme-error,#d23f31)";
+      warn.textContent = "⚠️ 当前处于同步暂停(" + pausedInfo.kind +
+        (pausedInfo.conflictCount ? ", " + pausedInfo.conflictCount + " 个冲突文件" : "") +
+        ")。请先通过菜单「处理冲突/恢复同步」解决;" +
+        (pausedInfo.reason ? "\n原因: " + pausedInfo.reason : "");
+      bar.appendChild(warn);
+      const hint = document.createElement("div");
+      hint.className = "b3-label__text ft__smaller";
+      hint.textContent = "若确认冲突/基准问题已经处理(例如远端已恢复、冲突文件已手工对齐),可解除暂停立即同步一次;若仍存在冲突,引擎会重新检测并再次进入冲突处理。";
+      bar.appendChild(hint);
+      const clearBtn = this._btn("解除暂停并手动同步一次(请确认冲突已处理)", async () => {
+        clearBtn.disabled = true;
+        try {
+          await this.onClearPause();
+        } catch (err) {
+          this.notify("❌ " + String((err && err.message) || err), "error");
+        } finally {
+          this.close();
+        }
+      }, "b3-button b3-button--text");
+      bar.appendChild(clearBtn);
+      root.appendChild(bar);
     }
 
     if (mode === "base_recovery") {

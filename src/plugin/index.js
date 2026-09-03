@@ -85,6 +85,9 @@ export default class SyGspPlugin extends q.Plugin {
         previewPlan: () => this._previewPlan(),
         onChooseBase: (choice) => this.controller.resolveConflicts({ __base__: choice }),
         getPausedConflicts: () => (this.controller && this.controller.conflictPaused && this.controller.conflictPaused.conflicts) || [],
+        // 暂停状态与解除出口: 诊断不再「全绿却无从下手」(陈旧/无冲突集的暂停记录可通过此出口解除)
+        getPausedInfo: () => (this.controller && this.controller.conflictPaused) || null,
+        onClearPause: () => this._clearPauseAndSync(),
         onFirstWriteConfirmed: async () => {
           await this._saveEngineState({ firstWriteConfirmed: true });
           this.logs.info("首次写入已确认");
@@ -391,14 +394,17 @@ export default class SyGspPlugin extends q.Plugin {
     this.events.on("conflict:reopen", () => {
       const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
       if (set) {
+        this.logs.info("重新打开冲突处理: 已加载冲突集 " + set.operationId);
         this.conflictDialog.show(set);
         return;
       }
       // 冲突集丢失时必须有可见兜底,否则手动同步点击后无任何反馈
       const paused = this.controller && this.controller.conflictPaused;
       if (!paused || paused.kind === "BASE_UNRESOLVED") {
+        this.logs.warn("冲突处理入口: 无可用冲突集(基准类暂停),已打开基准恢复向导");
         this.diagnosisPanel.show({ mode: "base_recovery" });
       } else {
+        this.logs.warn("冲突处理入口: 暂停记录存在但冲突集缺失(历史遗留或已被清理),已打开诊断面板;可用「解除暂停并手动同步一次」重建");
         this.diagnosisPanel.show({ mode: "diagnosis" });
         this.notification.toast(this.i18n.sygspConflictSetMissing || "未找到冲突明细,已打开诊断面板,可重新同步以重建冲突集", "info");
       }
@@ -522,6 +528,25 @@ export default class SyGspPlugin extends q.Plugin {
     return !this.metadataStore.getBaseCommit(this._repoKey(this._repoInfo()));
   }
 
+  /** 诊断面板「解除暂停并手动同步一次」: 先清除暂停状态,再立即跑一次手动同步。
+   * 若冲突真实存在,引擎会重新检测并再次暂停(重建冲突集),安全可逆;
+   * 若为陈旧/无出口的暂停记录,一次同步即恢复正常并推进状态。 */
+  async _clearPauseAndSync() {
+    if (!this.controller) return null;
+    if (!this.controller.isConflictPaused()) {
+      this.notification.toast("当前没有暂停状态,无需解除", "info");
+      return null;
+    }
+    const kind = this.controller.conflictPaused && this.controller.conflictPaused.kind;
+    this.controller.dismissConflictPause();
+    this.logs.info("用户确认冲突已处理,解除暂停状态(" + kind + "),立即执行一次手动同步");
+    this.notification.toast("已解除暂停,开始一次手动同步(若仍存在冲突会重新进入冲突处理)", "info");
+    return this.syncNow({ trigger: "manual" }).catch((err) => {
+      this.logs.error("解除暂停后的手动同步失败: " + String((err && err.message) || err));
+      this.notification.toast("❌ 同步失败: " + String((err && err.message) || err), "error");
+    });
+  }
+
   // ---------- 自动同步 ----------
 
   _restartAutoSyncIfConfigured() {
@@ -616,7 +641,12 @@ export default class SyGspPlugin extends q.Plugin {
       resolveConflict: () => {
         const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
         if (set) this.conflictDialog.show(set);
-        else this.diagnosisPanel.show({ mode: this.controller.conflictPaused && this.controller.conflictPaused.kind === "BASE_UNRESOLVED" ? "base_recovery" : "diagnosis" });
+        else {
+          // 无冲突集: 落日志 + 打开诊断(含解除暂停出口),不再无声无息
+          const paused = this.controller && this.controller.conflictPaused;
+          this.logs.warn("菜单处理冲突: 无可用冲突集(kind=" + (paused && paused.kind) + "),已打开诊断面板");
+          this.diagnosisPanel.show({ mode: paused && paused.kind === "BASE_UNRESOLVED" ? "base_recovery" : "diagnosis" });
+        }
       },
       getSetting: (key) => this.settingUtils.take(key),
       setSettingAndSave: (key, value) => this.settingUtils.setAndSave(key, value),
@@ -748,6 +778,19 @@ export default class SyGspPlugin extends q.Plugin {
       });
       return checks;
     }
+    // 同步状态置顶: 冲突/基准暂停时诊断必须如实呈现(此前只查配置/连通/基准,
+    // 出现「全绿却提示处理冲突」的困惑——暂停记录与只读检查项本可独立存在)
+    const pausedInfo = (this.controller && this.controller.conflictPaused) || null;
+    checks.push({
+      name: "同步状态",
+      ok: !pausedInfo,
+      detail: pausedInfo
+        ? "暂停中: " + pausedInfo.kind +
+          (pausedInfo.conflictCount ? "(" + pausedInfo.conflictCount + " 个文件)" : "") +
+          (pausedInfo.reason ? " — " + pausedInfo.reason : "") +
+          "。请先处理冲突;若确认冲突已处理,可用面板底部「解除暂停并手动同步一次」"
+        : "正常(无未处理冲突或暂停)",
+    });
     checks.push({
       name: "仓库配置",
       ok: !!(info.owner && info.repo && info.branch),

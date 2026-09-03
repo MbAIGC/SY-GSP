@@ -1,21 +1,52 @@
 /**
  * RuntimeLogs: 运行日志(内存环形缓冲 + 面板展示)。
  * 记录同步关键事件与错误摘要(已脱敏),不包含 Token 等敏感信息。
+ * 时间一律按本地时区展示(存储仍为 UTC ISO,渲染时转换——直接截取 UTC 曾导致本地时区差)。
  */
+
+/** ISO 时间 → 本地时区 "YYYY-MM-DD HH:mm:ss"(与历史面板 toLocaleString 语义一致) */
+export function formatLocalTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds())
+  );
+}
 
 export class RuntimeLogs {
   constructor(limit = 200) {
     this.limit = limit;
     this.entries = [];
+    this._subscribers = [];
+  }
+
+  /** 订阅新增条目(用于打开面板时实时刷新);返回退订函数 */
+  subscribe(fn) {
+    if (typeof fn !== "function") return () => {};
+    this._subscribers.push(fn);
+    return () => {
+      const i = this._subscribers.indexOf(fn);
+      if (i >= 0) this._subscribers.splice(i, 1);
+    };
   }
 
   append(level, text) {
-    this.entries.push({
+    const entry = {
       at: new Date().toISOString(),
       level,
       text: String(text).slice(0, 1000),
-    });
+    };
+    this.entries.push(entry);
     while (this.entries.length > this.limit) this.entries.shift();
+    for (const fn of this._subscribers) {
+      try {
+        fn(entry);
+      } catch (err) {
+        console.warn("[SY-GSP] 日志订阅回调异常:", err && err.message);
+      }
+    }
   }
 
   info(text) {
@@ -32,7 +63,7 @@ export class RuntimeLogs {
 
   render() {
     return this.entries
-      .map((e) => "[" + e.at.replace("T", " ").slice(0, 19) + "] [" + e.level + "] " + e.text)
+      .map((e) => "[" + formatLocalTime(e.at) + "] [" + e.level + "] " + e.text)
       .join("\n");
   }
 }
@@ -43,6 +74,9 @@ export class RuntimeLogs {
  * 内容必须挂到 .b3-dialog__body(旧版为 .b3-dialog__content)里。
  */
 export function openLogsDialog({ q, i18n, logs }) {
+  // 空态给出引导: 无日志时说明哪些动作会产生记录,避免误以为功能失效
+  const emptyHint = (i18n && i18n.sygspLogsEmpty) ||
+    "暂无日志。手动同步、自动同步与状态变化(含被暂停门拦截的原因)会实时记录在这里";
   const dialog = new q.Dialog({
     title: (i18n && i18n.gSyncRuntimeLogsTitle) || "SY-GSP 运行日志",
     content: '<div id="sygspLogsRoot" class="fn__flex fn__flex-column" style="height:100%;"></div>',
@@ -63,12 +97,22 @@ export function openLogsDialog({ q, i18n, logs }) {
   textarea.readOnly = true;
   textarea.style.cssText = "font-family:monospace;font-size:12px;min-height:0;resize:none;";
   const fill = () => {
-    textarea.value = logs.render() || "暂无日志";
+    textarea.value = logs.render() || emptyHint;
     textarea.scrollTop = textarea.scrollHeight;
   };
   refresh.addEventListener("click", fill);
   fill();
   bar.appendChild(refresh);
   root.append(bar, textarea);
+
+  // 打开期间实时刷新: 订阅新增条目,新日志产生即更新;对话框销毁时退订,不泄漏
+  const unsubscribe = logs.subscribe(fill);
+  const origDestroy = typeof dialog.destroy === "function" ? dialog.destroy.bind(dialog) : null;
+  if (origDestroy) {
+    dialog.destroy = () => {
+      unsubscribe();
+      origDestroy();
+    };
+  }
   return dialog;
 }
