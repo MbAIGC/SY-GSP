@@ -15,6 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(__dirname, "index.js");
 
 async function main() {
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "plugin.json"), "utf8"));
   const result = await build({
     entryPoints: [path.join(__dirname, "src/plugin/index.js")],
     outfile: OUT,
@@ -27,6 +28,7 @@ async function main() {
     sourcemap: false,
     legalComments: "none",
     external: ["siyuan"],
+    define: { __SY_GSP_VERSION__: JSON.stringify(manifest.version) },
     logLevel: "warning",
     metafile: true,
   });

@@ -94,6 +94,10 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
     icon: "iconSettings",
     click: actions.openSettings,
   });
+  // 底部插件版本号(展示用,无点击行为)
+  menu.addItem({
+    label: "SY-GSP v" + (actions.pluginVersion || "?"),
+  });
   return menu;
 }
 

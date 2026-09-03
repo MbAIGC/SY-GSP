@@ -409,3 +409,58 @@ test("引擎: 空文档拒绝上传(EMPTY_DOC)", async () => {
 });
 
 export { makeFakeRepo, makeHarness };
+
+test("强制方向(以本地为准): 无基准双方均有内容 → 镜像上传并删除远端多余,基准推进", async () => {
+  const a = "data/20240101120000-abc/a.md";
+  const b = "data/20240101120000-abc/b.md";
+  const c = "data/20240101120000-abc/c.md";
+  const h = await makeHarness({
+    remoteFiles: { [a]: "remote a", [b]: "only remote" },
+    localFiles: { [a]: "local a", [c]: "local only" },
+  });
+  const ctx = h.makeCtx({ trigger: "conflict_resolution", mode: "local_over_remote" });
+  const result = await h.engine.run(ctx);
+  assert.equal(result.paused, undefined, "不得再进入 BASE_UNRESOLVED 暂停");
+  assert.equal(result.success, true);
+  assert.equal(result.uploads, 2, "a.md 更新 + c.md 新建");
+  assert.equal(result.deletionsRemote, 1, "b.md 远端多余应删除");
+  assert.equal(result.downloads, 0);
+  const localA = await h.kernel.getFile(a);
+  assert.equal(dec(new Uint8Array(await localA.arrayBuffer())), "local a", "本地内容保持");
+  const headTree = (await h.repo.provider.getCommit(h.repo.head)).treeSha;
+  const paths = (await h.repo.provider.getTree(headTree)).map((e) => e.path).sort();
+  assert.deepEqual(paths, [a, c].sort(), "远端应与本地一致");
+  const base = h.metadataStore.getBaseCommit("github:o/r:main");
+  assert.equal(base, h.repo.head, "成功后基准推进到新远端头");
+});
+
+test("强制方向(以远端为准): 镜像下载并删除本地多余,不产生远端提交", async () => {
+  const a = "data/20240101120000-abc/a.md";
+  const b = "data/20240101120000-abc/b.md";
+  const c = "data/20240101120000-abc/c.md";
+  const h = await makeHarness({
+    remoteFiles: { [a]: "remote a", [b]: "only remote" },
+    localFiles: { [a]: "local a", [c]: "local only" },
+  });
+  const headBefore = h.repo.head;
+  const ctx = h.makeCtx({ trigger: "conflict_resolution", mode: "remote_over_local" });
+  const result = await h.engine.run(ctx);
+  assert.equal(result.success, true);
+  assert.equal(result.downloads, 2, "a.md 更新 + b.md 新建");
+  assert.equal(result.deletionsLocal, 1, "c.md 本地多余应删除");
+  assert.equal(result.uploads, 0);
+  assert.equal(h.repo.head, headBefore, "远端不应产生新提交");
+  const localA = await h.kernel.getFile(a);
+  assert.equal(dec(new Uint8Array(await localA.arrayBuffer())), "remote a", "本地被远端覆盖");
+  assert.equal(await h.kernel.getFile(c), null, "本地多余文件已删除");
+  const base = h.metadataStore.getBaseCommit("github:o/r:main");
+  assert.equal(base, headBefore, "基准推进到远端头");
+});
+
+test("强制方向(以远端为准): 空仓库显式报错,不清空本地", async () => {
+  const c = "data/20240101120000-abc/c.md";
+  const h = await makeHarness({ localFiles: { [c]: "local only" } });
+  const ctx = h.makeCtx({ trigger: "conflict_resolution", mode: "remote_over_local" });
+  await assert.rejects(() => h.engine.run(ctx), (err) => /远端分支为空/.test(err.message));
+  assert.notEqual(await h.kernel.getFile(c), null, "本地文件不得被清空");
+});

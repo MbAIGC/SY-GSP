@@ -2641,6 +2641,9 @@ var SyncEngine = class {
           throw err;
         }
       }
+      if (ctx.trigger === "conflict_resolution" && (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL)) {
+        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas);
+      }
       transition(ctx, SyncState.RESOLVING_BASE);
       this._emit("engine:phase", { ctx, state: SyncState.RESOLVING_BASE });
       const baseResolution = await this._resolveBase(ctx, remoteHead ? remoteHead.sha : null);
@@ -2817,6 +2820,109 @@ var SyncEngine = class {
       unresolved: true,
       reason: "首次同步: 本地与远端都有内容,无法证明共同基准,需要通过首同步向导明确选择"
     };
+  }
+  /**
+   * 强制方向同步(2.0 方案 §7.3 恢复向导的执行体):
+   * - LOCAL_OVER_REMOTE(以本地为准): 上传全部本地文件,删除远端多余文件;
+   * - REMOTE_OVER_LOCAL(以远端为准): 下载全部远端文件,删除本地多余文件;
+   * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
+   * 空仓库 + 以远端为准 无远端事实可依,显式报错而非清空本地。
+   */
+  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas) {
+    const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
+    if (!keepLocal && !remoteHead) {
+      throw new SyncError({
+        category: SyncErrorCategory.REPOSITORY,
+        phase: SyncState.RESOLVING_BASE,
+        message: "远端分支为空,无法以远端为准同步",
+        recoverable: true
+      });
+    }
+    transition(ctx, SyncState.RESOLVING_BASE, "forced:" + (keepLocal ? "local_over_remote" : "remote_over_local"));
+    transition(ctx, SyncState.PLANNING);
+    this._emit("engine:phase", { ctx, state: SyncState.PLANNING });
+    ctx.expectedRemoteHead = remoteHead ? remoteHead.sha : null;
+    const plan = {
+      uploads: [],
+      downloads: [],
+      deletionsRemote: [],
+      deletionsLocal: [],
+      merges: [],
+      conflicts: [],
+      unchanged: 0,
+      skippedDeletes: 0
+    };
+    const localPaths = new Set(localShas.keys());
+    const remotePaths = new Set(remoteEntries.keys());
+    transition(ctx, SyncState.MERGING);
+    this._emit("engine:phase", { ctx, state: SyncState.MERGING });
+    if (keepLocal) {
+      for (const path of localPaths) {
+        const remoteEntry = remoteEntries.get(path);
+        if (remoteEntry && remoteEntry.sha === localShas.get(path)) {
+          plan.unchanged += 1;
+          continue;
+        }
+        plan.uploads.push({ path, op: remoteEntry ? "update" : "create" });
+      }
+      for (const path of remotePaths) {
+        if (!localPaths.has(path)) {
+          plan.deletionsRemote.push({ path, remoteSha: remoteEntries.get(path).sha });
+        }
+      }
+    } else {
+      for (const path of remotePaths) {
+        const remoteSha = remoteEntries.get(path).sha;
+        if (localPaths.has(path) && localShas.get(path) === remoteSha) {
+          plan.unchanged += 1;
+          continue;
+        }
+        plan.downloads.push({ path, op: localPaths.has(path) ? "update" : "create" });
+      }
+      for (const path of localPaths) {
+        if (!remotePaths.has(path)) plan.deletionsLocal.push({ path });
+      }
+    }
+    ctx.plan = plan;
+    let finalSha = remoteHead ? remoteHead.sha : null;
+    if (keepLocal) {
+      transition(ctx, SyncState.COMMITTING);
+      this._emit("engine:phase", { ctx, state: SyncState.COMMITTING });
+      const { batches, skipped } = this.commitBuilder.build({
+        operationId: ctx.id,
+        uploads: await this._materializeUploads(ctx, plan),
+        deletionsRemote: plan.deletionsRemote,
+        provider: this.provider.platform
+      });
+      ctx.skippedLarge = skipped;
+      if (batches.length === 0) {
+        finalSha = remoteHead ? remoteHead.sha : null;
+      } else if (this.provider.platform === "github") {
+        finalSha = await this._pushAtomic(ctx, batches, remoteEntries);
+      } else {
+        finalSha = await this._pushPerFile(ctx, batches);
+      }
+      if (batches.length > 0 && !finalSha) {
+        throw new SyncError({
+          category: SyncErrorCategory.REMOTE_CHANGED,
+          code: "PUSH_UNCONFIRMED",
+          operation: "push",
+          message: "推送后无法确认远端引用状态,本轮不标记成功",
+          retryable: true,
+          recoverable: false
+        });
+      }
+    } else {
+      await this._applyLocalChanges(ctx, plan);
+    }
+    await this._rebuildManifest(ctx, plan);
+    const confirmedSha = finalSha || (remoteHead ? remoteHead.sha : null);
+    if (confirmedSha) {
+      await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
+    }
+    transition(ctx, SyncState.SUCCESS);
+    finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, confirmedSha, plan) });
+    return ctx.result;
   }
   async _runMerges(ctx, plan, baseEntries, remoteEntries) {
     for (const mergeItem of plan.merges) {
@@ -5181,6 +5287,9 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
     icon: "iconSettings",
     click: actions.openSettings
   });
+  menu.addItem({
+    label: "SY-GSP v" + (actions.pluginVersion || "?")
+  });
   return menu;
 }
 function buildRadioItems(_title, options, settingKey, actions) {
@@ -5196,6 +5305,7 @@ function buildRadioItems(_title, options, settingKey, actions) {
 }
 
 // src/plugin/index.js
+var PLUGIN_VERSION = "0.1.0";
 var ICONS_MAIN = '<symbol id="iconGmailSync" viewBox="0 0 1024 1024"><path d="M998.4 627.2c-51.2 230.4-256 396.8-499.2 396.8-224 0-409.6-140.8-480-339.2h121.6c64 134.4 198.4 230.4 358.4 230.4 179.2 0 332.8-121.6 384-281.6l115.2-6.4zM499.2 0c224 0 409.6 140.8 480 339.2h-121.6c-64-134.4-198.4-230.4-358.4-230.4-179.2 0-332.8 121.6-384 281.6L0 396.8C51.2 172.8 256 0 499.2 0z" fill="#646A73"></path><path d="M998.4 332.8c0 32-25.6 57.6-57.6 64h-140.8c-19.2 0-32-12.8-32-32v-51.2c0-19.2 12.8-32 32-32h83.2V32c0-12.8 12.8-25.6 25.6-32h57.6c19.2 0 32 12.8 32 32v300.8zM0 659.2c0-32 25.6-57.6 57.6-64h140.8c19.2 0 32 12.8 32 32v51.2c0 19.2-12.8 32-32 32H115.2V960c0 12.8-12.8 25.6-25.6 32H32c-19.2 0-32-12.8-32-32v-300.8z" fill="#646A73"></path><path d="M665.6 569.6H512V473.6h249.6c12.8 0 12.8 0 12.8 6.4 6.4 70.4 0 134.4-38.4 192-38.4 57.6-96 96-160 108.8-83.2 19.2-166.4 0-236.8-51.2-57.6-44.8-89.6-102.4-96-172.8-19.2-147.2 64-275.2 204.8-313.6 89.6-19.2 172.8 0 243.2 57.6l6.4 6.4L620.8 384l-6.4-6.4c-25.6-25.6-64-38.4-108.8-38.4-83.2 0-153.6 64-160 147.2-12.8 89.6 44.8 172.8 134.4 192 51.2 12.8 96 6.4 140.8-25.6 19.2-19.2 38.4-44.8 44.8-76.8v-6.4z" fill="#646A73"></path></symbol>';
 var ICONS_SYNC = '<symbol id="iconModeSync" viewBox="0 0 1024 1024"><path d="M512 128c-212.064 0-384 171.936-384 384h-64l106.624 149.312L277.312 512H213.344c0-164.928 133.728-298.656 298.656-298.656 61.6 0 118.848 18.624 166.4 50.56l46.912-51.904A380.544 380.544 0 0 0 512 128z m331.328 234.688L746.688 512h64c0 164.928-133.728 298.656-298.656 298.656a297.216 297.216 0 0 1-166.4-50.56l-46.912 51.904A380.544 380.544 0 0 0 512 896c212.064 0 384-171.936 384-384h64l-106.624-149.312z" fill="currentColor"></path></symbol>';
 var SyGspPlugin = class extends q.Plugin {
@@ -5248,6 +5358,7 @@ var SyGspPlugin = class extends q.Plugin {
       });
       this.controller = this._buildController();
       this._bindEngineEvents();
+      this._startIconWatch();
       await this.controller.restore();
       await this._applyStartupBehavior();
     } catch (err) {
@@ -5259,7 +5370,31 @@ var SyGspPlugin = class extends q.Plugin {
       }
     }
   }
+  /** 存储数据变更钩子(思源官方扩展点)。
+   * 必须重写: loader.ts 以 plugin.onDataChanged === Plugin.prototype.onDataChanged 判断,
+   * 未重写时任何 saveData(同步元数据/历史/设置)都会被升级为整个插件卸载重载,
+   * 顶栏图标随之间歇性消失(需禁用启用才恢复)。
+   */
+  async onDataChanged() {
+  }
+  /** 顶栏自愈: 思源侧工具栏重建可能移除按钮元素,
+   * 官方 addTopBar 按 id 幂等且对不在文档中的元素重新插入,借此周期性恢复 */
+  _ensureTopBar() {
+    try {
+      if (this.isMobile) return;
+      if (this.topBarElement && !document.contains(this.topBarElement)) {
+        this._registerTopBar();
+      }
+    } catch (err) {
+      console.warn("[SY-GSP] 顶栏自检失败:", err && err.message);
+    }
+  }
+  _startIconWatch() {
+    if (this._iconWatchTimer) return;
+    this._iconWatchTimer = setInterval(() => this._ensureTopBar(), 15e3);
+  }
   async onLayoutReady() {
+    this._ensureTopBar();
     try {
       this._registerTopBar();
       this._bindEngineEvents();
@@ -5278,7 +5413,14 @@ var SyGspPlugin = class extends q.Plugin {
       clearInterval(this.timerTask);
       this.timerTask = null;
     }
+    if (this._iconWatchTimer) {
+      clearInterval(this._iconWatchTimer);
+      this._iconWatchTimer = null;
+    }
     if (this.controller) this.controller.destroy();
+    this._eventsBound = false;
+    this._startupApplied = false;
+    this.topBarElement = null;
   }
   async uninstall() {
     q.showMessage(this.i18n.byePlugin);
@@ -5641,6 +5783,7 @@ var SyGspPlugin = class extends q.Plugin {
       openHistory: () => this.openSyncHistoryPanel(),
       openLogs: () => openLogsDialog({ q, i18n: this.i18n, logs: this.logs }),
       openDiagnosis: () => this.diagnosisPanel.show({ mode: "diagnosis" }),
+      pluginVersion: PLUGIN_VERSION || this.manifest && this.manifest.version || "",
       openSettings: () => this.openSetting(),
       resolveConflict: () => {
         const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));

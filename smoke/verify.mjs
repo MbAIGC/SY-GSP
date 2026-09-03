@@ -308,6 +308,29 @@ plugin.data = {
     panel.destroy();
   });
 
+  check("顶栏自愈: 元素脱离文档后可重新注册", () => {
+    const before = stubCalls.addTopBar;
+    const origContains = globalThis.document.contains;
+    globalThis.document.contains = () => false;
+    try {
+      plugin._ensureTopBar();
+    } finally {
+      if (origContains === undefined) delete globalThis.document.contains;
+      else globalThis.document.contains = origContains;
+    }
+    if (stubCalls.addTopBar !== before + 1) throw new Error("未触发重新注册");
+  });
+
+  check("顶栏菜单: 底部显示插件版本号", () => {
+    stubCalls.lastMenu = null;
+    plugin._topBarCb();
+    const items = (stubCalls.lastMenu && stubCalls.lastMenu.items) || [];
+    const hit = items.map((it) => it && it.label).find(
+      (l) => typeof l === "string" && /^SY-GSP v/.test(l)
+    );
+    if (!hit) throw new Error("菜单缺少版本号条目");
+  });
+
   check("运行日志: 菜单点击后正确挂载到对话框内容区", () => {
     stubCalls.dialogMisplaced = 0;
     const before = stubCalls.dialog;

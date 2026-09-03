@@ -30,6 +30,9 @@ import { RuntimeLogs, openLogsDialog } from "../ui/runtime-logs.js";
 import { SyncHistoryPanel } from "../ui/sync-history-panel.js";
 import { buildTopBarMenu } from "./menu.js";
 
+// 构建时由 build.mjs 从 plugin.json 注入;源码直跑(测试)环境下回退空串
+const PLUGIN_VERSION = (typeof __SY_GSP_VERSION__ === "string" && __SY_GSP_VERSION__) || "";
+
 const ICONS_MAIN =
   '<symbol id="iconGmailSync" viewBox="0 0 1024 1024"><path d="M998.4 627.2c-51.2 230.4-256 396.8-499.2 396.8-224 0-409.6-140.8-480-339.2h121.6c64 134.4 198.4 230.4 358.4 230.4 179.2 0 332.8-121.6 384-281.6l115.2-6.4zM499.2 0c224 0 409.6 140.8 480 339.2h-121.6c-64-134.4-198.4-230.4-358.4-230.4-179.2 0-332.8 121.6-384 281.6L0 396.8C51.2 172.8 256 0 499.2 0z" fill="#646A73"></path><path d="M998.4 332.8c0 32-25.6 57.6-57.6 64h-140.8c-19.2 0-32-12.8-32-32v-51.2c0-19.2 12.8-32 32-32h83.2V32c0-12.8 12.8-25.6 25.6-32h57.6c19.2 0 32 12.8 32 32v300.8zM0 659.2c0-32 25.6-57.6 57.6-64h140.8c19.2 0 32 12.8 32 32v51.2c0 19.2-12.8 32-32 32H115.2V960c0 12.8-12.8 25.6-25.6 32H32c-19.2 0-32-12.8-32-32v-300.8z" fill="#646A73"></path><path d="M665.6 569.6H512V473.6h249.6c12.8 0 12.8 0 12.8 6.4 6.4 70.4 0 134.4-38.4 192-38.4 57.6-96 96-160 108.8-83.2 19.2-166.4 0-236.8-51.2-57.6-44.8-89.6-102.4-96-172.8-19.2-147.2 64-275.2 204.8-313.6 89.6-19.2 172.8 0 243.2 57.6l6.4 6.4L620.8 384l-6.4-6.4c-25.6-25.6-64-38.4-108.8-38.4-83.2 0-153.6 64-160 147.2-12.8 89.6 44.8 172.8 134.4 192 51.2 12.8 96 6.4 140.8-25.6 19.2-19.2 38.4-44.8 44.8-76.8v-6.4z" fill="#646A73"></path></symbol>';
 const ICONS_SYNC =
@@ -93,6 +96,7 @@ export default class SyGspPlugin extends q.Plugin {
       // 事件绑定不依赖 onLayoutReady: 装载器(kernelInit 失败等)可能跳过 onLayoutReady,
       // 否则 sync:error/success 无监听 → 失败无 toast、无状态日志(实证于用户环境)
       this._bindEngineEvents();
+      this._startIconWatch();
       await this.controller.restore();
       await this._applyStartupBehavior();
     } catch (err) {
@@ -106,7 +110,35 @@ export default class SyGspPlugin extends q.Plugin {
     }
   }
 
+  /** 存储数据变更钩子(思源官方扩展点)。
+   * 必须重写: loader.ts 以 plugin.onDataChanged === Plugin.prototype.onDataChanged 判断,
+   * 未重写时任何 saveData(同步元数据/历史/设置)都会被升级为整个插件卸载重载,
+   * 顶栏图标随之间歇性消失(需禁用启用才恢复)。
+   */
+  async onDataChanged() {
+    // 插件自身的存储由内部状态机管理,数据变更无需重建实例
+  }
+
+  /** 顶栏自愈: 思源侧工具栏重建可能移除按钮元素,
+   * 官方 addTopBar 按 id 幂等且对不在文档中的元素重新插入,借此周期性恢复 */
+  _ensureTopBar() {
+    try {
+      if (this.isMobile) return;
+      if (this.topBarElement && !document.contains(this.topBarElement)) {
+        this._registerTopBar();
+      }
+    } catch (err) {
+      console.warn("[SY-GSP] 顶栏自检失败:", err && err.message);
+    }
+  }
+
+  _startIconWatch() {
+    if (this._iconWatchTimer) return;
+    this._iconWatchTimer = setInterval(() => this._ensureTopBar(), 15000);
+  }
+
   async onLayoutReady() {
+    this._ensureTopBar();
     try {
       this._registerTopBar(); // 幂等: onload 已注册时按 id 复用,不在文档时重新插入
       this._bindEngineEvents();
@@ -126,7 +158,14 @@ export default class SyGspPlugin extends q.Plugin {
       clearInterval(this.timerTask);
       this.timerTask = null;
     }
+    if (this._iconWatchTimer) {
+      clearInterval(this._iconWatchTimer);
+      this._iconWatchTimer = null;
+    }
     if (this.controller) this.controller.destroy();
+    this._eventsBound = false;
+    this._startupApplied = false;
+    this.topBarElement = null;
   }
 
   async uninstall() {
@@ -527,6 +566,7 @@ export default class SyGspPlugin extends q.Plugin {
       openHistory: () => this.openSyncHistoryPanel(),
       openLogs: () => openLogsDialog({ q, i18n: this.i18n, logs: this.logs }),
       openDiagnosis: () => this.diagnosisPanel.show({ mode: "diagnosis" }),
+      pluginVersion: PLUGIN_VERSION || (this.manifest && this.manifest.version) || "",
       openSettings: () => this.openSetting(),
       resolveConflict: () => {
         const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));

@@ -11,7 +11,7 @@
  */
 
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
-import { SyncState, transition, finish } from "./sync-context.js";
+import { SyncState, SyncMode, transition, finish } from "./sync-context.js";
 import { PlanAction } from "./sync-planner.js";
 
 export class SyncEngine {
@@ -74,6 +74,14 @@ export class SyncEngine {
         } else {
           throw err;
         }
+      }
+
+      // 3.5 强制方向(首同步向导明确选边,trigger=conflict_resolution):
+      // 跳过基准解析与三路合并,按用户选定方向镜像,否则选边后会再次命中
+      // BASE_UNRESOLVED(基准仍未确认)形成向导循环
+      if (ctx.trigger === "conflict_resolution" &&
+          (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL)) {
+        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas);
       }
 
       // 4. BASE 解析
@@ -274,6 +282,109 @@ export class SyncEngine {
       unresolved: true,
       reason: "首次同步: 本地与远端都有内容,无法证明共同基准,需要通过首同步向导明确选择",
     };
+  }
+
+  /**
+   * 强制方向同步(2.0 方案 §7.3 恢复向导的执行体):
+   * - LOCAL_OVER_REMOTE(以本地为准): 上传全部本地文件,删除远端多余文件;
+   * - REMOTE_OVER_LOCAL(以远端为准): 下载全部远端文件,删除本地多余文件;
+   * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
+   * 空仓库 + 以远端为准 无远端事实可依,显式报错而非清空本地。
+   */
+  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas) {
+    const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
+    if (!keepLocal && !remoteHead) {
+      throw new SyncError({
+        category: SyncErrorCategory.REPOSITORY,
+        phase: SyncState.RESOLVING_BASE,
+        message: "远端分支为空,无法以远端为准同步",
+        recoverable: true,
+      });
+    }
+    transition(ctx, SyncState.RESOLVING_BASE, "forced:" + (keepLocal ? "local_over_remote" : "remote_over_local"));
+    transition(ctx, SyncState.PLANNING);
+    this._emit("engine:phase", { ctx, state: SyncState.PLANNING });
+    ctx.expectedRemoteHead = remoteHead ? remoteHead.sha : null;
+
+    const plan = {
+      uploads: [], downloads: [], deletionsRemote: [], deletionsLocal: [],
+      merges: [], conflicts: [], unchanged: 0, skippedDeletes: 0,
+    };
+    const localPaths = new Set(localShas.keys());
+    const remotePaths = new Set(remoteEntries.keys());
+
+    transition(ctx, SyncState.MERGING);
+    this._emit("engine:phase", { ctx, state: SyncState.MERGING });
+    if (keepLocal) {
+      for (const path of localPaths) {
+        const remoteEntry = remoteEntries.get(path);
+        if (remoteEntry && remoteEntry.sha === localShas.get(path)) {
+          plan.unchanged += 1;
+          continue;
+        }
+        plan.uploads.push({ path, op: remoteEntry ? "update" : "create" });
+      }
+      for (const path of remotePaths) {
+        if (!localPaths.has(path)) {
+          plan.deletionsRemote.push({ path, remoteSha: remoteEntries.get(path).sha });
+        }
+      }
+    } else {
+      for (const path of remotePaths) {
+        const remoteSha = remoteEntries.get(path).sha;
+        if (localPaths.has(path) && localShas.get(path) === remoteSha) {
+          plan.unchanged += 1;
+          continue;
+        }
+        plan.downloads.push({ path, op: localPaths.has(path) ? "update" : "create" });
+      }
+      for (const path of localPaths) {
+        if (!remotePaths.has(path)) plan.deletionsLocal.push({ path });
+      }
+    }
+    ctx.plan = plan;
+
+    let finalSha = remoteHead ? remoteHead.sha : null;
+    if (keepLocal) {
+      transition(ctx, SyncState.COMMITTING);
+      this._emit("engine:phase", { ctx, state: SyncState.COMMITTING });
+      const { batches, skipped } = this.commitBuilder.build({
+        operationId: ctx.id,
+        uploads: await this._materializeUploads(ctx, plan),
+        deletionsRemote: plan.deletionsRemote,
+        provider: this.provider.platform,
+      });
+      ctx.skippedLarge = skipped;
+      if (batches.length === 0) {
+        finalSha = remoteHead ? remoteHead.sha : null;
+      } else if (this.provider.platform === "github") {
+        finalSha = await this._pushAtomic(ctx, batches, remoteEntries);
+      } else {
+        finalSha = await this._pushPerFile(ctx, batches);
+      }
+      if (batches.length > 0 && !finalSha) {
+        throw new SyncError({
+          category: SyncErrorCategory.REMOTE_CHANGED,
+          code: "PUSH_UNCONFIRMED",
+          operation: "push",
+          message: "推送后无法确认远端引用状态,本轮不标记成功",
+          retryable: true,
+          recoverable: false,
+        });
+      }
+    } else {
+      // 以远端为准: 仅本地侧变更,不产生远端写入
+      await this._applyLocalChanges(ctx, plan);
+    }
+
+    await this._rebuildManifest(ctx, plan);
+    const confirmedSha = finalSha || (remoteHead ? remoteHead.sha : null);
+    if (confirmedSha) {
+      await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
+    }
+    transition(ctx, SyncState.SUCCESS);
+    finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, confirmedSha, plan) });
+    return ctx.result;
   }
 
   async _runMerges(ctx, plan, baseEntries, remoteEntries) {
