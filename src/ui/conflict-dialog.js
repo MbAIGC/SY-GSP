@@ -17,6 +17,7 @@ export class ConflictDialog {
     this.conflictService = deps.conflictService;
     this.onDecide = deps.onDecide;
     this.notify = deps.notify;
+    this.logger = deps.logger || { info() {}, warn() {}, error() {} };
     this.dialog = null;
     this.set = null;
   }
@@ -140,8 +141,9 @@ export class ConflictDialog {
 
   async _decideAll(decision) {
     const operationId = this.set.operationId;
-    this.notify("已选择全部" + (decision === "keep_remote" ? "保留远端" : "保留本地") + "，正在重新规划执行", "info");
     const conflicts = this.set.conflicts.filter((c) => c && (!c.status || c.status === "open"));
+    this.logger.info("冲突批量决策开始 #" + operationId + ": " + (decision === "keep_remote" ? "全部保留远端" : "全部保留本地") + "，共 " + conflicts.length + " 个文件");
+    this.notify("已选择全部" + (decision === "keep_remote" ? "保留远端" : "保留本地") + "，正在重新规划执行", "info");
     for (const conflict of conflicts) {
       await this.conflictService.decide(operationId, conflict.path, decision);
     }

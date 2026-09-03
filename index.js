@@ -136,7 +136,9 @@ function isIgnored(path, patterns) {
   const p = String(path == null ? "" : path).toLowerCase();
   return patterns.some((pattern) => {
     const s = String(pattern).toLowerCase();
-    if (s.indexOf("*") === -1) return p === s;
+    if (s.indexOf("*") === -1) {
+      return p === s || s.includes("/") && p.startsWith(s + "/");
+    }
     return new RegExp("^" + s.replace(/\*/g, ".*") + "$").test(p);
   });
 }
@@ -229,8 +231,15 @@ var WorkspaceAdapter = class {
             queue.push(path);
             continue;
           }
-          let updatedMs = new Date(entry.updated).getTime() * 1e3;
-          if (!(updatedMs < Date.now())) updatedMs = 0;
+          const rawUpdated = entry.updated;
+          let updatedMs = 0;
+          if (typeof rawUpdated === "number") {
+            updatedMs = rawUpdated < 1e11 ? rawUpdated * 1e3 : rawUpdated;
+          } else if (rawUpdated) {
+            const parsed = Date.parse(String(rawUpdated));
+            updatedMs = Number.isFinite(parsed) ? parsed : 0;
+          }
+          if (!(updatedMs > 0 && updatedMs <= Date.now())) updatedMs = 0;
           if (sinceMs && updatedMs <= sinceMs) continue;
           files.push({ path, name: entry.name, updated: updatedMs });
         }
@@ -2426,14 +2435,23 @@ var SyncEngine = class {
       const forcedByWizard = (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution") && (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
       let remoteHead = null;
       let remoteEntries = /* @__PURE__ */ new Map();
+      let branchHeadMissing = false;
       try {
-        remoteHead = await this.provider.getBranchHead();
+        try {
+          remoteHead = await this.provider.getBranchHead();
+        } catch (err) {
+          if (err instanceof SyncError && err.httpStatus === 404) {
+            branchHeadMissing = true;
+            throw err;
+          }
+          throw err;
+        }
         ctx.observedRemoteHead = remoteHead.sha;
         const remoteCommit = await this.provider.getCommit(remoteHead.sha);
         ctx.remoteCommitDate = remoteCommit.date || null;
         remoteEntries = await this._treeMap(await this.provider.getTree(remoteCommit.treeSha));
       } catch (err) {
-        if (!(err instanceof SyncError && err.httpStatus === 404)) throw err;
+        if (!(err instanceof SyncError && err.httpStatus === 404 && branchHeadMissing)) throw err;
         if (confirmedBaseSha && !forcedByWizard) {
           ctx.baseUnresolved = true;
           ctx.conflicts = [{
@@ -3322,7 +3340,7 @@ var SyncController = class {
         const casChurn = syncErr.category === SyncErrorCategory.REMOTE_CHANGED || syncErr.category === SyncErrorCategory.PUSH_REJECTED;
         if (casChurn && attempt >= 1 && !this._casChurnWarned) {
           this._casChurnWarned = true;
-          this.logger.warn("⚠️ 本轮同步已多次遭遇远端引用竞争: 远端疑似存在持续并发写入者(其他设备/旧版插件/自动化任务)。请检查仓库提交历史与各端插件状态。");
+          this.logger.warn("⚠️ 本轮同步连续两次无法确认远端引用状态: 远端 HEAD 在本轮规划与推送期间发生变化。该现象不等同于已确认存在其他设备写入，请结合远端提交指纹继续判断。");
         }
         if (!decision.retry || ctx.state === SyncState.CONFLICT_PAUSED) {
           await this._onFailed(ctx, syncErr);
@@ -3427,11 +3445,27 @@ var SyncController = class {
   /** 用户冲突决策: 逐文件 keep_local/keep_remote → 重新规划执行 */
   async resolveConflicts(decisions) {
     const overrides = decisions instanceof Map ? new Map(decisions) : new Map(Object.entries(decisions || {}));
-    this.logger.info("冲突处理: 收到 " + overrides.size + " 个文件决策(" + [...overrides.values()].filter((v) => v === "keep_remote").length + " 个保留远端, " + [...overrides.values()].filter((v) => v === "keep_local").length + " 个保留本地),开始重新规划");
-    if (this.conflictPaused && this.conflictPaused.kind === "BASE_UNRESOLVED") {
-      return this._resolveBaseUnresolved(overrides);
+    const valid = [...overrides.entries()].filter(
+      ([path, decision]) => path === "__base__" || decision === "keep_local" || decision === "keep_remote"
+    );
+    if (valid.length !== overrides.size) {
+      this.logger.warn("冲突处理: 忽略 " + (overrides.size - valid.length) + " 个无效决策");
     }
-    return this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, overrides });
+    const accepted = new Map(valid);
+    this.logger.info("冲突处理: 收到 " + accepted.size + " 个文件决策(" + [...accepted.values()].filter((v) => v === "keep_remote").length + " 个保留远端, " + [...accepted.values()].filter((v) => v === "keep_local").length + " 个保留本地),开始重新规划");
+    if (accepted.size === 0) {
+      throw new SyncError({
+        category: SyncErrorCategory.UNKNOWN,
+        code: "EMPTY_CONFLICT_DECISION",
+        operation: "resolveConflicts",
+        message: "没有可执行的冲突决策,同步未启动",
+        recoverable: true
+      });
+    }
+    if (this.conflictPaused && this.conflictPaused.kind === "BASE_UNRESOLVED") {
+      return this._resolveBaseUnresolved(accepted);
+    }
+    return this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, overrides: accepted });
   }
   /** 基准失效恢复: 明确选择一方为新基准后执行一次强制方向同步 */
   async _resolveBaseUnresolved(overrides) {
@@ -4428,6 +4462,10 @@ var ConflictDialog = class {
     this.conflictService = deps.conflictService;
     this.onDecide = deps.onDecide;
     this.notify = deps.notify;
+    this.logger = deps.logger || { info() {
+    }, warn() {
+    }, error() {
+    } };
     this.dialog = null;
     this.set = null;
   }
@@ -4534,8 +4572,9 @@ var ConflictDialog = class {
   }
   async _decideAll(decision) {
     const operationId = this.set.operationId;
-    this.notify("已选择全部" + (decision === "keep_remote" ? "保留远端" : "保留本地") + "，正在重新规划执行", "info");
     const conflicts = this.set.conflicts.filter((c) => c && (!c.status || c.status === "open"));
+    this.logger.info("冲突批量决策开始 #" + operationId + ": " + (decision === "keep_remote" ? "全部保留远端" : "全部保留本地") + "，共 " + conflicts.length + " 个文件");
+    this.notify("已选择全部" + (decision === "keep_remote" ? "保留远端" : "保留本地") + "，正在重新规划执行", "info");
     for (const conflict of conflicts) {
       await this.conflictService.decide(operationId, conflict.path, decision);
     }
@@ -5620,6 +5659,7 @@ var SyGspPlugin = class extends q.Plugin {
         i18n: this.i18n,
         conflictService: this.conflictService,
         onDecide: (decisions) => this.controller.resolveConflicts(decisions),
+        logger: this.logs,
         notify: (msg, type) => this.notification.toast(msg, type)
       });
       this.conflictDialog.setKernel(this.kernel);
@@ -6310,19 +6350,25 @@ var SyGspPlugin = class extends q.Plugin {
     });
     checks.push({ name: "Token", ok: !!info.token, detail: info.token ? "已配置" : "未配置" });
     try {
+      this.logs.info("只读诊断: 本地文件读写检查开始");
       const probePath = "temp/SY-GSP/probe.txt";
       await this.kernel.putFile(probePath, new Blob(["ok"]), false);
+      this.logs.info("只读诊断: 本地文件写入完成");
       const blob = await this.kernel.getFile(probePath);
       const ok = !!blob && await blob.text() === "ok";
+      this.logs.info("只读诊断: 本地文件读取完成");
       await this.kernel.removeFile(probePath);
+      this.logs.info("只读诊断: 本地文件清理完成");
       checks.push({ name: "本地文件读写", ok, detail: ok ? "temp/SY-GSP/ 读写正常" : "内容校验失败" });
     } catch (err) {
       checks.push({ name: "本地文件读写", ok: false, detail: String(err && err.message || err) });
     }
     if (info.owner && info.branch) {
       try {
+        this.logs.info("只读诊断: 远端 HEAD 检查开始");
         const provider = this._makeProvider(info);
         const head = await provider.getBranchHead();
+        this.logs.info("只读诊断: 远端 HEAD 读取完成");
         checks.push({ name: "远端可达", ok: true, detail: "HEAD " + head.sha.slice(0, 8) });
         const repoKey = this._repoKey(info);
         const base = this.metadataStore.getBaseCommit(repoKey);

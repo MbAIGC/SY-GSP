@@ -41,6 +41,13 @@ test("仓库地址解析(https/git/ssh/带 .git)", () => {
   assert.deepEqual(parseRepoAddress("不是地址"), { host: "", owner: "", repo: "" });
 });
 
+test("目录精确忽略: 子文件与目录本身均被忽略", () => {
+  const patterns = buildIgnoreList("data/my stuff", []);
+  assert.equal(isIgnored("data/my stuff", patterns), true);
+  assert.equal(isIgnored("data/my stuff/note.sy", patterns), true);
+  assert.equal(isIgnored("data/my stuff-2/note.sy", patterns), false);
+});
+
 test("默认忽略: data/storage 为设备本地状态,不再进入同步范围", async () => {
   const { buildIgnoreList, isIgnored } = await import("../src/local/ignore-rules.js");
   const patterns = buildIgnoreList("", []);

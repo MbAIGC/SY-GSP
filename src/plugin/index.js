@@ -76,6 +76,7 @@ export default class SyGspPlugin extends q.Plugin {
         i18n: this.i18n,
         conflictService: this.conflictService,
         onDecide: (decisions) => this.controller.resolveConflicts(decisions),
+        logger: this.logs,
         notify: (msg, type) => this.notification.toast(msg, type),
       });
       this.conflictDialog.setKernel(this.kernel);
@@ -845,11 +846,15 @@ export default class SyGspPlugin extends q.Plugin {
     checks.push({ name: "Token", ok: !!info.token, detail: info.token ? "已配置" : "未配置" });
 
     try {
+      this.logs.info("只读诊断: 本地文件读写检查开始");
       const probePath = "temp/SY-GSP/probe.txt";
       await this.kernel.putFile(probePath, new Blob(["ok"]), false);
+      this.logs.info("只读诊断: 本地文件写入完成");
       const blob = await this.kernel.getFile(probePath);
       const ok = !!blob && (await blob.text()) === "ok";
+      this.logs.info("只读诊断: 本地文件读取完成");
       await this.kernel.removeFile(probePath);
+      this.logs.info("只读诊断: 本地文件清理完成");
       checks.push({ name: "本地文件读写", ok, detail: ok ? "temp/SY-GSP/ 读写正常" : "内容校验失败" });
     } catch (err) {
       checks.push({ name: "本地文件读写", ok: false, detail: String((err && err.message) || err) });
@@ -857,8 +862,10 @@ export default class SyGspPlugin extends q.Plugin {
 
     if (info.owner && info.branch) {
       try {
+        this.logs.info("只读诊断: 远端 HEAD 检查开始");
         const provider = this._makeProvider(info);
         const head = await provider.getBranchHead();
+        this.logs.info("只读诊断: 远端 HEAD 读取完成");
         checks.push({ name: "远端可达", ok: true, detail: "HEAD " + head.sha.slice(0, 8) });
         const repoKey = this._repoKey(info);
         const base = this.metadataStore.getBaseCommit(repoKey);

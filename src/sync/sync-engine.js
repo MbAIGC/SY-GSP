@@ -77,14 +77,24 @@ export class SyncEngine {
         (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
       let remoteHead = null;
       let remoteEntries = new Map();
+      let branchHeadMissing = false;
       try {
-        remoteHead = await this.provider.getBranchHead();
+        try {
+          remoteHead = await this.provider.getBranchHead();
+        } catch (err) {
+          if (err instanceof SyncError && err.httpStatus === 404) {
+            branchHeadMissing = true;
+            throw err;
+          }
+          throw err;
+        }
         ctx.observedRemoteHead = remoteHead.sha;
         const remoteCommit = await this.provider.getCommit(remoteHead.sha);
         ctx.remoteCommitDate = remoteCommit.date || null;
         remoteEntries = await this._treeMap(await this.provider.getTree(remoteCommit.treeSha));
       } catch (err) {
-        if (!(err instanceof SyncError && err.httpStatus === 404)) throw err;
+        // 只有分支引用本身不存在才允许按空仓库处理;提交/树 404 表示远端状态损坏或暂不可达。
+        if (!(err instanceof SyncError && err.httpStatus === 404 && branchHeadMissing)) throw err;
         // H1: 远端读取 404。已有确认基准时,404 可能是分支被删/API 路径异常/对象暂不可达,
         // 绝不能折叠成"空仓库"(否则本地会被整批判为"远端已删除"而删除)。
         // 仅两种情况允许按无头仓库处理: 本机从无确认基准(可能真是空仓库),或恢复向导的强制方向。

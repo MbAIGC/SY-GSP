@@ -77,9 +77,17 @@ export class WorkspaceAdapter {
             queue.push(path);
             continue;
           }
-          // 内核 updated 为秒;历史时钟偏差(本地时间超前)的条目按 0 处理,与旧版一致
-          let updatedMs = new Date(entry.updated).getTime() * 1000;
-          if (!(updatedMs < Date.now())) updatedMs = 0;
+          // 内核通常返回 Unix 秒;兼容 ISO 字符串和毫秒时间戳。
+          // 无法解析或未来时间按 0 处理,避免用错误时钟作“最新版本”依据。
+          const rawUpdated = entry.updated;
+          let updatedMs = 0;
+          if (typeof rawUpdated === "number") {
+            updatedMs = rawUpdated < 100000000000 ? rawUpdated * 1000 : rawUpdated;
+          } else if (rawUpdated) {
+            const parsed = Date.parse(String(rawUpdated));
+            updatedMs = Number.isFinite(parsed) ? parsed : 0;
+          }
+          if (!(updatedMs > 0 && updatedMs <= Date.now())) updatedMs = 0;
           if (sinceMs && updatedMs <= sinceMs) continue;
           files.push({ path, name: entry.name, updated: updatedMs });
         }

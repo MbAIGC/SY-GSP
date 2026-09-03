@@ -235,8 +235,8 @@ export class SyncController {
           syncErr.category === SyncErrorCategory.PUSH_REJECTED;
         if (casChurn && attempt >= 1 && !this._casChurnWarned) {
           this._casChurnWarned = true;
-          this.logger.warn("⚠️ 本轮同步已多次遭遇远端引用竞争: 远端疑似存在持续并发写入者" +
-            "(其他设备/旧版插件/自动化任务)。请检查仓库提交历史与各端插件状态。");
+          this.logger.warn("⚠️ 本轮同步连续两次无法确认远端引用状态: 远端 HEAD 在本轮规划与推送期间发生变化" +
+            "。该现象不等同于已确认存在其他设备写入，请结合远端提交指纹继续判断。");
         }
         if (!decision.retry || ctx.state === SyncState.CONFLICT_PAUSED) {
           await this._onFailed(ctx, syncErr);
@@ -356,14 +356,30 @@ export class SyncController {
     const overrides = decisions instanceof Map
       ? new Map(decisions)
       : new Map(Object.entries(decisions || {}));
-    this.logger.info("冲突处理: 收到 " + overrides.size + " 个文件决策(" +
-      [...overrides.values()].filter((v) => v === "keep_remote").length + " 个保留远端, " +
-      [...overrides.values()].filter((v) => v === "keep_local").length + " 个保留本地),开始重新规划");
+    const valid = [...overrides.entries()].filter(([path, decision]) =>
+      path === "__base__" || decision === "keep_local" || decision === "keep_remote"
+    );
+    if (valid.length !== overrides.size) {
+      this.logger.warn("冲突处理: 忽略 " + (overrides.size - valid.length) + " 个无效决策");
+    }
+    const accepted = new Map(valid);
+    this.logger.info("冲突处理: 收到 " + accepted.size + " 个文件决策(" +
+      [...accepted.values()].filter((v) => v === "keep_remote").length + " 个保留远端, " +
+      [...accepted.values()].filter((v) => v === "keep_local").length + " 个保留本地),开始重新规划");
+    if (accepted.size === 0) {
+      throw new SyncError({
+        category: SyncErrorCategory.UNKNOWN,
+        code: "EMPTY_CONFLICT_DECISION",
+        operation: "resolveConflicts",
+        message: "没有可执行的冲突决策,同步未启动",
+        recoverable: true,
+      });
+    }
     if (this.conflictPaused && this.conflictPaused.kind === "BASE_UNRESOLVED") {
       // 基准恢复: decisions = {__base__: "keep_local"|"keep_remote"}
-      return this._resolveBaseUnresolved(overrides);
+      return this._resolveBaseUnresolved(accepted);
     }
-    return this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, overrides });
+    return this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, overrides: accepted });
   }
 
   /** 基准失效恢复: 明确选择一方为新基准后执行一次强制方向同步 */

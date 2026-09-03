@@ -32,7 +32,11 @@ export function isIgnored(path, patterns) {
   const p = String(path == null ? "" : path).toLowerCase();
   return patterns.some((pattern) => {
     const s = String(pattern).toLowerCase();
-    if (s.indexOf("*") === -1) return p === s;
+    if (s.indexOf("*") === -1) {
+      // 带路径分隔符的无通配规则按目录前缀处理,保证扫描剪枝与远端树过滤语义一致。
+      // 无路径的规则(如 .lock)仍只匹配文件本身。
+      return p === s || (s.includes("/") && p.startsWith(s + "/"));
+    }
     return new RegExp("^" + s.replace(/\*/g, ".*") + "$").test(p);
   });
 }

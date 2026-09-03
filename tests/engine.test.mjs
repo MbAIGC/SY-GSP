@@ -525,7 +525,7 @@ test("忽略路径规划层隐身: 远端被忽略文件不触发下载/删除",
 const REMOTE_404 = () =>
   new SyncError({ category: SyncErrorCategory.GIT, code: "HTTP_404", httpStatus: 404, operation: "getBranchHead", message: "分支不存在" });
 
-test("H1: 已有确认基准且远端读取 404 → BASE_UNRESOLVED 暂停,本地绝不被删除", async () => {
+test("H1: 已有确认基准且远端分支 404 → BASE_UNRESOLVED 暂停,本地绝不被删除", async () => {
   const path = "data/20240101120000-abc/note.md";
   const h = await makeHarness({ remoteFiles: { [path]: "v1" }, localFiles: { [path]: "v1" } });
   const baseCommit = await h.repo.snapshot("base");
