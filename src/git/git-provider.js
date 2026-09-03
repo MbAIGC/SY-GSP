@@ -188,6 +188,7 @@ export class GitProvider {
         operation: "updateBranchRef",
         message: "远端分支已变化(期望 " + expectedHead.slice(0, 8) + ",实际 " + observed.sha.slice(0, 8) + "),本次不写入",
         remoteHeadSha: observed.sha,
+        expectedHeadSha: expectedHead,
         retryable: true,
         recoverable: false,
       });
@@ -233,6 +234,8 @@ export class GitProvider {
       category: SyncErrorCategory.REMOTE_CHANGED,
       code: "CONFIRM_FAILED",
       operation,
+      remoteHeadSha: confirmed.sha,
+      pendingCommitSha: newSha,
       message: "远端引用回读不一致,提交未确认(远端头 " + String(confirmed.sha).slice(0, 8) + ")",
       detail: fingerprint,
       retryable: true,

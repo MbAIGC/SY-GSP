@@ -165,6 +165,15 @@ test("引用确认: 我方提交被并发写手推进 → 接受漂移并以远�
   assert.equal(r.drifted, true);
 });
 
+test("GitHub 引用读取: noCache 请求包含禁止缓存标头", async () => {
+  const { GitHubProvider } = await import("../src/git/github-provider.js");
+  const provider = new GitHubProvider({ token: "t", owner: "o", repo: "r", branch: "main" });
+  let seen;
+  provider.http = { request: async (opts) => { seen = opts; return { data: { object: { sha: "head" } } }; } };
+  await provider.getBranchHead();
+  assert.equal(seen.noCache, true);
+});
+
 test("引用确认: 真分叉 → CONFIRM_FAILED 且可重试(重新规划)", async () => {
   const p = makeRefProvider(["expected", "stale", "fork"], { fork: ["other"] });
   await assert.rejects(

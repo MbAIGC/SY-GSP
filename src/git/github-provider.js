@@ -53,7 +53,7 @@ export class GitHubProvider extends GitProvider {
 
   async getBranchHead() {
     try {
-      const res = await this.http.request({ path: this._repoPath() + "/git/ref/heads/" + this.branch });
+      const res = await this.http.request({ path: this._repoPath() + "/git/ref/heads/" + this.branch, noCache: true });
       return { sha: res.data.object.sha };
     } catch (err) {
       throw this._wrap(err, "getBranchHead", "读取分支 HEAD 失败");

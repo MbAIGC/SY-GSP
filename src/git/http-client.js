@@ -23,6 +23,10 @@ export class HttpClient {
     const method = (opts.method || "GET").toUpperCase();
     const url = this._buildUrl(opts);
     const headers = Object.assign({ Accept: "application/json" }, opts.headers || {});
+    if (method === "GET" && opts.noCache) {
+      headers["Cache-Control"] = "no-cache";
+      headers.Pragma = "no-cache";
+    }
     if (this.token) headers.Authorization = "token " + this.token;
     let body;
     if (opts.body !== undefined && opts.body !== null) {

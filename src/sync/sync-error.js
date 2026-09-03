@@ -33,6 +33,8 @@ export class SyncError extends Error {
     this.phase = (fields && fields.phase) || "";
     this.httpStatus = (fields && fields.httpStatus) || 0;
     this.remoteHeadSha = (fields && fields.remoteHeadSha) || "";
+    this.expectedHeadSha = (fields && fields.expectedHeadSha) || "";
+    this.pendingCommitSha = (fields && fields.pendingCommitSha) || "";
     this.path = (fields && fields.path) || "";
     this.detail = (fields && fields.detail) || "";
     this.retryable = !!(fields && fields.retryable);

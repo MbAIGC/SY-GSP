@@ -235,7 +235,7 @@ export class SyncController {
         const casChurn = syncErr.category === SyncErrorCategory.REMOTE_CHANGED ||
           syncErr.category === SyncErrorCategory.PUSH_REJECTED;
         const remoteFingerprint = casChurn
-          ? [syncErr.code, syncErr.remoteHeadSha, syncErr.detail].join("|")
+          ? [syncErr.expectedHeadSha, syncErr.remoteHeadSha, syncErr.pendingCommitSha].join("|")
           : "";
         if (remoteFingerprint && remoteFingerprint === lastRemoteFailureFingerprint) {
           this.logger.warn("远端引用失败指纹连续重复,停止无意义重试: " + remoteFingerprint.slice(0, 180));

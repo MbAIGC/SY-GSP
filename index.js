@@ -549,6 +549,8 @@ var SyncError = class extends Error {
     this.phase = fields && fields.phase || "";
     this.httpStatus = fields && fields.httpStatus || 0;
     this.remoteHeadSha = fields && fields.remoteHeadSha || "";
+    this.expectedHeadSha = fields && fields.expectedHeadSha || "";
+    this.pendingCommitSha = fields && fields.pendingCommitSha || "";
     this.path = fields && fields.path || "";
     this.detail = fields && fields.detail || "";
     this.retryable = !!(fields && fields.retryable);
@@ -675,6 +677,10 @@ var HttpClient = class {
     const method = (opts.method || "GET").toUpperCase();
     const url = this._buildUrl(opts);
     const headers = Object.assign({ Accept: "application/json" }, opts.headers || {});
+    if (method === "GET" && opts.noCache) {
+      headers["Cache-Control"] = "no-cache";
+      headers.Pragma = "no-cache";
+    }
     if (this.token) headers.Authorization = "token " + this.token;
     let body;
     if (opts.body !== void 0 && opts.body !== null) {
@@ -929,6 +935,7 @@ var _GitProvider = class _GitProvider {
         operation: "updateBranchRef",
         message: "远端分支已变化(期望 " + expectedHead.slice(0, 8) + ",实际 " + observed.sha.slice(0, 8) + "),本次不写入",
         remoteHeadSha: observed.sha,
+        expectedHeadSha: expectedHead,
         retryable: true,
         recoverable: false
       });
@@ -968,6 +975,8 @@ var _GitProvider = class _GitProvider {
       category: SyncErrorCategory.REMOTE_CHANGED,
       code: "CONFIRM_FAILED",
       operation,
+      remoteHeadSha: confirmed.sha,
+      pendingCommitSha: newSha,
       message: "远端引用回读不一致,提交未确认(远端头 " + String(confirmed.sha).slice(0, 8) + ")",
       detail: fingerprint,
       retryable: true,
@@ -1093,7 +1102,7 @@ var GitHubProvider = class _GitHubProvider extends GitProvider {
   }
   async getBranchHead() {
     try {
-      const res = await this.http.request({ path: this._repoPath() + "/git/ref/heads/" + this.branch });
+      const res = await this.http.request({ path: this._repoPath() + "/git/ref/heads/" + this.branch, noCache: true });
       return { sha: res.data.object.sha };
     } catch (err) {
       throw this._wrap(err, "getBranchHead", "读取分支 HEAD 失败");
@@ -2997,6 +3006,8 @@ var SyncEngine = class {
             category: SyncErrorCategory.REMOTE_CHANGED,
             code: "REMOTE_HEAD_MOVED",
             operation: "prePushCheck",
+            expectedHeadSha: ctx.expectedRemoteHead,
+            remoteHeadSha: headNow.sha,
             message: "远端分支在规划后已变化(" + headNow.sha.slice(0, 8) + "),本轮重新规划",
             retryable: true,
             recoverable: false
@@ -3342,7 +3353,7 @@ var SyncController = class {
         this.logger.error("同步失败 #" + ctx.id + " [" + syncErr.category + "] " + syncErr.toDisplayText() + (syncErr.detail ? " | 详情: " + JSON.stringify(syncErr.detail).slice(0, 300) : ""));
         const decision = this.retryPolicy.decide(syncErr, attempt);
         const casChurn = syncErr.category === SyncErrorCategory.REMOTE_CHANGED || syncErr.category === SyncErrorCategory.PUSH_REJECTED;
-        const remoteFingerprint = casChurn ? [syncErr.code, syncErr.remoteHeadSha, syncErr.detail].join("|") : "";
+        const remoteFingerprint = casChurn ? [syncErr.expectedHeadSha, syncErr.remoteHeadSha, syncErr.pendingCommitSha].join("|") : "";
         if (remoteFingerprint && remoteFingerprint === lastRemoteFailureFingerprint) {
           this.logger.warn("远端引用失败指纹连续重复,停止无意义重试: " + remoteFingerprint.slice(0, 180));
           await this._onFailed(ctx, syncErr);
