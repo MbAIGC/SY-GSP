@@ -209,22 +209,45 @@ export class GitProvider {
       confirmed = await this.getBranchHead();
     }
     if (confirmed.sha === newSha) return { sha: confirmed.sha, drifted: false };
+    // 并发写手可能已在我方提交之上推进(甚至连落数个提交): 以包含性判定接受漂移
+    let contained = false;
+    try {
+      contained = await this._containsCommit(newSha, confirmed.sha);
+    } catch (err) {
+      // 包含性判定不可得: 按确认失败处理
+    }
+    if (contained) return { sha: confirmed.sha, drifted: true };
+    // 竞争指纹: 记录当前远端头提交,便于指认并发写入者
+    let fingerprint = "";
     try {
       const headCommit = await this.getCommit(confirmed.sha);
-      if ((headCommit.parents || []).indexOf(newSha) >= 0) {
-        return { sha: confirmed.sha, drifted: true };
+      if (headCommit) {
+        fingerprint = "远端头提交: " + String(headCommit.message || "").split("\n")[0].slice(0, 60) +
+          " / " + String(headCommit.author || "未知").slice(0, 30);
       }
     } catch (err) {
-      // 回读提交失败: 按确认失败处理
+      // 指纹不可得不影响判定
     }
     throw new SyncError({
       category: SyncErrorCategory.REMOTE_CHANGED,
       code: "CONFIRM_FAILED",
       operation,
       message: "远端引用回读不一致,提交未确认(远端头 " + String(confirmed.sha).slice(0, 8) + ")",
+      detail: fingerprint,
       retryable: true,
       recoverable: false,
     });
+  }
+
+  /** 我方提交是否已包含于远端历史(默认: 首父链逐跳,有界深度;子类可按平台覆盖) */
+  async _containsCommit(ancestorSha, descendantSha) {
+    let current = descendantSha;
+    for (let hop = 0; current && hop < 8; hop++) {
+      if (current === ancestorSha) return true;
+      const commit = await this.getCommit(current);
+      current = (commit.parents && commit.parents[0]) || null;
+    }
+    return current === ancestorSha;
   }
 
   /** 平台原生引用更新(子类实现;失败抛 HTTP 层 SyncError) */

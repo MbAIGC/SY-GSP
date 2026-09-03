@@ -480,3 +480,22 @@ test("多批次推送: 每批成功后期望头推进,不误判远端已变化",
   assert.equal(result.uploads, 4);
   assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), h.repo.head);
 });
+
+test("推送竞争: 422 错误附着竞争时远端头提交指纹", async () => {
+  const remote = "data/20240101120000-abc/note.md";
+  const h = await makeHarness({ remoteFiles: { [remote]: "remote v1" } });
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  await h.kernel.putFile(remote, new Blob([enc("local v2")]), false);
+  const { SyncError, SyncErrorCategory } = await import("../src/sync/sync-error.js");
+  h.repo.provider.updateBranchRef = async () => {
+    throw new SyncError({ category: SyncErrorCategory.GIT, code: "HTTP_422", httpStatus: 422, message: "refused" });
+  };
+  delete h.repo.provider.mapUpdateRefFailure; // 移除桩直通,走真实基类映射链
+  const ctx = h.makeCtx();
+  await assert.rejects(
+    () => h.engine.run(ctx),
+    (err) => err.category === SyncErrorCategory.PUSH_REJECTED &&
+      String(err.detail || "").indexOf("竞争时远端头") >= 0
+  );
+});

@@ -105,23 +105,40 @@ export class GitHubProvider extends GitProvider {
     }
   }
 
+  /** 平台覆盖: compare API 一次调用判定包含性,异常或未知状态回退首父链逐跳 */
+  async _containsCommit(ancestorSha, descendantSha) {
+    try {
+      const res = await this.http.request({
+        path: this._repoPath() + "/compare/" + encodeURIComponent(ancestorSha) +
+          "..." + encodeURIComponent(descendantSha),
+      });
+      const status = res.data && res.data.status;
+      if (status === "ahead" || status === "identical") return true;
+      if (status === "behind" || status === "diverged") return false;
+    } catch (err) {
+      // compare 不可得,回退父链逐跳
+    }
+    return GitProvider.prototype._containsCommit.call(this, ancestorSha, descendantSha);
+  }
+
   async getFileContent(path, ref) {
     try {
+      // raw 正文以原始字节读取: 空文件/JSON 文件/二进制内容统一处理,
+      // 避免"文本+JSON 解析"混合契约对空体返回 null、把合法 JSON 正文误判为信封
       const res = await this.http.request({
         path: this._repoPath() + "/contents/" + encodePath(path),
         query: { ref },
-        headers: { Accept: "application/vnd.github.raw+json, application/json" },
-        responseType: "json",
+        headers: { Accept: "application/vnd.github.raw" },
+        responseType: "arraybuffer",
       });
-      const data = res.data;
-      // 请求 raw 优先: 纯文本直接返回;JSON 兜底(base64)
-      if (typeof data === "string") {
-        const bytes = GitProvider.textToBytes(data);
-        return { sha: "", size: bytes.length, contentBase64: GitProvider.bytesToBase64(bytes), bytes, text: data };
-      }
-      const b64 = data.content || "";
-      const bytes = GitProvider.base64ToBytes(b64);
-      return { sha: data.sha, size: data.size, contentBase64: b64, bytes, text: GitProvider.bytesToText(bytes) };
+      const bytes = new Uint8Array(res.data || 0);
+      return {
+        sha: "",
+        size: bytes.length,
+        contentBase64: GitProvider.bytesToBase64(bytes),
+        bytes,
+        text: GitProvider.bytesToText(bytes),
+      };
     } catch (err) {
       if (err instanceof SyncError && err.httpStatus === 404) {
         const notFound = new SyncError({

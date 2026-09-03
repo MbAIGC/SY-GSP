@@ -20,15 +20,15 @@ test("开启后: 网络类最多 3 次(attempt 0..2)", () => {
   assert.equal(p.decide(err(SyncErrorCategory.NETWORK), 3).retry, false);
 });
 
-test("开启后: REMOTE_CHANGED/PUSH_REJECTED 最多 2 次并要求重新规划", () => {
+test("开启后: REMOTE_CHANGED/PUSH_REJECTED 最多 4 次并要求重新规划", () => {
   const p = new RetryPolicy({ enabled: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     const d = p.decide(err(SyncErrorCategory.REMOTE_CHANGED), attempt);
     assert.equal(d.retry, true);
     assert.equal(d.replan, true);
-    assert.equal(d.delayMs, 0);
+    assert.ok(d.delayMs > 0, "应有退避延迟");
   }
-  assert.equal(p.decide(err(SyncErrorCategory.PUSH_REJECTED), 2).retry, false);
+  assert.equal(p.decide(err(SyncErrorCategory.PUSH_REJECTED), 4).retry, false);
 });
 
 test("冲突/鉴权/仓库类错误永不自动重试", () => {
@@ -59,7 +59,7 @@ test("CAS 竞争: 开关关闭时仍重规划重试(有界),网络类仍受开�
   const d1 = policy.decide(casErr, 0);
   assert.equal(d1.retry, true, "CAS 竞争应绕过开关");
   assert.equal(d1.replan, true, "CAS 重试必须重新规划");
-  const d2 = policy.decide(casErr, 2);
+  const d2 = policy.decide(casErr, 4);
   assert.equal(d2.retry, false, "CAS 重试应有界");
   const netErr = new SyncError({ category: SyncErrorCategory.NETWORK, code: "ECONN", message: "网络失败", retryable: true });
   assert.equal(policy.decide(netErr, 0).retry, false, "网络类受开关约束");
@@ -73,4 +73,18 @@ test("确认失败: 语义为可重试(重新规划)", async () => {
   const d = policy.decide(err, 1);
   assert.equal(d.retry, true);
   assert.equal(d.replan, true);
+});
+
+test("CAS 重试: 预算 4 次且有退避延迟", async () => {
+  const { RetryPolicy } = await import("../src/sync/retry-policy.js");
+  const { SyncError, SyncErrorCategory } = await import("../src/sync/sync-error.js");
+  const policy = new RetryPolicy({ enabled: false });
+  const err = new SyncError({ category: SyncErrorCategory.REMOTE_CHANGED, code: "CONFIRM_FAILED", message: "x", retryable: true });
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const d = policy.decide(err, attempt);
+    assert.equal(d.retry, true, "第 " + (attempt + 1) + " 次应可重试");
+    assert.ok(d.delayMs > 0, "应有退避延迟");
+    assert.equal(d.replan, true);
+  }
+  assert.equal(policy.decide(err, 4).retry, false, "第 5 次应达上限");
 });

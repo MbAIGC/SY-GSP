@@ -905,10 +905,17 @@ var _GitProvider = class _GitProvider {
       confirmed = await this.getBranchHead();
     }
     if (confirmed.sha === newSha) return { sha: confirmed.sha, drifted: false };
+    let contained = false;
+    try {
+      contained = await this._containsCommit(newSha, confirmed.sha);
+    } catch (err) {
+    }
+    if (contained) return { sha: confirmed.sha, drifted: true };
+    let fingerprint = "";
     try {
       const headCommit = await this.getCommit(confirmed.sha);
-      if ((headCommit.parents || []).indexOf(newSha) >= 0) {
-        return { sha: confirmed.sha, drifted: true };
+      if (headCommit) {
+        fingerprint = "远端头提交: " + String(headCommit.message || "").split("\n")[0].slice(0, 60) + " / " + String(headCommit.author || "未知").slice(0, 30);
       }
     } catch (err) {
     }
@@ -917,9 +924,20 @@ var _GitProvider = class _GitProvider {
       code: "CONFIRM_FAILED",
       operation,
       message: "远端引用回读不一致,提交未确认(远端头 " + String(confirmed.sha).slice(0, 8) + ")",
+      detail: fingerprint,
       retryable: true,
       recoverable: false
     });
+  }
+  /** 我方提交是否已包含于远端历史(默认: 首父链逐跳,有界深度;子类可按平台覆盖) */
+  async _containsCommit(ancestorSha, descendantSha) {
+    let current = descendantSha;
+    for (let hop = 0; current && hop < 8; hop++) {
+      if (current === ancestorSha) return true;
+      const commit = await this.getCommit(current);
+      current = commit.parents && commit.parents[0] || null;
+    }
+    return current === ancestorSha;
   }
   /** 平台原生引用更新(子类实现;失败抛 HTTP 层 SyncError) */
   async _updateRefRaw(newSha) {
@@ -1077,22 +1095,35 @@ var GitHubProvider = class _GitHubProvider extends GitProvider {
       throw this._wrap(err, "getBlob", "读取远端文件内容失败");
     }
   }
+  /** 平台覆盖: compare API 一次调用判定包含性,异常或未知状态回退首父链逐跳 */
+  async _containsCommit(ancestorSha, descendantSha) {
+    try {
+      const res = await this.http.request({
+        path: this._repoPath() + "/compare/" + encodeURIComponent(ancestorSha) + "..." + encodeURIComponent(descendantSha)
+      });
+      const status = res.data && res.data.status;
+      if (status === "ahead" || status === "identical") return true;
+      if (status === "behind" || status === "diverged") return false;
+    } catch (err) {
+    }
+    return GitProvider.prototype._containsCommit.call(this, ancestorSha, descendantSha);
+  }
   async getFileContent(path, ref) {
     try {
       const res = await this.http.request({
         path: this._repoPath() + "/contents/" + encodePath(path),
         query: { ref },
-        headers: { Accept: "application/vnd.github.raw+json, application/json" },
-        responseType: "json"
+        headers: { Accept: "application/vnd.github.raw" },
+        responseType: "arraybuffer"
       });
-      const data = res.data;
-      if (typeof data === "string") {
-        const bytes2 = GitProvider.textToBytes(data);
-        return { sha: "", size: bytes2.length, contentBase64: GitProvider.bytesToBase64(bytes2), bytes: bytes2, text: data };
-      }
-      const b64 = data.content || "";
-      const bytes = GitProvider.base64ToBytes(b64);
-      return { sha: data.sha, size: data.size, contentBase64: b64, bytes, text: GitProvider.bytesToText(bytes) };
+      const bytes = new Uint8Array(res.data || 0);
+      return {
+        sha: "",
+        size: bytes.length,
+        contentBase64: GitProvider.bytesToBase64(bytes),
+        bytes,
+        text: GitProvider.bytesToText(bytes)
+      };
     } catch (err) {
       if (err instanceof SyncError && err.httpStatus === 404) {
         const notFound = new SyncError({
@@ -1347,8 +1378,8 @@ var GiteeProvider = class _GiteeProvider extends GitProvider {
       const b64 = data && data.content || "";
       const bytes = GitProvider.base64ToBytes(b64);
       return {
-        sha: data.sha,
-        size: data.size,
+        sha: data && data.sha || "",
+        size: data && data.size || 0,
         contentBase64: b64,
         bytes,
         text: GitProvider.bytesToText(bytes)
@@ -2375,7 +2406,7 @@ var SyncQueue = class {
 
 // src/sync/retry-policy.js
 var NETWORK_MAX = 3;
-var REMOTE_CHANGED_MAX = 2;
+var REMOTE_CHANGED_MAX = 4;
 var BASE_DELAYS_MS = [1e3, 3e3, 9e3];
 var DEFAULT_RETRYABLE_CATEGORIES = Object.freeze([
   SyncErrorCategory.NETWORK,
@@ -2417,7 +2448,7 @@ var RetryPolicy = class {
     }
     if (casRace) {
       if (attempt >= REMOTE_CHANGED_MAX) return notEligible("已达远端变化重试上限");
-      return { retry: true, delayMs: 0, replan: true, reason: "远端已变化,重新规划" };
+      return { retry: true, delayMs: this._delay(attempt), replan: true, reason: "远端已变化,重新规划" };
     }
     return notEligible("未知重试资格");
   }
@@ -3079,7 +3110,14 @@ var SyncEngine = class {
           const confirmed = await this.provider.updateBranchRef(commit.sha, { expectedHead: headNow.sha });
           finalSha = confirmed.confirmedSha;
         } catch (err) {
-          throw this.provider.mapUpdateRefFailure(err);
+          const mapped = this.provider.mapUpdateRefFailure(err);
+          try {
+            const head = await this.provider.getBranchHead();
+            const headCommit = await this.provider.getCommit(head.sha);
+            mapped.detail = (mapped.detail ? mapped.detail + " | " : "") + "竞争时远端头 " + String(head.sha).slice(0, 8) + " (" + String(headCommit.message || "").split("\n")[0].slice(0, 60) + " / " + String(headCommit.author || "未知").slice(0, 30) + ")";
+          } catch (e) {
+          }
+          throw mapped;
         }
       }
       if (finalSha) ctx.expectedRemoteHead = finalSha;
@@ -3258,6 +3296,7 @@ var SyncController = class {
     );
   }
   async _runWithRetry(ctx) {
+    this._casChurnWarned = false;
     this.state = ctx.state;
     this.lastContext = ctx;
     this.events.emit("state:changed", { state: this.state, ctx });
@@ -3282,6 +3321,11 @@ var SyncController = class {
         const syncErr = err instanceof SyncError ? err : toSyncError(err, { phase: ctx.state });
         this.logger.error("同步失败 #" + ctx.id + " [" + syncErr.category + "] " + syncErr.toDisplayText() + (syncErr.detail ? " | 详情: " + JSON.stringify(syncErr.detail).slice(0, 300) : ""));
         const decision = this.retryPolicy.decide(syncErr, attempt);
+        const casChurn = syncErr.category === SyncErrorCategory.REMOTE_CHANGED || syncErr.category === SyncErrorCategory.PUSH_REJECTED;
+        if (casChurn && attempt >= 1 && !this._casChurnWarned) {
+          this._casChurnWarned = true;
+          this.logger.warn("⚠️ 本轮同步已多次遭遇远端引用竞争: 远端疑似存在持续并发写入者(其他设备/旧版插件/自动化任务)。请检查仓库提交历史与各端插件状态。");
+        }
         if (!decision.retry || ctx.state === SyncState.CONFLICT_PAUSED) {
           await this._onFailed(ctx, syncErr);
           throw syncErr;
@@ -3296,7 +3340,7 @@ var SyncController = class {
         }
         this.events.emit("state:changed", { state: SyncState.RETRYING, ctx });
         this.notify(
-          this.i18n("sygspRetrying", "⚠️ 同步失败,准备重试") + " (" + attempt + "/" + (decision.replan ? 2 : 3) + "): " + syncErr.message,
+          this.i18n("sygspRetrying", "⚠️ 同步失败,准备重试") + " (" + attempt + "/" + (decision.replan ? REMOTE_CHANGED_MAX : 3) + "): " + syncErr.message,
           "error"
         );
         if (decision.delayMs > 0) {

@@ -126,8 +126,8 @@ export class GiteeProvider extends GitProvider {
       const b64 = (data && data.content) || "";
       const bytes = GitProvider.base64ToBytes(b64);
       return {
-        sha: data.sha,
-        size: data.size,
+        sha: (data && data.sha) || "",
+        size: (data && data.size) || 0,
         contentBase64: b64,
         bytes,
         text: GitProvider.bytesToText(bytes),

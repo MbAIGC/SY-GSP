@@ -218,3 +218,44 @@ test("引用确认: 真分叉 → CONFIRM_FAILED 且可重试(重新规划)", as
     (err) => err.code === "CONFIRM_FAILED" && err.retryable === true
   );
 });
+
+test("包含性判定: compare API 判定 ahead/identical 为已包含,diverged 为不包含", async () => {
+  const { GitHubProvider } = await import("../src/git/github-provider.js");
+  const provider = new GitHubProvider({ token: "t", owner: "o", repo: "r", branch: "main" });
+  provider.http = { request: async () => ({ status: 200, data: { status: "ahead" } }) };
+  assert.equal(await provider._containsCommit("ours", "head"), true);
+  provider.http = { request: async () => ({ status: 200, data: { status: "diverged" } }) };
+  assert.equal(await provider._containsCommit("ours", "head"), false);
+});
+
+test("包含性判定: compare 异常回退首父链,多跳(连落数提交)仍可判定", async () => {
+  const p = makeRefProvider(["expected", "stale", "h3"], { h3: ["h2"], h2: ["h1"], h1: ["ours"] });
+  assert.equal(await p._containsCommit("ours", "h3"), true);
+  assert.equal(await p._containsCommit("ours", "fork"), false);
+});
+
+test("GitHub 下载: raw 空体按 0 字节返回,不再崩溃", async () => {
+  const { GitHubProvider } = await import("../src/git/github-provider.js");
+  const provider = new GitHubProvider({ token: "t", owner: "o", repo: "r", branch: "main" });
+  provider.http = { request: async () => ({ status: 200, data: new ArrayBuffer(0) }) };
+  const file = await provider.getFileContent("data/.siyuan/indexignore", "main");
+  assert.equal(file.size, 0);
+  assert.equal(file.bytes.length, 0);
+  assert.equal(file.text, "");
+});
+
+test("GitHub 下载: 合法 JSON 正文按文本返回,不再被误判为信封而清空", async () => {
+  const { GitHubProvider } = await import("../src/git/github-provider.js");
+  const provider = new GitHubProvider({ token: "t", owner: "o", repo: "r", branch: "main" });
+  provider.http = { request: async () => ({ status: 200, data: new TextEncoder().encode('{"a":1}') .buffer }) };
+  const file = await provider.getFileContent("cfg.json", "main");
+  assert.equal(file.text, '{"a":1}');
+});
+
+test("Gitee 下载: 空信封数据不崩溃", async () => {
+  const { GiteeProvider } = await import("../src/git/gitee-provider.js");
+  const provider = new GiteeProvider({ token: "t", owner: "o", repo: "r", branch: "main" });
+  provider.http = { request: async () => ({ status: 200, data: null }) };
+  const file = await provider.getFileContent("x.md", "main");
+  assert.equal(file.bytes.length, 0);
+});

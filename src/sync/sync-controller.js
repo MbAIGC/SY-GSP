@@ -7,7 +7,7 @@
  */
 
 import { SyncQueue } from "./sync-queue.js";
-import { RetryPolicy } from "./retry-policy.js";
+import { RetryPolicy, REMOTE_CHANGED_MAX } from "./retry-policy.js";
 import { SyncEngine } from "./sync-engine.js";
 import { createSyncContext, SyncState, SyncTrigger, SyncMode, transition } from "./sync-context.js";
 import { SyncError, SyncErrorCategory, toSyncError, classifyError } from "./sync-error.js";
@@ -131,6 +131,7 @@ export class SyncController {
 
   async _runWithRetry(ctx) {
     // 状态机由引擎推进;控制器只镜像展示状态
+    this._casChurnWarned = false;
     this.state = ctx.state;
     this.lastContext = ctx;
     this.events.emit("state:changed", { state: this.state, ctx });
@@ -159,6 +160,13 @@ export class SyncController {
         this.logger.error("同步失败 #" + ctx.id + " [" + syncErr.category + "] " + syncErr.toDisplayText() +
           (syncErr.detail ? " | 详情: " + JSON.stringify(syncErr.detail).slice(0, 300) : ""));
         const decision = this.retryPolicy.decide(syncErr, attempt);
+        const casChurn = syncErr.category === SyncErrorCategory.REMOTE_CHANGED ||
+          syncErr.category === SyncErrorCategory.PUSH_REJECTED;
+        if (casChurn && attempt >= 1 && !this._casChurnWarned) {
+          this._casChurnWarned = true;
+          this.logger.warn("⚠️ 本轮同步已多次遭遇远端引用竞争: 远端疑似存在持续并发写入者" +
+            "(其他设备/旧版插件/自动化任务)。请检查仓库提交历史与各端插件状态。");
+        }
         if (!decision.retry || ctx.state === SyncState.CONFLICT_PAUSED) {
           await this._onFailed(ctx, syncErr);
           throw syncErr;
@@ -174,7 +182,7 @@ export class SyncController {
         this.events.emit("state:changed", { state: SyncState.RETRYING, ctx });
         this.notify(
           this.i18n("sygspRetrying", "⚠️ 同步失败,准备重试") +
-            " (" + attempt + "/" + (decision.replan ? 2 : 3) + "): " + syncErr.message,
+            " (" + attempt + "/" + (decision.replan ? REMOTE_CHANGED_MAX : 3) + "): " + syncErr.message,
           "error"
         );
         if (decision.delayMs > 0) {

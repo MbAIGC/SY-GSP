@@ -1,7 +1,7 @@
 /**
  * RetryPolicy: 只对幂等、可判定且不会扩大写入风险的错误自动重试(2.0 方案 §7.8)。
  * - NETWORK/TIMEOUT: 最多 3 次,延迟 1s/3s/9s + 小幅随机抖动;
- * - REMOTE_CHANGED/PUSH_REJECTED: 最多 2 次,每次必须重新规划(由引擎重新执行,这里只判定资格);
+ * - REMOTE_CHANGED/PUSH_REJECTED: 最多 4 次,有界退避,每次必须重新规划(由引擎重新执行,这里只判定资格);
  *   该类不受 enabled 开关约束(CAS 保护下的安全收敛),开关只治理网络暂态;
  * - 其余(AUTH/PERMISSION/REPOSITORY/BRANCH/LARGE_FILE/CONFLICT/...)不自动重试。
  */
@@ -10,7 +10,7 @@ import { SyncErrorCategory } from "./sync-error.js";
 import { SyncError } from "./sync-error.js";
 
 const NETWORK_MAX = 3;
-const REMOTE_CHANGED_MAX = 2;
+export const REMOTE_CHANGED_MAX = 4;
 const BASE_DELAYS_MS = [1000, 3000, 9000];
 
 /** 默认允许自动重试的错误类别(诊断/设置说明引用) */
@@ -62,8 +62,9 @@ export class RetryPolicy {
     }
     if (casRace) {
       if (attempt >= REMOTE_CHANGED_MAX) return notEligible("已达远端变化重试上限");
-      // 重试必须重新读取远端 HEAD、重新计算计划,不允许复用旧 tree/commit
-      return { retry: true, delayMs: 0, replan: true, reason: "远端已变化,重新规划" };
+      // 重试必须重新读取远端 HEAD、重新计算计划,不允许复用旧 tree/commit;
+      // 退避(1s/3s/9s...)给重规划留出落在并发写入间隙的机会
+      return { retry: true, delayMs: this._delay(attempt), replan: true, reason: "远端已变化,重新规划" };
     }
     return notEligible("未知重试资格");
   }

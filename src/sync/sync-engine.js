@@ -546,7 +546,19 @@ export class SyncEngine {
           const confirmed = await this.provider.updateBranchRef(commit.sha, { expectedHead: headNow.sha });
           finalSha = confirmed.confirmedSha;
         } catch (err) {
-          throw this.provider.mapUpdateRefFailure(err);
+          const mapped = this.provider.mapUpdateRefFailure(err);
+          // 竞争指纹: 附着冲突时远端头提交信息,便于指认并发写入者
+          try {
+            const head = await this.provider.getBranchHead();
+            const headCommit = await this.provider.getCommit(head.sha);
+            mapped.detail = (mapped.detail ? mapped.detail + " | " : "") +
+              "竞争时远端头 " + String(head.sha).slice(0, 8) + " (" +
+              String(headCommit.message || "").split("\n")[0].slice(0, 60) + " / " +
+              String(headCommit.author || "未知").slice(0, 30) + ")";
+          } catch (e) {
+            // 指纹不可得,保留原错误
+          }
+          throw mapped;
         }
       }
       // 漂移(drifted)时 finalSha 为远端实际头,同样作为下一批的期望头与父提交
