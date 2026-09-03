@@ -45,6 +45,12 @@ export class WorkspaceAdapter {
    * @param {object} opts {range, onlyChangedSince: Date|0, extraIgnores: string[]}
    * @returns {Promise<{files:Array<{path,name,updated:number}>, enumErrorOccurred:boolean}>}
    */
+  /** 当前生效的忽略匹配器(默认+固定+用户),供引擎把被忽略路径从规划层完全隐身 */
+  ignoreMatcher() {
+    const ignores = buildIgnoreList(this.getUserIgnore(), []);
+    return { isIgnored: (path) => isIgnored(path, ignores) };
+  }
+
   async scan({ range, onlyChangedSince = 0, extraIgnores = [] } = {}) {
     this.resetEnumError();
     const ignores = buildIgnoreList(this.getUserIgnore(), extraIgnores);

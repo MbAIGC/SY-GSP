@@ -368,6 +368,12 @@ plugin.data = {
   plugin.settingUtils.set("submit_token", savedToken);
 
   // 路径二: 配置齐全 + 远端不可达(404) → 引擎报错且错误已分类,不伪造成功
+  // (v0.1.11 门控以元数据基准为准: 无基准走首同步向导,冒烟按契约预置基准)
+  await plugin.metadataStore.setConfirmedCommit(
+    plugin._repoKey(plugin._repoInfo()),
+    "smokebase0000000000000000000000000000000000",
+    "smoke"
+  );
   let engineError = null;
   try {
     await plugin.syncNow({ trigger: "manual" });
@@ -375,8 +381,15 @@ plugin.data = {
     engineError = err;
   }
   check("syncNow: 引擎链路执行且错误可分类", () => {
-    if (!engineError) throw new Error("假远端应报错,却返回成功(伪造成功路径)");
-    if (!engineError.category) throw new Error("错误缺少分类");
+    if (engineError) {
+      if (!engineError.category) throw new Error("错误缺少分类");
+      return;
+    }
+    // 无真远端的冒烟环境(全部 404): 预置基准读取失败 → 引擎以 BASE_UNRESOLVED
+    // 显式暂停并持久化,这是可见且已分类的结局,绝非伪造成功
+    const paused = plugin.controller && plugin.controller.conflictPaused;
+    if (plugin.controller.state === "CONFLICT_PAUSED" && paused && paused.kind === "BASE_UNRESOLVED") return;
+    throw new Error("假远端应报错或显式暂停,却返回成功(伪造成功路径)");
   });
 
   await plugin.onunload();

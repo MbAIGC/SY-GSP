@@ -76,6 +76,10 @@ export class SyncEngine {
         }
       }
 
+      // 忽略路径在规划层完全隐身: 被忽略的路径(如设备本地状态)即便存在于
+      // 基准树/远端树,也不参与下载/删除/冲突,远端副本原地保留
+      remoteEntries = this._withoutIgnoredEntries(remoteEntries);
+
       // 3.5 强制方向(首同步向导明确选边后的恢复路径):
       // 跳过基准解析与三路合并,按用户选定方向镜像;否则选边后基准仍未确认,
       // 会再次命中 BASE_UNRESOLVED 形成向导循环。
@@ -99,7 +103,7 @@ export class SyncEngine {
         finish(ctx, { state: SyncState.CONFLICT_PAUSED, result: { paused: true, kind: "BASE_UNRESOLVED" } });
         return ctx.result;
       }
-      const baseEntries = baseResolution.baseEntries;
+      const baseEntries = this._withoutIgnoredEntries(baseResolution.baseEntries);
       if (baseResolution.bootstrapDownload) {
         // 引导下载: 本地为空的新设备首同步,本地缺失不视作删除
         ctx.bootstrapDownload = true;
@@ -295,6 +299,19 @@ export class SyncEngine {
    * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
    * 空仓库 + 以远端为准 无远端事实可依,显式报错而非清空本地。
    */
+  /** 过滤基准树/远端树中的被忽略路径(匹配器由工作区适配器提供;缺失时不过滤) */
+  _withoutIgnoredEntries(entries) {
+    const matcher = this.workspace && typeof this.workspace.ignoreMatcher === "function"
+      ? this.workspace.ignoreMatcher()
+      : null;
+    if (!matcher) return entries;
+    const out = new Map();
+    for (const [path, entry] of entries) {
+      if (!matcher.isIgnored(path)) out.set(path, entry);
+    }
+    return out;
+  }
+
   async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {

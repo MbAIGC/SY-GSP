@@ -238,14 +238,21 @@ export class SyncController {
   async _onFailed(ctx, syncErr) {
     if (ctx.state === SyncState.CONFLICT_PAUSED) {
       const kind = ctx.baseUnresolved ? "BASE_UNRESOLVED" : "FILE_CONFLICTS";
+      const conflictList = (ctx.conflicts || []).filter((c) => c && c.path && c.path !== "__base__");
       this.conflictPaused = {
         kind,
         repoKey: this.repoKey(),
         operationId: ctx.id,
         reason: kind === "BASE_UNRESOLVED" ? (ctx.conflicts[0] && ctx.conflicts[0].detail) || "基准无法解析" : "存在未处理冲突",
         conflictCount: kind === "FILE_CONFLICTS" ? (ctx.conflicts || []).length : 0,
+        conflicts: conflictList.slice(0, 20).map((c) => ({ path: c.path, reason: c.reason || c.detail || "" })),
       };
       this._persistState();
+      if (conflictList.length > 0) {
+        this.logger.warn("冲突文件(" + conflictList.length + " 个): " +
+          conflictList.slice(0, 20).map((c) => c.path + " (" + (c.reason || "") + ")").join("; ") +
+          (conflictList.length > 20 ? " 等共 " + conflictList.length + " 个" : ""));
+      }
       this.autoSync.pause();
       this.state = SyncState.CONFLICT_PAUSED;
       this.events.emit("state:changed", { state: this.state, ctx, conflictPaused: this.conflictPaused });

@@ -187,6 +187,11 @@ var WorkspaceAdapter = class {
    * @param {object} opts {range, onlyChangedSince: Date|0, extraIgnores: string[]}
    * @returns {Promise<{files:Array<{path,name,updated:number}>, enumErrorOccurred:boolean}>}
    */
+  /** 当前生效的忽略匹配器(默认+固定+用户),供引擎把被忽略路径从规划层完全隐身 */
+  ignoreMatcher() {
+    const ignores = buildIgnoreList(this.getUserIgnore(), []);
+    return { isIgnored: (path) => isIgnored(path, ignores) };
+  }
   async scan({ range, onlyChangedSince = 0, extraIgnores = [] } = {}) {
     this.resetEnumError();
     const ignores = buildIgnoreList(this.getUserIgnore(), extraIgnores);
@@ -2682,6 +2687,7 @@ var SyncEngine = class {
           throw err;
         }
       }
+      remoteEntries = this._withoutIgnoredEntries(remoteEntries);
       const forcedByWizard = (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution") && (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
       if (forcedByWizard) {
         return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas);
@@ -2696,7 +2702,7 @@ var SyncEngine = class {
         finish(ctx, { state: SyncState.CONFLICT_PAUSED, result: { paused: true, kind: "BASE_UNRESOLVED" } });
         return ctx.result;
       }
-      const baseEntries = baseResolution.baseEntries;
+      const baseEntries = this._withoutIgnoredEntries(baseResolution.baseEntries);
       if (baseResolution.bootstrapDownload) {
         ctx.bootstrapDownload = true;
       }
@@ -2870,6 +2876,16 @@ var SyncEngine = class {
    * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
    * 空仓库 + 以远端为准 无远端事实可依,显式报错而非清空本地。
    */
+  /** 过滤基准树/远端树中的被忽略路径(匹配器由工作区适配器提供;缺失时不过滤) */
+  _withoutIgnoredEntries(entries) {
+    const matcher = this.workspace && typeof this.workspace.ignoreMatcher === "function" ? this.workspace.ignoreMatcher() : null;
+    if (!matcher) return entries;
+    const out = /* @__PURE__ */ new Map();
+    for (const [path, entry] of entries) {
+      if (!matcher.isIgnored(path)) out.set(path, entry);
+    }
+    return out;
+  }
   async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {
@@ -3391,14 +3407,19 @@ var SyncController = class {
   async _onFailed(ctx, syncErr) {
     if (ctx.state === SyncState.CONFLICT_PAUSED) {
       const kind = ctx.baseUnresolved ? "BASE_UNRESOLVED" : "FILE_CONFLICTS";
+      const conflictList = (ctx.conflicts || []).filter((c) => c && c.path && c.path !== "__base__");
       this.conflictPaused = {
         kind,
         repoKey: this.repoKey(),
         operationId: ctx.id,
         reason: kind === "BASE_UNRESOLVED" ? ctx.conflicts[0] && ctx.conflicts[0].detail || "基准无法解析" : "存在未处理冲突",
-        conflictCount: kind === "FILE_CONFLICTS" ? (ctx.conflicts || []).length : 0
+        conflictCount: kind === "FILE_CONFLICTS" ? (ctx.conflicts || []).length : 0,
+        conflicts: conflictList.slice(0, 20).map((c) => ({ path: c.path, reason: c.reason || c.detail || "" }))
       };
       this._persistState();
+      if (conflictList.length > 0) {
+        this.logger.warn("冲突文件(" + conflictList.length + " 个): " + conflictList.slice(0, 20).map((c) => c.path + " (" + (c.reason || "") + ")").join("; ") + (conflictList.length > 20 ? " 等共 " + conflictList.length + " 个" : ""));
+      }
       this.autoSync.pause();
       this.state = SyncState.CONFLICT_PAUSED;
       this.events.emit("state:changed", { state: this.state, ctx, conflictPaused: this.conflictPaused });
@@ -4569,6 +4590,7 @@ var DiagnosisPanel = class {
     this.i18n = deps.i18n;
     this.runChecks = deps.runChecks;
     this.previewPlan = deps.previewPlan;
+    this.getPausedConflicts = deps.getPausedConflicts || (() => []);
     this.onChooseBase = deps.onChooseBase;
     this.onFirstWriteConfirmed = deps.onFirstWriteConfirmed;
     this.notify = deps.notify;
@@ -4641,6 +4663,23 @@ var DiagnosisPanel = class {
         row.appendChild(detail);
       }
       root.appendChild(row);
+    }
+    const pausedConflicts = (this.getPausedConflicts() || []).filter((c) => c && c.path);
+    if (pausedConflicts.length > 0) {
+      const box = document.createElement("div");
+      box.className = "b3-label fn__flex-column";
+      box.style.gap = "4px";
+      const title2 = document.createElement("div");
+      title2.className = "b3-label__text";
+      title2.textContent = "当前暂停的冲突(" + pausedConflicts.length + " 个),解决后自动同步恢复:";
+      box.appendChild(title2);
+      for (const c of pausedConflicts) {
+        const line = document.createElement("div");
+        line.className = "b3-label__text ft__breakword";
+        line.textContent = "• " + c.path + (c.reason ? " — " + c.reason : "");
+        box.appendChild(line);
+      }
+      root.appendChild(box);
     }
     if (mode === "base_recovery") {
       root.appendChild(this._baseRecoveryActions());
@@ -5418,6 +5457,7 @@ var SyGspPlugin = class extends q.Plugin {
         runChecks: () => this._runDiagnosis(),
         previewPlan: () => this._previewPlan(),
         onChooseBase: (choice) => this.controller.resolveConflicts({ __base__: choice }),
+        getPausedConflicts: () => this.controller && this.controller.conflictPaused && this.controller.conflictPaused.conflicts || [],
         onFirstWriteConfirmed: async () => {
           await this._saveEngineState({ firstWriteConfirmed: true });
           this.logs.info("首次写入已确认");
@@ -5705,9 +5745,7 @@ var SyGspPlugin = class extends q.Plugin {
       this.openSetting();
       return { skipped: true };
     }
-    const state = (this.controller ? this.controller.engineState : null) || this._engineState || await this.loadData(ENGINE_STATE_FILE) || {};
-    this._engineState = state;
-    if (!state.firstWriteConfirmed && mode === "auto" && trigger !== "conflict_resolution") {
+    if (this._hasUnresolvedBase() && mode === "auto" && trigger !== "conflict_resolution") {
       this.diagnosisPanel.show({ mode: "first_sync" });
       return { skipped: true, firstRun: true };
     }
@@ -6037,7 +6075,8 @@ var SyGspPlugin = class extends q.Plugin {
       const head = await provider.getBranchHead();
       const commit = await provider.getCommit(head.sha);
       const tree = await provider.getTree(commit.treeSha);
-      const remotePaths = new Set(tree.filter((e) => e.type === "blob").map((e) => e.path));
+      const matcher = workspace.ignoreMatcher();
+      const remotePaths = new Set(tree.filter((e) => e.type === "blob" && !matcher.isIgnored(e.path)).map((e) => e.path));
       rows.push({ name: "远端文件", detail: remotePaths.size + " 个文件,HEAD " + head.sha.slice(0, 8) });
       const localSet = new Set(scan.files.map((f) => f.path));
       let onlyLocal = 0;

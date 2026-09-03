@@ -18,6 +18,7 @@ export class DiagnosisPanel {
     this.i18n = deps.i18n;
     this.runChecks = deps.runChecks;
     this.previewPlan = deps.previewPlan;
+    this.getPausedConflicts = deps.getPausedConflicts || (() => []);
     this.onChooseBase = deps.onChooseBase;
     this.onFirstWriteConfirmed = deps.onFirstWriteConfirmed;
     this.notify = deps.notify;
@@ -98,6 +99,26 @@ export class DiagnosisPanel {
         row.appendChild(detail);
       }
       root.appendChild(row);
+    }
+
+    // 当前暂停中的冲突清单(有明细才显示): 与"是否存在基准问题"无关,仅如实呈现
+    const pausedConflicts = (this.getPausedConflicts() || [])
+      .filter((c) => c && c.path);
+    if (pausedConflicts.length > 0) {
+      const box = document.createElement("div");
+      box.className = "b3-label fn__flex-column";
+      box.style.gap = "4px";
+      const title = document.createElement("div");
+      title.className = "b3-label__text";
+      title.textContent = "当前暂停的冲突(" + pausedConflicts.length + " 个),解决后自动同步恢复:";
+      box.appendChild(title);
+      for (const c of pausedConflicts) {
+        const line = document.createElement("div");
+        line.className = "b3-label__text ft__breakword";
+        line.textContent = "• " + c.path + (c.reason ? " — " + c.reason : "");
+        box.appendChild(line);
+      }
+      root.appendChild(box);
     }
 
     if (mode === "base_recovery") {

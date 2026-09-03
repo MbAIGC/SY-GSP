@@ -85,6 +85,7 @@ export default class SyGspPlugin extends q.Plugin {
         runChecks: () => this._runDiagnosis(),
         previewPlan: () => this._previewPlan(),
         onChooseBase: (choice) => this.controller.resolveConflicts({ __base__: choice }),
+        getPausedConflicts: () => (this.controller && this.controller.conflictPaused && this.controller.conflictPaused.conflicts) || [],
         onFirstWriteConfirmed: async () => {
           await this._saveEngineState({ firstWriteConfirmed: true });
           this.logs.info("首次写入已确认");
@@ -403,11 +404,9 @@ export default class SyGspPlugin extends q.Plugin {
       this.openSetting();
       return { skipped: true };
     }
-    const state = (this.controller ? this.controller.engineState : null) ||
-      this._engineState || (await this.loadData(ENGINE_STATE_FILE)) || {};
-    this._engineState = state;
-    if (!state.firstWriteConfirmed && mode === "auto" && trigger !== "conflict_resolution") {
-      // 2.0 灰度: 首次写入前必须经过只读诊断与计划预览确认
+    // 首同步门控以元数据已确认基准为准: 标记键曾被历史版本整文件覆盖抹掉,
+    // 不能作为判据;有基准(基准可解析)即走正常同步,无基准才进入首同步向导
+    if (this._hasUnresolvedBase() && mode === "auto" && trigger !== "conflict_resolution") {
       this.diagnosisPanel.show({ mode: "first_sync" });
       return { skipped: true, firstRun: true };
     }
@@ -777,7 +776,8 @@ export default class SyGspPlugin extends q.Plugin {
       const head = await provider.getBranchHead();
       const commit = await provider.getCommit(head.sha);
       const tree = await provider.getTree(commit.treeSha);
-      const remotePaths = new Set(tree.filter((e) => e.type === "blob").map((e) => e.path));
+      const matcher = workspace.ignoreMatcher();
+      const remotePaths = new Set(tree.filter((e) => e.type === "blob" && !matcher.isIgnored(e.path)).map((e) => e.path));
       rows.push({ name: "远端文件", detail: remotePaths.size + " 个文件,HEAD " + head.sha.slice(0, 8) });
       const localSet = new Set(scan.files.map((f) => f.path));
       let onlyLocal = 0;

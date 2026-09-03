@@ -13,6 +13,9 @@ function makeController(store) {
     },
     events: { emit() {} },
     logger: { info() {}, warn() {}, error() {} },
+    notify() {},
+    autoSync: { pause() {}, resume() {} },
+    repoInfo: () => ({ provider: "github", owner: "o", repo: "r", branch: "main" }),
   });
 }
 
@@ -43,4 +46,28 @@ test("patchEngineState: 插件经唯一入口写入,不再整文件覆盖", asyn
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(c.engineState.firstWriteConfirmed, true);
   assert.ok(c.engineState.conflictPaused, "已有键保留");
+});
+
+test("冲突明细: 暂停状态持久化路径与原因,__base__ 不入清单", async () => {
+  const { SyncError, SyncErrorCategory } = await import("../src/sync/sync-error.js");
+  const { SyncState } = await import("../src/sync/sync-context.js");
+  const store = { data: {} };
+  const c = makeController(store);
+  const ctx = {
+    id: "t1",
+    state: SyncState.CONFLICT_PAUSED,
+    baseUnresolved: false,
+    conflicts: [
+      { path: "a.md", reason: "双方同时新增了不同内容" },
+      { path: "b.md", reason: "" },
+      { path: "__base__", reason: "BASE_UNRESOLVED" },
+    ],
+  };
+  await c._onFailed(ctx, new SyncError({ category: SyncErrorCategory.CONFLICT, message: "x" }));
+  assert.equal(c.conflictPaused.kind, "FILE_CONFLICTS");
+  assert.equal(c.conflictPaused.conflicts.length, 2, "__base__ 不入冲突清单");
+  assert.equal(c.conflictPaused.conflicts[0].path, "a.md");
+  assert.equal(c.conflictPaused.conflicts[0].reason, "双方同时新增了不同内容");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(store.data.conflictPaused.conflicts.length, 2, "明细应持久化");
 });

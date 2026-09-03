@@ -215,7 +215,7 @@ async function makeHarness({ remoteFiles = {}, localFiles = {}, commitBuilder = 
     if (overrides) ctx.overrides = overrides;
     return ctx;
   };
-  return { repo, kernel, engine, metadataStore, manifestStore, conflictService, makeCtx };
+  return { repo, kernel, engine, workspace, metadataStore, manifestStore, conflictService, makeCtx };
 }
 
 test("引擎: 远端领先 → 下载覆盖本地,不产生远端写入,基准推进", async () => {
@@ -498,4 +498,22 @@ test("推送竞争: 422 错误附着竞争时远端头提交指纹", async () =>
     (err) => err.category === SyncErrorCategory.PUSH_REJECTED &&
       String(err.detail || "").indexOf("竞争时远端头") >= 0
   );
+});
+
+test("忽略路径规划层隐身: 远端被忽略文件不触发下载/删除", async () => {
+  const dir = "data/20240101120000-abc";
+  const h = await makeHarness({
+    remoteFiles: { [dir + "/note.md"]: "v1", "data/storage/petal/petals.json": "{}", "data/storage/local.json": "{}" },
+    localFiles: { [dir + "/note.md"]: "v1" },
+  });
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  // 模拟 v0.1.10 后 storage 被默认忽略: 本地扫描不含,但基准/远端仍有
+  h.workspace.ignoreMatcher = () => ({ isIgnored: (p) => p.startsWith("data/storage/") });
+  const ctx = h.makeCtx();
+  const result = await h.engine.run(ctx);
+  assert.equal(result.success, true);
+  assert.equal(result.downloads, 0, "被忽略路径不得触发下载");
+  assert.equal(result.deletionsRemote, 0, "被忽略路径不得触发远端删除");
+  assert.equal(result.uploads, 0);
 });

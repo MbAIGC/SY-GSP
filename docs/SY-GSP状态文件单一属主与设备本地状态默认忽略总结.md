@@ -15,8 +15,10 @@
    `patchEngineState`);插件 `firstWriteConfirmed` 经控制器写入;冲突解决成功不再
    `saveData(ENGINE_STATE_FILE, {})` 清空整文件;任何一方保存均不清掉另一方。
 2. **默认忽略 `data/storage/*`**: petals/local/bazaar 等设备本地状态不再进入同步
-   范围(与既有 data/plugins、data/widgets 默认忽略同语义);远端已有副本会在后续
-   正常同步中按删除守卫移除;用户自定义忽略配置继续可用。
+   范围(与既有 data/plugins、data/widgets 默认忽略同语义);用户自定义忽略配置继续
+   可用。**更正(v0.1.11)**: 远端已有副本原地保留、不再参与同步(不下载/不删除/
+   不冲突),此前"按删除守卫移除"的表述不成立——把"本地扫描缺失"当删除会让被忽略
+   路径反复进入计划,已由《SY-GSP首同步门控与忽略路径隔离修复总结.md》修正。
 3. **设置读取统一 `get`**: sync_strategy/ignore_file/sync_range 4 处由 `take`
    改为 `get`(与全部设置读取 API 一致;经仓库地址反复读取验证 take 为非破坏性,
    其余 14 处维持不变)。
