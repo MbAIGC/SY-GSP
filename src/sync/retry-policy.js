@@ -2,6 +2,7 @@
  * RetryPolicy: 只对幂等、可判定且不会扩大写入风险的错误自动重试(2.0 方案 §7.8)。
  * - NETWORK/TIMEOUT: 最多 3 次,延迟 1s/3s/9s + 小幅随机抖动;
  * - REMOTE_CHANGED/PUSH_REJECTED: 最多 2 次,每次必须重新规划(由引擎重新执行,这里只判定资格);
+ *   该类不受 enabled 开关约束(CAS 保护下的安全收敛),开关只治理网络暂态;
  * - 其余(AUTH/PERMISSION/REPOSITORY/BRANCH/LARGE_FILE/CONFLICT/...)不自动重试。
  */
 
@@ -46,16 +47,20 @@ export class RetryPolicy {
     const category = (err && err.category) || "";
     const notEligible = (reason) => ({ retry: false, delayMs: 0, replan: false, reason });
 
-    if (!this.enabled) return notEligible("自动重试未开启");
     if (!(err instanceof SyncError)) return notEligible("非 SyncError");
     if (NO_RETRY_CATEGORIES.indexOf(category) >= 0) return notEligible("该错误类型不自动重试");
+    // CAS 竞争(远端已变化/推送被拒): 重规划在 CAS 保护下安全且必要,
+    // 不受"自动重试"开关约束(开关只治理网络暂态类);仍有界(REMOTE_CHANGED_MAX)
+    const casRace = category === SyncErrorCategory.REMOTE_CHANGED ||
+      category === SyncErrorCategory.PUSH_REJECTED;
+    if (!this.enabled && !casRace) return notEligible("自动重试未开启");
     if (err.retryable === false) return notEligible("错误标记为不可重试");
 
     if (category === SyncErrorCategory.NETWORK || category === SyncErrorCategory.TIMEOUT) {
       if (attempt >= NETWORK_MAX) return notEligible("已达网络类重试上限");
       return { retry: true, delayMs: this._delay(attempt), replan: false, reason: "网络类暂态错误" };
     }
-    if (category === SyncErrorCategory.REMOTE_CHANGED || category === SyncErrorCategory.PUSH_REJECTED) {
+    if (casRace) {
       if (attempt >= REMOTE_CHANGED_MAX) return notEligible("已达远端变化重试上限");
       // 重试必须重新读取远端 HEAD、重新计算计划,不允许复用旧 tree/commit
       return { retry: true, delayMs: 0, replan: true, reason: "远端已变化,重新规划" };

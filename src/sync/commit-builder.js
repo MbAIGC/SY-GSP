@@ -38,7 +38,6 @@ export class CommitBuilder {
     const eligible = uploads.filter((u) => !oversize.includes(u));
     const deletions = deletionsRemote.map((d) => ({ op: "delete", path: d.path, remoteSha: d.remoteSha }));
 
-    const total = Math.max(1, Math.ceil((eligible.length + deletions.length) / 1) === 0 ? 1 : 1);
     // 拆分以字节预算为主;GitHub 与 Gitee 都按统一预算切分
     const chunks = this._chunk(eligible, deletions);
     const batches = chunks.map((chunk, idx) => ({
@@ -67,7 +66,8 @@ export class CommitBuilder {
       if (current.size + size > this.batchByteLimit && current.uploads.length > 0) flush();
       current.uploads.push(item);
       current.size += size;
-      current.github.entries.push({ path: item.path, sha: null, mode: "100644" }); // sha 由 createBlob 填充
+      // 载荷契约数据(供校验/测试): 引擎推送时自行 createBlob 并构建 entries,不消费此处的 sha
+      current.github.entries.push({ path: item.path, sha: null, mode: "100644" });
       current.gitee.operations.push({ op: item.op === "create" ? "create" : "update", path: item.path, bytes: item.bytes, remoteSha: item.remoteSha || null });
     }
     for (const d of deletions) {

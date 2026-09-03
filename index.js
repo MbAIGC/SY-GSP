@@ -889,18 +889,37 @@ var _GitProvider = class _GitProvider {
       });
     }
     await this._updateRefRaw(newSha);
-    const confirmed = await this.getBranchHead();
-    if (confirmed.sha !== newSha) {
-      throw new SyncError({
-        category: SyncErrorCategory.REMOTE_CHANGED,
-        code: "CONFIRM_FAILED",
-        operation: "updateBranchRef",
-        message: "远端引用回读不一致,提交未确认",
-        retryable: false,
-        recoverable: false
-      });
+    const confirmed = await this._confirmRef(newSha, "updateBranchRef");
+    return { confirmedSha: confirmed.sha, drifted: confirmed.drifted };
+  }
+  /** 引用回读确认(收敛语义,git push 的标准处理而非容错补丁):
+   * - PATCH/POST 后单次 GET 可能读到传播中的旧值 → 有界重读(共 3 次,间隔 300ms);
+   * - 仍未一致时接受「我方提交已进入远端父链」的漂移(并发写手已推进),以远端头为新事实;
+   * - 确认不可能成立 → CONFIRM_FAILED(retryable): 重新规划后在新远端事实上 CAS 重放,
+   *   已落库的内容经差异计算自然收敛,不会重复写入。
+   */
+  async _confirmRef(newSha, operation) {
+    let confirmed = await this.getBranchHead();
+    for (let i = 0; i < 2 && confirmed.sha !== newSha; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      confirmed = await this.getBranchHead();
     }
-    return { confirmedSha: confirmed.sha };
+    if (confirmed.sha === newSha) return { sha: confirmed.sha, drifted: false };
+    try {
+      const headCommit = await this.getCommit(confirmed.sha);
+      if ((headCommit.parents || []).indexOf(newSha) >= 0) {
+        return { sha: confirmed.sha, drifted: true };
+      }
+    } catch (err) {
+    }
+    throw new SyncError({
+      category: SyncErrorCategory.REMOTE_CHANGED,
+      code: "CONFIRM_FAILED",
+      operation,
+      message: "远端引用回读不一致,提交未确认(远端头 " + String(confirmed.sha).slice(0, 8) + ")",
+      retryable: true,
+      recoverable: false
+    });
   }
   /** 平台原生引用更新(子类实现;失败抛 HTTP 层 SyncError) */
   async _updateRefRaw(newSha) {
@@ -927,18 +946,8 @@ var _GitProvider = class _GitProvider {
       }
       throw err;
     }
-    const confirmed = await this.getBranchHead();
-    if (confirmed.sha !== commitSha) {
-      throw new SyncError({
-        category: SyncErrorCategory.REMOTE_CHANGED,
-        code: "CONFIRM_FAILED",
-        operation: "ensureBranchRef",
-        message: "分支引用创建后回读不一致,提交未确认",
-        retryable: false,
-        recoverable: false
-      });
-    }
-    return { confirmedSha: confirmed.sha };
+    const confirmed = await this._confirmRef(commitSha, "ensureBranchRef");
+    return { confirmedSha: confirmed.sha, drifted: confirmed.drifted };
   }
   /** 平台原生引用创建(子类实现) */
   async _createRefRaw(commitSha) {
@@ -2126,7 +2135,6 @@ var CommitBuilder = class {
     }
     const eligible = uploads.filter((u) => !oversize.includes(u));
     const deletions = deletionsRemote.map((d) => ({ op: "delete", path: d.path, remoteSha: d.remoteSha }));
-    const total = Math.max(1, Math.ceil((eligible.length + deletions.length) / 1) === 0 ? 1 : 1);
     const chunks = this._chunk(eligible, deletions);
     const batches = chunks.map((chunk, idx) => ({
       part: idx + 1,
@@ -2398,15 +2406,16 @@ var RetryPolicy = class {
   decide(err, attempt) {
     const category = err && err.category || "";
     const notEligible = (reason) => ({ retry: false, delayMs: 0, replan: false, reason });
-    if (!this.enabled) return notEligible("自动重试未开启");
     if (!(err instanceof SyncError)) return notEligible("非 SyncError");
     if (NO_RETRY_CATEGORIES.indexOf(category) >= 0) return notEligible("该错误类型不自动重试");
+    const casRace = category === SyncErrorCategory.REMOTE_CHANGED || category === SyncErrorCategory.PUSH_REJECTED;
+    if (!this.enabled && !casRace) return notEligible("自动重试未开启");
     if (err.retryable === false) return notEligible("错误标记为不可重试");
     if (category === SyncErrorCategory.NETWORK || category === SyncErrorCategory.TIMEOUT) {
       if (attempt >= NETWORK_MAX) return notEligible("已达网络类重试上限");
       return { retry: true, delayMs: this._delay(attempt), replan: false, reason: "网络类暂态错误" };
     }
-    if (category === SyncErrorCategory.REMOTE_CHANGED || category === SyncErrorCategory.PUSH_REJECTED) {
+    if (casRace) {
       if (attempt >= REMOTE_CHANGED_MAX) return notEligible("已达远端变化重试上限");
       return { retry: true, delayMs: 0, replan: true, reason: "远端已变化,重新规划" };
     }
@@ -2641,7 +2650,8 @@ var SyncEngine = class {
           throw err;
         }
       }
-      if (ctx.trigger === "conflict_resolution" && (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL)) {
+      const forcedByWizard = (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution") && (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
+      if (forcedByWizard) {
         return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas);
       }
       transition(ctx, SyncState.RESOLVING_BASE);
@@ -3072,6 +3082,7 @@ var SyncEngine = class {
           throw this.provider.mapUpdateRefFailure(err);
         }
       }
+      if (finalSha) ctx.expectedRemoteHead = finalSha;
     }
     return finalSha;
   }
@@ -3293,6 +3304,7 @@ var SyncController = class {
             this.retryTimer = setTimeout(resolve, decision.delayMs);
           });
         }
+        const originTrigger = ctx.originTrigger || ctx.trigger;
         ctx = createSyncContext({
           trigger: SyncTrigger.RETRY,
           mode: ctx.mode,
@@ -3301,6 +3313,7 @@ var SyncController = class {
           repo: ctx.repo,
           branch: ctx.branch
         });
+        ctx.originTrigger = originTrigger;
         ctx.attempt = attempt;
         this.lastContext = ctx;
       }

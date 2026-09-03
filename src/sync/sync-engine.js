@@ -76,11 +76,15 @@ export class SyncEngine {
         }
       }
 
-      // 3.5 强制方向(首同步向导明确选边,trigger=conflict_resolution):
-      // 跳过基准解析与三路合并,按用户选定方向镜像,否则选边后会再次命中
-      // BASE_UNRESOLVED(基准仍未确认)形成向导循环
-      if (ctx.trigger === "conflict_resolution" &&
-          (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL)) {
+      // 3.5 强制方向(首同步向导明确选边后的恢复路径):
+      // 跳过基准解析与三路合并,按用户选定方向镜像;否则选边后基准仍未确认,
+      // 会再次命中 BASE_UNRESOLVED 形成向导循环。
+      // RETRY 重规划需保留最初触发者(originTrigger),否则镜像会退回普通流程。
+      // 与规划器 _applyOverride 的分工: 本路径=向导恢复的一次性镜像(无基准);
+      // 规划器覆盖=有基准时的策略模式与用户逐文件决策。
+      const forcedByWizard = (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution") &&
+        (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
+      if (forcedByWizard) {
         return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas);
       }
 
@@ -545,6 +549,8 @@ export class SyncEngine {
           throw this.provider.mapUpdateRefFailure(err);
         }
       }
+      // 漂移(drifted)时 finalSha 为远端实际头,同样作为下一批的期望头与父提交
+      if (finalSha) ctx.expectedRemoteHead = finalSha;
     }
     return finalSha;
   }

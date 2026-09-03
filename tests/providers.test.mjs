@@ -175,3 +175,46 @@ test("provider 实例提供引擎所需的工具方法(gitBlobSha/bytesToBase64)
   assert.equal(await gh.gitBlobSha(bytes), await GitProvider.gitBlobSha(bytes));
   assert.equal(gh.bytesToBase64(bytes), GitProvider.bytesToBase64(bytes));
 });
+
+/** 回读确认专用桩: 按队列返回 HEAD,父链由 parentsMap 描述 */
+function makeRefProvider(reads, parentsMap = {}) {
+  const provider = {
+    platform: "github",
+    token: "tk",
+    _i: 0,
+    async getBranchHead() {
+      const sha = reads[Math.min(this._i, reads.length - 1)];
+      this._i += 1;
+      return { sha };
+    },
+    async getCommit(sha) {
+      return { sha, parents: parentsMap[sha] || [] };
+    },
+    async _updateRefRaw() {},
+    async _createRefRaw() {},
+  };
+  Object.setPrototypeOf(provider, GitProvider.prototype);
+  return provider;
+}
+
+test("引用确认: 传播中的旧值经有界重读后收敛", async () => {
+  const p = makeRefProvider(["expected", "stale", "ours"]);
+  const r = await p.updateBranchRef("ours", { expectedHead: "expected" });
+  assert.equal(r.confirmedSha, "ours");
+  assert.equal(r.drifted, false);
+});
+
+test("引用确认: 我方提交被并发写手推进 → 接受漂移并以远端头为新事实", async () => {
+  const p = makeRefProvider(["expected", "stale", "racer"], { racer: ["ours"] });
+  const r = await p.updateBranchRef("ours", { expectedHead: "expected" });
+  assert.equal(r.confirmedSha, "racer");
+  assert.equal(r.drifted, true);
+});
+
+test("引用确认: 真分叉 → CONFIRM_FAILED 且可重试(重新规划)", async () => {
+  const p = makeRefProvider(["expected", "stale", "fork"], { fork: ["other"] });
+  await assert.rejects(
+    () => p.updateBranchRef("ours", { expectedHead: "expected" }),
+    (err) => err.code === "CONFIRM_FAILED" && err.retryable === true
+  );
+});

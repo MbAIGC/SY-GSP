@@ -192,18 +192,39 @@ export class GitProvider {
       });
     }
     await this._updateRefRaw(newSha);
-    const confirmed = await this.getBranchHead();
-    if (confirmed.sha !== newSha) {
-      throw new SyncError({
-        category: SyncErrorCategory.REMOTE_CHANGED,
-        code: "CONFIRM_FAILED",
-        operation: "updateBranchRef",
-        message: "远端引用回读不一致,提交未确认",
-        retryable: false,
-        recoverable: false,
-      });
+    const confirmed = await this._confirmRef(newSha, "updateBranchRef");
+    return { confirmedSha: confirmed.sha, drifted: confirmed.drifted };
+  }
+
+  /** 引用回读确认(收敛语义,git push 的标准处理而非容错补丁):
+   * - PATCH/POST 后单次 GET 可能读到传播中的旧值 → 有界重读(共 3 次,间隔 300ms);
+   * - 仍未一致时接受「我方提交已进入远端父链」的漂移(并发写手已推进),以远端头为新事实;
+   * - 确认不可能成立 → CONFIRM_FAILED(retryable): 重新规划后在新远端事实上 CAS 重放,
+   *   已落库的内容经差异计算自然收敛,不会重复写入。
+   */
+  async _confirmRef(newSha, operation) {
+    let confirmed = await this.getBranchHead();
+    for (let i = 0; i < 2 && confirmed.sha !== newSha; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      confirmed = await this.getBranchHead();
     }
-    return { confirmedSha: confirmed.sha };
+    if (confirmed.sha === newSha) return { sha: confirmed.sha, drifted: false };
+    try {
+      const headCommit = await this.getCommit(confirmed.sha);
+      if ((headCommit.parents || []).indexOf(newSha) >= 0) {
+        return { sha: confirmed.sha, drifted: true };
+      }
+    } catch (err) {
+      // 回读提交失败: 按确认失败处理
+    }
+    throw new SyncError({
+      category: SyncErrorCategory.REMOTE_CHANGED,
+      code: "CONFIRM_FAILED",
+      operation,
+      message: "远端引用回读不一致,提交未确认(远端头 " + String(confirmed.sha).slice(0, 8) + ")",
+      retryable: true,
+      recoverable: false,
+    });
   }
 
   /** 平台原生引用更新(子类实现;失败抛 HTTP 层 SyncError) */
@@ -233,18 +254,8 @@ export class GitProvider {
       }
       throw err;
     }
-    const confirmed = await this.getBranchHead();
-    if (confirmed.sha !== commitSha) {
-      throw new SyncError({
-        category: SyncErrorCategory.REMOTE_CHANGED,
-        code: "CONFIRM_FAILED",
-        operation: "ensureBranchRef",
-        message: "分支引用创建后回读不一致,提交未确认",
-        retryable: false,
-        recoverable: false,
-      });
-    }
-    return { confirmedSha: confirmed.sha };
+    const confirmed = await this._confirmRef(commitSha, "ensureBranchRef");
+    return { confirmedSha: confirmed.sha, drifted: confirmed.drifted };
   }
 
   /** 平台原生引用创建(子类实现) */

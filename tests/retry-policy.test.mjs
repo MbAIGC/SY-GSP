@@ -50,3 +50,27 @@ test("可重试分类集合", () => {
   assert.ok(DEFAULT_RETRYABLE_CATEGORIES.includes(SyncErrorCategory.REMOTE_CHANGED));
   assert.ok(DEFAULT_RETRYABLE_CATEGORIES.includes(SyncErrorCategory.PUSH_REJECTED));
 });
+
+test("CAS 竞争: 开关关闭时仍重规划重试(有界),网络类仍受开关约束", async () => {
+  const { RetryPolicy } = await import("../src/sync/retry-policy.js");
+  const { SyncError, SyncErrorCategory } = await import("../src/sync/sync-error.js");
+  const policy = new RetryPolicy({ enabled: false });
+  const casErr = new SyncError({ category: SyncErrorCategory.REMOTE_CHANGED, code: "CONFIRM_FAILED", message: "回读不一致", retryable: true });
+  const d1 = policy.decide(casErr, 0);
+  assert.equal(d1.retry, true, "CAS 竞争应绕过开关");
+  assert.equal(d1.replan, true, "CAS 重试必须重新规划");
+  const d2 = policy.decide(casErr, 2);
+  assert.equal(d2.retry, false, "CAS 重试应有界");
+  const netErr = new SyncError({ category: SyncErrorCategory.NETWORK, code: "ECONN", message: "网络失败", retryable: true });
+  assert.equal(policy.decide(netErr, 0).retry, false, "网络类受开关约束");
+});
+
+test("确认失败: 语义为可重试(重新规划)", async () => {
+  const { RetryPolicy } = await import("../src/sync/retry-policy.js");
+  const { SyncError, SyncErrorCategory } = await import("../src/sync/sync-error.js");
+  const policy = new RetryPolicy({ enabled: false });
+  const err = new SyncError({ category: SyncErrorCategory.REMOTE_CHANGED, code: "CONFIRM_FAILED", message: "回读不一致", retryable: true });
+  const d = policy.decide(err, 1);
+  assert.equal(d.retry, true);
+  assert.equal(d.replan, true);
+});

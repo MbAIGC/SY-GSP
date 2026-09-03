@@ -182,7 +182,9 @@ export class SyncController {
             this.retryTimer = setTimeout(resolve, decision.delayMs);
           });
         }
-        // 重新规划: 以全新上下文重跑,不复用旧 tree/commit
+        // 重新规划: 以全新上下文重跑,不复用旧 tree/commit;
+        // originTrigger 保留最初触发者(如向导选边),使重试不改变流程语义
+        const originTrigger = ctx.originTrigger || ctx.trigger;
         ctx = createSyncContext({
           trigger: SyncTrigger.RETRY,
           mode: ctx.mode,
@@ -191,6 +193,7 @@ export class SyncController {
           repo: ctx.repo,
           branch: ctx.branch,
         });
+        ctx.originTrigger = originTrigger;
         ctx.attempt = attempt;
         this.lastContext = ctx;
       }

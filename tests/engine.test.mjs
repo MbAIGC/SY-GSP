@@ -151,7 +151,7 @@ async function makeFakeRepo(files = {}) {
   };
 }
 
-async function makeHarness({ remoteFiles = {}, localFiles = {} } = {}) {
+async function makeHarness({ remoteFiles = {}, localFiles = {}, commitBuilder = new CommitBuilder({}) } = {}) {
   const repo = await makeFakeRepo({ ...remoteFiles });
   const kernel = makeFakeKernel();
   for (const [path, content] of Object.entries(localFiles)) {
@@ -203,7 +203,7 @@ async function makeHarness({ remoteFiles = {}, localFiles = {} } = {}) {
     conflictService,
     planner,
     merger: new ThreeWayMerger(),
-    commitBuilder: new CommitBuilder({}),
+    commitBuilder,
     events: createEventBus(),
     config: { repoKey: "github:o/r:main", syncRange: 1, syncFileType: "raw" },
   });
@@ -463,4 +463,20 @@ test("强制方向(以远端为准): 空仓库显式报错,不清空本地", asy
   const ctx = h.makeCtx({ trigger: "conflict_resolution", mode: "remote_over_local" });
   await assert.rejects(() => h.engine.run(ctx), (err) => /远端分支为空/.test(err.message));
   assert.notEqual(await h.kernel.getFile(c), null, "本地文件不得被清空");
+});
+
+test("多批次推送: 每批成功后期望头推进,不误判远端已变化", async () => {
+  const dir = "data/20240101120000-abc/";
+  const h = await makeHarness({
+    remoteFiles: { [dir + "base.md"]: "base" },
+    localFiles: { [dir + "base.md"]: "changed", [dir + "n1.md"]: "one", [dir + "n2.md"]: "two", [dir + "n3.md"]: "three" },
+    commitBuilder: new CommitBuilder({ batchByteLimit: 1 }), // 强制逐文件拆批
+  });
+  const baseSha = h.repo.head; // makeFakeRepo 的 head 即 sha 字符串
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseSha, "prep");
+  const ctx = h.makeCtx();
+  const result = await h.engine.run(ctx);
+  assert.equal(result.success, true);
+  assert.equal(result.uploads, 4);
+  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), h.repo.head);
 });
