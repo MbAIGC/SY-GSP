@@ -696,6 +696,8 @@ export class SyncEngine {
             category: SyncErrorCategory.REMOTE_CHANGED,
             code: "REMOTE_HEAD_MOVED",
             operation: "prePushCheck",
+            expectedHeadSha: ctx.expectedRemoteHead,
+            remoteHeadSha: headNow.sha,
             message: "远端分支在规划后已变化(" + headNow.sha.slice(0, 8) + "),本轮重新规划",
             retryable: true,
             recoverable: false,
