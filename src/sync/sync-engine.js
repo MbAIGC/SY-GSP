@@ -171,7 +171,14 @@ export class SyncEngine {
       // 8. 无远端写入 → 本地应用(下载/删本),推进基准,完成
       const remoteWrites = plan.uploads.length + plan.deletionsRemote.length;
       if (remoteWrites === 0) {
-        await this._applyLocalChanges(ctx, plan);
+        try {
+          await this._applyLocalChanges(ctx, plan);
+        } catch (err) {
+          if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+            return this._pauseLocalChanged(ctx, err);
+          }
+          throw err;
+        }
         await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
         if (remoteHead) {
           await this.metadataStore.setConfirmedCommit(this.config.repoKey, remoteHead.sha, ctx.id);
@@ -194,7 +201,14 @@ export class SyncEngine {
       if (batches.length === 0) {
         // H4: 无任何批次可推(上传全部超限被跳过)。应用本地侧变更(下载/删本)后,
         // 以可见错误结束: 不推进 BASE,下一轮仍能发现这些未完成文件;绝不伪成功。
-        await this._applyLocalChanges(ctx, plan);
+        try {
+          await this._applyLocalChanges(ctx, plan);
+        } catch (err) {
+          if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+            return this._pauseLocalChanged(ctx, err);
+          }
+          throw err;
+        }
         await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
         throw this._skippedError(skipped, plan, "远端写入全部被跳过");
       }
@@ -211,7 +225,14 @@ export class SyncEngine {
           recoverable: false,
         });
       }
-      await this._applyLocalChanges(ctx, plan);
+      try {
+        await this._applyLocalChanges(ctx, plan);
+      } catch (err) {
+        if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+          return this._pauseLocalChanged(ctx, err);
+        }
+        throw err;
+      }
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: plan.deletionsRemote.length > 0 });
       if (skipped.length > 0) {
         // 部分大文件被跳过: 已推送并经引用确认的内容以「我方提交」推进 BASE(已物化事实),
@@ -491,7 +512,14 @@ export class SyncEngine {
       }
     } else {
       // 以远端为准: 仅本地侧变更,不产生远端写入
-      await this._applyLocalChanges(ctx, plan);
+      try {
+        await this._applyLocalChanges(ctx, plan);
+      } catch (err) {
+        if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+          return this._pauseLocalChanged(ctx, err);
+        }
+        throw err;
+      }
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
     }
 
@@ -543,6 +571,28 @@ export class SyncEngine {
       }
     }
     plan.merges.length = 0;
+  }
+
+  async _pauseLocalChanged(ctx, err) {
+    ctx.conflicts = [{
+      path: err.path,
+      reason: err.message,
+      baseSha: null,
+      localSha: null,
+      remoteSha: null,
+    }];
+    await this._saveConflicts(ctx, { conflicts: ctx.conflicts });
+    transition(ctx, SyncState.CONFLICT_PAUSED, "local-changed:" + err.path);
+    finish(ctx, {
+      state: SyncState.CONFLICT_PAUSED,
+      result: {
+        paused: true,
+        kind: "FILE_CONFLICTS",
+        conflictCount: 1,
+        conflicts: [{ path: err.path, reason: err.message }],
+      },
+    });
+    return ctx.result;
   }
 
   async _saveConflicts(ctx, plan) {

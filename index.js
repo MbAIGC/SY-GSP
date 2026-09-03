@@ -2252,6 +2252,8 @@ var TRANSITIONS = Object.freeze({
   [SyncState.COMMITTING]: [
     SyncState.VERIFYING_REMOTE_HEAD,
     SyncState.PUSHING,
+    SyncState.CONFLICT_PAUSED,
+    // 本地并发新建/修改发生在落地阶段
     SyncState.RETRYING,
     SyncState.FAILED,
     SyncState.CANCELLED
@@ -2263,6 +2265,8 @@ var TRANSITIONS = Object.freeze({
     SyncState.CANCELLED
   ],
   [SyncState.PUSHING]: [
+    SyncState.CONFLICT_PAUSED,
+    // 推送后本地落地发现并发新建/修改
     SyncState.SUCCESS,
     SyncState.RETRYING,
     SyncState.COMMITTING,
@@ -2479,7 +2483,14 @@ var SyncEngine = class {
       }
       const remoteWrites = plan.uploads.length + plan.deletionsRemote.length;
       if (remoteWrites === 0) {
-        await this._applyLocalChanges(ctx, plan);
+        try {
+          await this._applyLocalChanges(ctx, plan);
+        } catch (err) {
+          if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+            return this._pauseLocalChanged(ctx, err);
+          }
+          throw err;
+        }
         await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
         if (remoteHead) {
           await this.metadataStore.setConfirmedCommit(this.config.repoKey, remoteHead.sha, ctx.id);
@@ -2497,7 +2508,14 @@ var SyncEngine = class {
       });
       ctx.skippedLarge = skipped;
       if (batches.length === 0) {
-        await this._applyLocalChanges(ctx, plan);
+        try {
+          await this._applyLocalChanges(ctx, plan);
+        } catch (err) {
+          if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+            return this._pauseLocalChanged(ctx, err);
+          }
+          throw err;
+        }
         await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
         throw this._skippedError(skipped, plan, "远端写入全部被跳过");
       }
@@ -2512,7 +2530,14 @@ var SyncEngine = class {
           recoverable: false
         });
       }
-      await this._applyLocalChanges(ctx, plan);
+      try {
+        await this._applyLocalChanges(ctx, plan);
+      } catch (err) {
+        if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+          return this._pauseLocalChanged(ctx, err);
+        }
+        throw err;
+      }
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: plan.deletionsRemote.length > 0 });
       if (skipped.length > 0) {
         if (push.baseSha) {
@@ -2773,7 +2798,14 @@ var SyncEngine = class {
         confirmedSha = push.baseSha || push.finalSha;
       }
     } else {
-      await this._applyLocalChanges(ctx, plan);
+      try {
+        await this._applyLocalChanges(ctx, plan);
+      } catch (err) {
+        if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+          return this._pauseLocalChanged(ctx, err);
+        }
+        throw err;
+      }
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
     }
     if (confirmedSha) {
@@ -2820,6 +2852,27 @@ var SyncEngine = class {
       }
     }
     plan.merges.length = 0;
+  }
+  async _pauseLocalChanged(ctx, err) {
+    ctx.conflicts = [{
+      path: err.path,
+      reason: err.message,
+      baseSha: null,
+      localSha: null,
+      remoteSha: null
+    }];
+    await this._saveConflicts(ctx, { conflicts: ctx.conflicts });
+    transition(ctx, SyncState.CONFLICT_PAUSED, "local-changed:" + err.path);
+    finish(ctx, {
+      state: SyncState.CONFLICT_PAUSED,
+      result: {
+        paused: true,
+        kind: "FILE_CONFLICTS",
+        conflictCount: 1,
+        conflicts: [{ path: err.path, reason: err.message }]
+      }
+    });
+    return ctx.result;
   }
   async _saveConflicts(ctx, plan) {
     const conflicts = [];

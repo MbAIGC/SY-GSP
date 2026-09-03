@@ -68,6 +68,7 @@ const TRANSITIONS = Object.freeze({
   [SyncState.COMMITTING]: [
     SyncState.VERIFYING_REMOTE_HEAD,
     SyncState.PUSHING,
+    SyncState.CONFLICT_PAUSED, // 本地并发新建/修改发生在落地阶段
     SyncState.RETRYING,
     SyncState.FAILED,
     SyncState.CANCELLED,
@@ -79,6 +80,7 @@ const TRANSITIONS = Object.freeze({
     SyncState.CANCELLED,
   ],
   [SyncState.PUSHING]: [
+    SyncState.CONFLICT_PAUSED, // 推送后本地落地发现并发新建/修改
     SyncState.SUCCESS,
     SyncState.RETRYING,
     SyncState.COMMITTING, // 多批次提交: 下一批回到提交阶段

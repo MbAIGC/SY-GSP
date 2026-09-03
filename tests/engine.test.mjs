@@ -638,6 +638,30 @@ test("H4: 部分大文件跳过(其余已推)→ SKIPPED_LARGE_FILES,已推内�
   assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), baseAfter1, "跳过轮不推进 BASE");
 });
 
+test("M5: 同步期间本地新建远端文件 → FILE_CONFLICTS 暂停且保留本地内容", async () => {
+  const path = "data/20240101120000-abc/conf.json";
+  const h = await makeHarness();
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  h.repo.files[path] = "remote";
+  await h.repo.snapshot("remote-create");
+  const originalAssert = h.engine._assertLocalStillAbsent.bind(h.engine);
+  h.engine._assertLocalStillAbsent = async (ctx, target) => {
+    await h.kernel.putFile(target, new Blob([enc("local-created")]), false);
+    return originalAssert(ctx, target);
+  };
+
+  const result = await h.engine.run(h.makeCtx());
+  assert.equal(result.paused, true);
+  assert.equal(result.kind, "FILE_CONFLICTS");
+  assert.equal(result.conflictCount, 1);
+  assert.equal(await (await h.kernel.getFile(path)).text(), "local-created", "不得覆盖本地新建内容");
+  const set = h.conflictService.openSet("github:o/r:main");
+  assert.ok(set, "应保存可处理的冲突集");
+  assert.equal(set.conflicts[0].path, path);
+  assert.match(set.conflicts[0].reason, /本地新建了同名文件/);
+});
+
 test("M5: 下载/本地删除前复查——本地在快照后被修改 → LOCAL_CHANGED 中止,内容不被覆盖", async () => {
   const path = "data/20240101120000-abc/note.md";
   const h = await makeHarness({ remoteFiles: { [path]: "v2" } });
