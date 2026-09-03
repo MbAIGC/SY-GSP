@@ -4,13 +4,13 @@
  * 时间一律按本地时区展示(存储仍为 UTC ISO,渲染时转换——直接截取 UTC 曾导致本地时区差)。
  */
 
-/** ISO 时间 → 本地时区 "YYYY-MM-DD HH:mm:ss"(与历史面板 toLocaleString 语义一致) */
+/** ISO 时间 → 本地时区 "MM-DD HH:mm:ss";年份不在运行日志中展示 */
 export function formatLocalTime(iso) {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
   const pad = (n) => String(n).padStart(2, "0");
   return (
-    d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
     " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds())
   );
 }

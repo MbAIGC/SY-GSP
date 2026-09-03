@@ -391,7 +391,7 @@ export default class SyGspPlugin extends q.Plugin {
       this._recordHistory(ctx, "FAILED", error, null);
       this.notification.syncError(error, { automatic: ctx.trigger === "automatic" });
     });
-    this.events.on("sync:conflict", ({ ctx, conflictPaused }) => {
+    this.events.on("sync:conflict", async ({ ctx, conflictPaused }) => {
       this.logs.error("同步暂停[" + conflictPaused.kind + "] " + conflictPaused.reason);
       this._recordHistory(ctx, "CONFLICT_PAUSED", null, { paused: true, kind: conflictPaused.kind });
       this.notification.conflictPaused({
@@ -400,14 +400,14 @@ export default class SyGspPlugin extends q.Plugin {
         reason: conflictPaused.reason,
       });
       if (conflictPaused.kind === "FILE_CONFLICTS") {
-        const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
+        const set = await this._ensureConflictSet(conflictPaused);
         if (set) this.conflictDialog.show(set);
       } else {
         this.diagnosisPanel.show({ mode: "base_recovery" });
       }
     });
-    this.events.on("conflict:reopen", () => {
-      const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
+    this.events.on("conflict:reopen", async () => {
+      const set = await this._ensureConflictSet(this.controller && this.controller.conflictPaused);
       if (set) {
         this.logs.info("重新打开冲突处理: 已加载冲突集 " + set.operationId);
         this.conflictDialog.show(set);
@@ -528,6 +528,31 @@ export default class SyGspPlugin extends q.Plugin {
 
   _hasUnresolvedBase() {
     return !this.metadataStore.getBaseCommit(this._repoKey(this._repoInfo()));
+  }
+
+  async _ensureConflictSet(paused) {
+    if (!paused || paused.kind !== "FILE_CONFLICTS") return null;
+    const repoKey = this._repoKey(this._repoInfo());
+    const existing = this.conflictService && this.conflictService.openSet(repoKey);
+    if (existing) return existing;
+    const conflicts = (paused.conflicts || []).filter((c) => c && c.path).map((c) => ({
+      path: c.path,
+      reason: c.reason || "存在未处理冲突",
+      baseSha: c.baseSha || null,
+      localSha: c.localSha || null,
+      remoteSha: c.remoteSha || null,
+    }));
+    if (conflicts.length === 0 || !this.conflictService) return null;
+    const operationId = paused.operationId || ("recovered-" + Date.now());
+    this.logs.warn("冲突集缺失,正在根据暂停记录重建: " + operationId + " (" + conflicts.length + " 个文件)");
+    try {
+      const set = await this.conflictService.saveSet({ repoKey, operationId, conflicts });
+      this.logs.info("冲突集重建完成: " + operationId + " (" + conflicts.length + " 个文件)");
+      return set;
+    } catch (err) {
+      this.logs.error("冲突集重建失败: " + String((err && err.message) || err));
+      return null;
+    }
   }
 
   /** 当前仓库的暂停事实：控制器状态优先，open conflict set 用于状态文件丢失后的只读诊断。 */
@@ -788,6 +813,7 @@ export default class SyGspPlugin extends q.Plugin {
   // ---------- 诊断 ----------
 
   async _runDiagnosis() {
+    this.logs.info("只读诊断开始");
     const checks = [];
     const info = this._repoInfo();
     if (this._isGiteeConfigured()) {
@@ -860,6 +886,7 @@ export default class SyGspPlugin extends q.Plugin {
         detail: "迁移 " + (migrationReport.migratedKeys || []).length + " 项" + (errs.length ? ";错误: " + errs.join("; ") : ""),
       });
     }
+    this.logs.info("只读诊断完成: " + checks.filter((check) => check.ok).length + "/" + checks.length + " 项通过");
     return checks;
   }
 

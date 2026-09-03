@@ -52,9 +52,12 @@ export class DiagnosisPanel {
       const dialog = this.dialog;
       const root = dialog.element.querySelector("#sygspDiagnosis");
       this._renderLoading(root);
+      const watchdog = setTimeout(() => {
+        if (this.dialog === dialog) this._renderError(root, new Error("诊断面板等待超时(25秒),请关闭后重试并检查运行日志"));
+      }, 25000);
       this._run(mode, root, dialog).catch((err) => {
-        this._renderError(root, err);
-      });
+        if (this.dialog === dialog) this._renderError(root, err);
+      }).finally(() => clearTimeout(watchdog));
     } catch (err) {
       this.dialog = null;
       console.error("[SY-GSP] 打开诊断面板失败:", err);
@@ -70,7 +73,7 @@ export class DiagnosisPanel {
   }
 
   async _run(mode, root, dialog) {
-    const checks = await this._safe(this.runChecks);
+    const checks = await this._safe(this.runChecks, "只读诊断", 20000);
     if (this.dialog !== dialog) return;
     await this._render(root, mode, checks);
   }
@@ -85,11 +88,20 @@ export class DiagnosisPanel {
     root.appendChild(line);
   }
 
-  async _safe(fn) {
+  async _safe(fn, label = "操作", timeoutMs = 20000) {
     try {
-      return (await fn()) || [];
+      const task = Promise.resolve().then(() => fn());
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label + "超时(" + Math.round(timeoutMs / 1000) + "秒),请检查思源内核或网络连接")), timeoutMs);
+      });
+      try {
+        return (await Promise.race([task, timeout])) || [];
+      } finally {
+        clearTimeout(timer);
+      }
     } catch (err) {
-      return [{ name: "诊断执行失败", ok: false, detail: String((err && err.message) || err) }];
+      return [{ name: label + "失败", ok: false, detail: String((err && err.message) || err) }];
     }
   }
 
@@ -218,7 +230,7 @@ export class DiagnosisPanel {
     title.textContent = (t && t.sygspPreviewTitle) || "首次写入前的同步计划预览:";
     box.appendChild(title);
 
-    const preview = await this._safe(this.previewPlan);
+    const preview = await this._safe(this.previewPlan, "同步计划预览", 20000);
     for (const item of preview) {
       const line = document.createElement("div");
       line.className = "b3-label__text";

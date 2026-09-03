@@ -4650,9 +4650,12 @@ var DiagnosisPanel = class {
       const dialog = this.dialog;
       const root = dialog.element.querySelector("#sygspDiagnosis");
       this._renderLoading(root);
+      const watchdog = setTimeout(() => {
+        if (this.dialog === dialog) this._renderError(root, new Error("诊断面板等待超时(25秒),请关闭后重试并检查运行日志"));
+      }, 25e3);
       this._run(mode, root, dialog).catch((err) => {
-        this._renderError(root, err);
-      });
+        if (this.dialog === dialog) this._renderError(root, err);
+      }).finally(() => clearTimeout(watchdog));
     } catch (err) {
       this.dialog = null;
       console.error("[SY-GSP] 打开诊断面板失败:", err);
@@ -4666,7 +4669,7 @@ var DiagnosisPanel = class {
     }
   }
   async _run(mode, root, dialog) {
-    const checks = await this._safe(this.runChecks);
+    const checks = await this._safe(this.runChecks, "只读诊断", 2e4);
     if (this.dialog !== dialog) return;
     await this._render(root, mode, checks);
   }
@@ -4679,11 +4682,20 @@ var DiagnosisPanel = class {
     line.textContent = "❌ 只读诊断执行失败: " + String(err && err.message || err);
     root.appendChild(line);
   }
-  async _safe(fn) {
+  async _safe(fn, label = "操作", timeoutMs = 2e4) {
     try {
-      return await fn() || [];
+      const task = Promise.resolve().then(() => fn());
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label + "超时(" + Math.round(timeoutMs / 1e3) + "秒),请检查思源内核或网络连接")), timeoutMs);
+      });
+      try {
+        return await Promise.race([task, timeout]) || [];
+      } finally {
+        clearTimeout(timer);
+      }
     } catch (err) {
-      return [{ name: "诊断执行失败", ok: false, detail: String(err && err.message || err) }];
+      return [{ name: label + "失败", ok: false, detail: String(err && err.message || err) }];
     }
   }
   _renderLoading(root) {
@@ -4794,7 +4806,7 @@ var DiagnosisPanel = class {
     const title = document.createElement("div");
     title.textContent = t && t.sygspPreviewTitle || "首次写入前的同步计划预览:";
     box.appendChild(title);
-    const preview = await this._safe(this.previewPlan);
+    const preview = await this._safe(this.previewPlan, "同步计划预览", 2e4);
     for (const item of preview) {
       const line = document.createElement("div");
       line.className = "b3-label__text";
@@ -4838,7 +4850,7 @@ function formatLocalTime(iso) {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
   const pad = (n) => String(n).padStart(2, "0");
-  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
 }
 var RuntimeLogs = class {
   constructor(limit = 500) {
@@ -5895,7 +5907,7 @@ var SyGspPlugin = class extends q.Plugin {
       this._recordHistory(ctx, "FAILED", error, null);
       this.notification.syncError(error, { automatic: ctx.trigger === "automatic" });
     });
-    this.events.on("sync:conflict", ({ ctx, conflictPaused }) => {
+    this.events.on("sync:conflict", async ({ ctx, conflictPaused }) => {
       this.logs.error("同步暂停[" + conflictPaused.kind + "] " + conflictPaused.reason);
       this._recordHistory(ctx, "CONFLICT_PAUSED", null, { paused: true, kind: conflictPaused.kind });
       this.notification.conflictPaused({
@@ -5904,14 +5916,14 @@ var SyGspPlugin = class extends q.Plugin {
         reason: conflictPaused.reason
       });
       if (conflictPaused.kind === "FILE_CONFLICTS") {
-        const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
+        const set = await this._ensureConflictSet(conflictPaused);
         if (set) this.conflictDialog.show(set);
       } else {
         this.diagnosisPanel.show({ mode: "base_recovery" });
       }
     });
-    this.events.on("conflict:reopen", () => {
-      const set = this.conflictService.openSet(this._repoKey(this._repoInfo()));
+    this.events.on("conflict:reopen", async () => {
+      const set = await this._ensureConflictSet(this.controller && this.controller.conflictPaused);
       if (set) {
         this.logs.info("重新打开冲突处理: 已加载冲突集 " + set.operationId);
         this.conflictDialog.show(set);
@@ -6019,6 +6031,30 @@ var SyGspPlugin = class extends q.Plugin {
   }
   _hasUnresolvedBase() {
     return !this.metadataStore.getBaseCommit(this._repoKey(this._repoInfo()));
+  }
+  async _ensureConflictSet(paused) {
+    if (!paused || paused.kind !== "FILE_CONFLICTS") return null;
+    const repoKey = this._repoKey(this._repoInfo());
+    const existing = this.conflictService && this.conflictService.openSet(repoKey);
+    if (existing) return existing;
+    const conflicts = (paused.conflicts || []).filter((c) => c && c.path).map((c) => ({
+      path: c.path,
+      reason: c.reason || "存在未处理冲突",
+      baseSha: c.baseSha || null,
+      localSha: c.localSha || null,
+      remoteSha: c.remoteSha || null
+    }));
+    if (conflicts.length === 0 || !this.conflictService) return null;
+    const operationId = paused.operationId || "recovered-" + Date.now();
+    this.logs.warn("冲突集缺失,正在根据暂停记录重建: " + operationId + " (" + conflicts.length + " 个文件)");
+    try {
+      const set = await this.conflictService.saveSet({ repoKey, operationId, conflicts });
+      this.logs.info("冲突集重建完成: " + operationId + " (" + conflicts.length + " 个文件)");
+      return set;
+    } catch (err) {
+      this.logs.error("冲突集重建失败: " + String(err && err.message || err));
+      return null;
+    }
   }
   /** 当前仓库的暂停事实：控制器状态优先，open conflict set 用于状态文件丢失后的只读诊断。 */
   _currentPausedInfo() {
@@ -6250,6 +6286,7 @@ var SyGspPlugin = class extends q.Plugin {
   }
   // ---------- 诊断 ----------
   async _runDiagnosis() {
+    this.logs.info("只读诊断开始");
     const checks = [];
     const info = this._repoInfo();
     if (this._isGiteeConfigured()) {
@@ -6308,6 +6345,7 @@ var SyGspPlugin = class extends q.Plugin {
         detail: "迁移 " + (migrationReport.migratedKeys || []).length + " 项" + (errs.length ? ";错误: " + errs.join("; ") : "")
       });
     }
+    this.logs.info("只读诊断完成: " + checks.filter((check) => check.ok).length + "/" + checks.length + " 项通过");
     return checks;
   }
   /** 首次写入预览: 只读统计,不执行任何写入 */

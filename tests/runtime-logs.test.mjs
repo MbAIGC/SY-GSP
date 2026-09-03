@@ -5,8 +5,8 @@ import { RuntimeLogs, formatLocalTime } from "../src/ui/runtime-logs.js";
 
 test("formatLocalTime: UTC ISO → 本地时区 YYYY-MM-DD HH:mm:ss(往返一致,与时区无关)", () => {
   const d = new Date(2026, 0, 5, 9, 30, 45); // 本地时间构造
-  assert.equal(formatLocalTime(d.toISOString()), "2026-01-05 09:30:45");
-  assert.equal(formatLocalTime("2026-01-05T09:30:45.000Z").length, 19, "固定 UTC 输入也得到 19 位本地时间字符串");
+  assert.equal(formatLocalTime(d.toISOString()), "01-05 09:30:45");
+  assert.equal(formatLocalTime("2026-01-05T09:30:45.000Z").length, 14, "固定 UTC 输入得到不含年份的本地时间字符串");
 });
 
 test("formatLocalTime: 非法输入原样返回,不抛错", () => {
@@ -19,8 +19,8 @@ test("render: 输出本地时间行(前缀不再是 UTC 截取)", () => {
   logs.info("测试信息");
   const out = logs.render();
   assert.ok(out.includes("[info] 测试信息"), "含级别与文本: " + out);
-  const m = out.match(/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/);
-  assert.ok(m, "行首为本地时间: " + out);
+  const m = out.match(/^\[(\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/);
+  assert.ok(m, "行首为不含年份的本地时间: " + out);
   assert.equal(m[1], formatLocalTime(logs.entries[0].at));
   assert.ok(!out.includes("Z]"), "不得再显示 UTC ISO 原串");
 });
