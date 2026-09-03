@@ -548,6 +548,7 @@ var SyncError = class extends Error {
     this.operation = fields && fields.operation || "";
     this.phase = fields && fields.phase || "";
     this.httpStatus = fields && fields.httpStatus || 0;
+    this.remoteHeadSha = fields && fields.remoteHeadSha || "";
     this.path = fields && fields.path || "";
     this.detail = fields && fields.detail || "";
     this.retryable = !!(fields && fields.retryable);
@@ -927,6 +928,7 @@ var _GitProvider = class _GitProvider {
         code: "REMOTE_HEAD_MOVED",
         operation: "updateBranchRef",
         message: "远端分支已变化(期望 " + expectedHead.slice(0, 8) + ",实际 " + observed.sha.slice(0, 8) + "),本次不写入",
+        remoteHeadSha: observed.sha,
         retryable: true,
         recoverable: false
       });
@@ -1023,6 +1025,7 @@ var _GitProvider = class _GitProvider {
         code: "NON_FAST_FORWARD",
         operation: "updateBranchRef",
         httpStatus: status,
+        remoteHeadSha: err && err.remoteHeadSha || "",
         message: "远端分支已前移,本次提交未写入(force=false,不覆盖远端)",
         detail: err && err.detail || "",
         retryable: true,
@@ -3317,6 +3320,7 @@ var SyncController = class {
     this.lastContext = ctx;
     this.events.emit("state:changed", { state: this.state, ctx });
     let attempt = 0;
+    let lastRemoteFailureFingerprint = "";
     for (; ; ) {
       try {
         const engine = new SyncEngine(this.makeEngineDeps(ctx));
@@ -3338,6 +3342,13 @@ var SyncController = class {
         this.logger.error("同步失败 #" + ctx.id + " [" + syncErr.category + "] " + syncErr.toDisplayText() + (syncErr.detail ? " | 详情: " + JSON.stringify(syncErr.detail).slice(0, 300) : ""));
         const decision = this.retryPolicy.decide(syncErr, attempt);
         const casChurn = syncErr.category === SyncErrorCategory.REMOTE_CHANGED || syncErr.category === SyncErrorCategory.PUSH_REJECTED;
+        const remoteFingerprint = casChurn ? [syncErr.code, syncErr.remoteHeadSha, syncErr.detail].join("|") : "";
+        if (remoteFingerprint && remoteFingerprint === lastRemoteFailureFingerprint) {
+          this.logger.warn("远端引用失败指纹连续重复,停止无意义重试: " + remoteFingerprint.slice(0, 180));
+          await this._onFailed(ctx, syncErr);
+          throw syncErr;
+        }
+        if (remoteFingerprint) lastRemoteFailureFingerprint = remoteFingerprint;
         if (casChurn && attempt >= 1 && !this._casChurnWarned) {
           this._casChurnWarned = true;
           this.logger.warn("⚠️ 本轮同步连续两次无法确认远端引用状态: 远端 HEAD 在本轮规划与推送期间发生变化。该现象不等同于已确认存在其他设备写入，请结合远端提交指纹继续判断。");

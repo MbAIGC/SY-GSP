@@ -187,6 +187,7 @@ export class GitProvider {
         code: "REMOTE_HEAD_MOVED",
         operation: "updateBranchRef",
         message: "远端分支已变化(期望 " + expectedHead.slice(0, 8) + ",实际 " + observed.sha.slice(0, 8) + "),本次不写入",
+        remoteHeadSha: observed.sha,
         retryable: true,
         recoverable: false,
       });
@@ -296,6 +297,7 @@ export class GitProvider {
         code: "NON_FAST_FORWARD",
         operation: "updateBranchRef",
         httpStatus: status,
+        remoteHeadSha: (err && err.remoteHeadSha) || "",
         message: "远端分支已前移,本次提交未写入(force=false,不覆盖远端)",
         detail: (err && err.detail) || "",
         retryable: true,

@@ -207,6 +207,7 @@ export class SyncController {
     this.events.emit("state:changed", { state: this.state, ctx });
 
     let attempt = 0;
+    let lastRemoteFailureFingerprint = "";
     for (;;) {
       try {
         const engine = new SyncEngine(this.makeEngineDeps(ctx));
@@ -233,6 +234,15 @@ export class SyncController {
         const decision = this.retryPolicy.decide(syncErr, attempt);
         const casChurn = syncErr.category === SyncErrorCategory.REMOTE_CHANGED ||
           syncErr.category === SyncErrorCategory.PUSH_REJECTED;
+        const remoteFingerprint = casChurn
+          ? [syncErr.code, syncErr.remoteHeadSha, syncErr.detail].join("|")
+          : "";
+        if (remoteFingerprint && remoteFingerprint === lastRemoteFailureFingerprint) {
+          this.logger.warn("远端引用失败指纹连续重复,停止无意义重试: " + remoteFingerprint.slice(0, 180));
+          await this._onFailed(ctx, syncErr);
+          throw syncErr;
+        }
+        if (remoteFingerprint) lastRemoteFailureFingerprint = remoteFingerprint;
         if (casChurn && attempt >= 1 && !this._casChurnWarned) {
           this._casChurnWarned = true;
           this.logger.warn("⚠️ 本轮同步连续两次无法确认远端引用状态: 远端 HEAD 在本轮规划与推送期间发生变化" +
