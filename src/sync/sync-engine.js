@@ -81,6 +81,7 @@ export class SyncEngine {
         remoteHead = await this.provider.getBranchHead();
         ctx.observedRemoteHead = remoteHead.sha;
         const remoteCommit = await this.provider.getCommit(remoteHead.sha);
+        ctx.remoteCommitDate = remoteCommit.date || null;
         remoteEntries = await this._treeMap(await this.provider.getTree(remoteCommit.treeSha));
       } catch (err) {
         if (!(err instanceof SyncError && err.httpStatus === 404)) throw err;
@@ -144,6 +145,7 @@ export class SyncEngine {
         overrides,
         enumErrorOccurred: scan.enumErrorOccurred,
         bootstrap: ctx.bootstrapDownload === true,
+        remoteCommitDate: ctx.remoteCommitDate,
       });
       ctx.plan = plan;
 
@@ -383,10 +385,10 @@ export class SyncEngine {
         bootstrapDownload: true,
       };
     }
-    return {
-      unresolved: true,
-      reason: "首次同步: 本地与远端都有内容,无法证明共同基准,需要通过首同步向导明确选择",
-    };
+    // 首同步双方均有内容时，不能把“本机没有 BASE”误判为真实双写冲突。
+    // 以空 BASE 交给规划器逐路径判断：单边文件正常收敛，同路径不同内容仅在
+    // 本地时间与远端提交时间无法区分时才进入人工冲突。
+    return { baseEntries: new Map(), baseSha: null };
   }
 
   /** 过滤基准树/远端树中的被忽略路径(匹配器由工作区适配器提供;缺失时不过滤) */

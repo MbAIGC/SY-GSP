@@ -10,6 +10,9 @@ export const DEFAULT_IGNORES = Object.freeze([
   "data/plugins/*",
   "data/widgets/*",
   "data/storage/*",
+  // 笔记本设备侧配置/排序由内核自行生成，不作为用户文档跨设备合并。
+  "data/*/.siyuan/conf.json",
+  "data/*/.siyuan/sort.json",
   ".lock",
   "temp/*",
 ]);

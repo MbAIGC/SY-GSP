@@ -72,6 +72,8 @@ export class SyncPlanner {
         remoteEntry: remoteEntries.get(path),
         localExists: localSet.has(path),
         localShas,
+        localUpdated: localFiles.find((file) => file.path === path)?.updated || 0,
+        remoteCommitDate: opts.remoteCommitDate || null,
         enumErrorOccurred,
         bootstrap: opts.bootstrap === true,
       };
@@ -159,7 +161,20 @@ export class SyncPlanner {
         plan.unchanged += 1;
         return;
       }
-      plan.conflicts.push({ path, reason: "双方同时新增了不同内容", baseSha: null, localSha, remoteSha: remoteEntry.sha });
+      // 无 BASE 时不能仅凭路径相同断定两端同时写入。优先使用有效时间选择
+      // 明显较新的一侧；时间不可用或接近时才保留人工冲突兜底。
+      const localTime = Number(ctx.localUpdated) || 0;
+      const remoteTime = Date.parse(ctx.remoteCommitDate || "") || 0;
+      const delta = localTime && remoteTime ? localTime - remoteTime : 0;
+      if (delta > 2000) {
+        plan.uploads.push({ path, op: "create" });
+        return;
+      }
+      if (delta < -2000) {
+        plan.downloads.push({ path, op: "create" });
+        return;
+      }
+      plan.conflicts.push({ path, reason: "双方均有文件但无法可靠判断最新版本", baseSha: null, localSha, remoteSha: remoteEntry.sha });
       return;
     }
 

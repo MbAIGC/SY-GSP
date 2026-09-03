@@ -44,7 +44,31 @@ test("远端新增、本地无 → download create", async () => {
   assert.deepEqual(plan.downloads, [{ path: "r.md", op: "create" }]);
 });
 
-test("双方同时新增且不同 → 冲突", async () => {
+test("无 BASE 同路径不同: 本地明显较新 → 上传本地", async () => {
+  const p = plannerWith();
+  const plan = await p.build({
+    remoteEntries: new Map([["both.md", entry("SR")]]),
+    localFiles: [{ path: "both.md", updated: 20000 }],
+    localShas: new Map([["both.md", "SL"]]),
+    remoteCommitDate: new Date(10000).toISOString(),
+  });
+  assert.deepEqual(plan.uploads, [{ path: "both.md", op: "create" }]);
+  assert.equal(plan.conflicts.length, 0);
+});
+
+test("无 BASE 同路径不同: 远端明显较新 → 下载远端", async () => {
+  const p = plannerWith();
+  const plan = await p.build({
+    remoteEntries: new Map([["both.md", entry("SR")]]),
+    localFiles: [{ path: "both.md", updated: 10000 }],
+    localShas: new Map([["both.md", "SL"]]),
+    remoteCommitDate: new Date(20000).toISOString(),
+  });
+  assert.deepEqual(plan.downloads, [{ path: "both.md", op: "create" }]);
+  assert.equal(plan.conflicts.length, 0);
+});
+
+test("无 BASE 同路径不同且时间不可判定 → 可处理冲突", async () => {
   const p = plannerWith();
   const plan = await p.build({
     remoteEntries: new Map([["both.md", entry("SR")]]),
@@ -52,7 +76,7 @@ test("双方同时新增且不同 → 冲突", async () => {
     localShas: new Map([["both.md", "SL"]]),
   });
   assert.equal(plan.conflicts.length, 1);
-  assert.match(plan.conflicts[0].reason, /同时新增/);
+  assert.match(plan.conflicts[0].reason, /无法可靠判断/);
 });
 
 test("双方同时新增且内容一致 → 无动作", async () => {

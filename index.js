@@ -122,6 +122,9 @@ var DEFAULT_IGNORES = Object.freeze([
   "data/plugins/*",
   "data/widgets/*",
   "data/storage/*",
+  // 笔记本设备侧配置/排序由内核自行生成，不作为用户文档跨设备合并。
+  "data/*/.siyuan/conf.json",
+  "data/*/.siyuan/sort.json",
   ".lock",
   "temp/*"
 ]);
@@ -1344,6 +1347,7 @@ var SyncPlanner = class {
    * @returns {Promise<object>} plan
    */
   async build(opts) {
+    var _a;
     const {
       baseEntries = /* @__PURE__ */ new Map(),
       remoteEntries = /* @__PURE__ */ new Map(),
@@ -1379,6 +1383,8 @@ var SyncPlanner = class {
         remoteEntry: remoteEntries.get(path),
         localExists: localSet.has(path),
         localShas,
+        localUpdated: ((_a = localFiles.find((file) => file.path === path)) == null ? void 0 : _a.updated) || 0,
+        remoteCommitDate: opts.remoteCommitDate || null,
         enumErrorOccurred,
         bootstrap: opts.bootstrap === true
       };
@@ -1448,7 +1454,18 @@ var SyncPlanner = class {
         plan.unchanged += 1;
         return;
       }
-      plan.conflicts.push({ path, reason: "双方同时新增了不同内容", baseSha: null, localSha, remoteSha: remoteEntry.sha });
+      const localTime = Number(ctx.localUpdated) || 0;
+      const remoteTime = Date.parse(ctx.remoteCommitDate || "") || 0;
+      const delta = localTime && remoteTime ? localTime - remoteTime : 0;
+      if (delta > 2e3) {
+        plan.uploads.push({ path, op: "create" });
+        return;
+      }
+      if (delta < -2e3) {
+        plan.downloads.push({ path, op: "create" });
+        return;
+      }
+      plan.conflicts.push({ path, reason: "双方均有文件但无法可靠判断最新版本", baseSha: null, localSha, remoteSha: remoteEntry.sha });
       return;
     }
     if (localState === "unchanged" && remoteState === "changed") {
@@ -2413,6 +2430,7 @@ var SyncEngine = class {
         remoteHead = await this.provider.getBranchHead();
         ctx.observedRemoteHead = remoteHead.sha;
         const remoteCommit = await this.provider.getCommit(remoteHead.sha);
+        ctx.remoteCommitDate = remoteCommit.date || null;
         remoteEntries = await this._treeMap(await this.provider.getTree(remoteCommit.treeSha));
       } catch (err) {
         if (!(err instanceof SyncError && err.httpStatus === 404)) throw err;
@@ -2461,7 +2479,8 @@ var SyncEngine = class {
         mode: ctx.mode,
         overrides,
         enumErrorOccurred: scan.enumErrorOccurred,
-        bootstrap: ctx.bootstrapDownload === true
+        bootstrap: ctx.bootstrapDownload === true,
+        remoteCommitDate: ctx.remoteCommitDate
       });
       ctx.plan = plan;
       transition(ctx, SyncState.MERGING);
@@ -2673,10 +2692,7 @@ var SyncEngine = class {
         bootstrapDownload: true
       };
     }
-    return {
-      unresolved: true,
-      reason: "首次同步: 本地与远端都有内容,无法证明共同基准,需要通过首同步向导明确选择"
-    };
+    return { baseEntries: /* @__PURE__ */ new Map(), baseSha: null };
   }
   /** 过滤基准树/远端树中的被忽略路径(匹配器由工作区适配器提供;缺失时不过滤) */
   _withoutIgnoredEntries(entries) {
@@ -3375,6 +3391,17 @@ var SyncController = class {
       const kind = ctx.baseUnresolved ? "BASE_UNRESOLVED" : "FILE_CONFLICTS";
       const conflictList = (ctx.conflicts || []).filter((c) => c && c.path && c.path !== "__base__");
       const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+      if (kind === "FILE_CONFLICTS" && this.conflictService && !this.conflictService.openSet(key)) {
+        try {
+          await this.conflictService.saveSet({
+            repoKey: key,
+            operationId: ctx.id,
+            conflicts: conflictList
+          });
+        } catch (err) {
+          this.logger.error("冲突集兜底保存失败: " + (err && err.message || err));
+        }
+      }
       this._conflictByRepo.set(key, {
         kind,
         repoKey: key,
@@ -5843,14 +5870,6 @@ var SyGspPlugin = class extends q.Plugin {
       this.openSetting();
       return { skipped: true };
     }
-    if (this._hasUnresolvedBase() && mode === "auto" && trigger !== "conflict_resolution") {
-      if (automatic) {
-        this.logs.info("自动同步跳过: 尚无确认基准,首次同步需要手动发起(进入首同步向导)");
-        return { skipped: true, firstRun: true };
-      }
-      this.diagnosisPanel.show({ mode: "first_sync" });
-      return { skipped: true, firstRun: true };
-    }
     const strategy = Number(this.settingUtils.get("sync_strategy")) || 0;
     if (mode === "auto" && strategy === 1) {
       if (automatic) {
@@ -5908,10 +5927,6 @@ var SyGspPlugin = class extends q.Plugin {
     confirm.addEventListener("click", () => {
       dialog.destroy();
       const mode = direction === "0" ? "remote_over_local" : "local_over_remote";
-      if (this._hasUnresolvedBase()) {
-        this.diagnosisPanel.show({ mode: "base_recovery" });
-        return;
-      }
       this.controller.retryPolicy.enabled = this.settingUtils.get("sygsp_auto_retry") === true;
       this.notification.syncStarted("manual");
       this.controller.syncNow({ trigger: "manual", mode });

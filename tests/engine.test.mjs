@@ -315,15 +315,17 @@ test("引擎: 冲突决策后重新规划 → keep_remote 下载远端版本并�
   assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), h.repo.head);
 });
 
-test("引擎: 首次同步(本地+远端都有内容,无基准) → BASE_UNRESOLVED 暂停", async () => {
+test("引擎: 首次同步双方各有不同文件,无基准 → 双向收敛", async () => {
   const h = await makeHarness({
     remoteFiles: { "data/20240101120000-abc/r.md": "remote" },
     localFiles: { "data/20240101120000-abc/l.md": "local" },
   });
   const result = await h.engine.run(h.makeCtx());
-  assert.equal(result.paused, true);
-  assert.equal(result.kind, "BASE_UNRESOLVED");
-  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), null);
+  assert.equal(result.success, true);
+  assert.equal(result.uploads, 1);
+  assert.equal(result.downloads, 1);
+  assert.equal(await (await h.kernel.getFile("data/20240101120000-abc/r.md")).text(), "remote");
+  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), h.repo.head);
 });
 
 test("引擎: 首次同步(本地为空,远端有内容) → 引导下载且不误删远端", async () => {

@@ -313,6 +313,19 @@ export class SyncController {
       const kind = ctx.baseUnresolved ? "BASE_UNRESOLVED" : "FILE_CONFLICTS";
       const conflictList = (ctx.conflicts || []).filter((c) => c && c.path && c.path !== "__base__");
       const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+      // 引擎通常会先保存冲突集；若保存与暂停状态写入发生时序/持久化异常，
+      // 这里必须用上下文中的冲突列表补建，避免出现「已暂停但无可用冲突集」。
+      if (kind === "FILE_CONFLICTS" && this.conflictService && !this.conflictService.openSet(key)) {
+        try {
+          await this.conflictService.saveSet({
+            repoKey: key,
+            operationId: ctx.id,
+            conflicts: conflictList,
+          });
+        } catch (err) {
+          this.logger.error("冲突集兜底保存失败: " + ((err && err.message) || err));
+        }
+      }
       this._conflictByRepo.set(key, {
         kind,
         repoKey: key,

@@ -47,6 +47,8 @@ test("默认忽略: data/storage 为设备本地状态,不再进入同步范围"
   assert.equal(isIgnored("data/storage/petal/petals.json", patterns), true);
   assert.equal(isIgnored("data/storage/local.json", patterns), true);
   assert.equal(isIgnored("data/storage/bazaar.json", patterns), true);
+  assert.equal(isIgnored("data/20240101120000-abc/.siyuan/conf.json", patterns), true);
+  assert.equal(isIgnored("data/20240101120000-abc/.siyuan/sort.json", patterns), true);
   assert.equal(isIgnored("data/20240101120000-abc/note.sy", patterns), false, "正常笔记不受影响");
   assert.equal(isIgnored("data/assets/img.png", patterns), false, "资源不受影响");
 });

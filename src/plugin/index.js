@@ -443,17 +443,8 @@ export default class SyGspPlugin extends q.Plugin {
       this.openSetting();
       return { skipped: true };
     }
-    // 首同步门控以元数据已确认基准为准: 标记键曾被历史版本整文件覆盖抹掉,
-    // 不能作为判据;有基准(基准可解析)即走正常同步,无基准才进入首同步向导
-    if (this._hasUnresolvedBase() && mode === "auto" && trigger !== "conflict_resolution") {
-      // #5: 自动/启动触发不弹向导,只记录日志,等待用户手动走首次同步
-      if (automatic) {
-        this.logs.info("自动同步跳过: 尚无确认基准,首次同步需要手动发起(进入首同步向导)");
-        return { skipped: true, firstRun: true };
-      }
-      this.diagnosisPanel.show({ mode: "first_sync" });
-      return { skipped: true, firstRun: true };
-    }
+    // 无确认 BASE 时由引擎逐路径收敛：单边文件直接上传/下载，同路径不同
+    // 内容再按有效时间或人工冲突处理。不得在入口阻断自动同步或强制首同步向导。
     const strategy = Number(this.settingUtils.get("sync_strategy")) || 0;
     if (mode === "auto" && strategy === 1) {
       // 方向选择是交互动作: 自动/启动触发不弹窗,记录日志跳过
@@ -515,10 +506,6 @@ export default class SyGspPlugin extends q.Plugin {
     confirm.addEventListener("click", () => {
       dialog.destroy();
       const mode = direction === "0" ? "remote_over_local" : "local_over_remote";
-      if (this._hasUnresolvedBase()) {
-        this.diagnosisPanel.show({ mode: "base_recovery" });
-        return;
-      }
       this.controller.retryPolicy.enabled = this.settingUtils.get("sygsp_auto_retry") === true;
       this.notification.syncStarted("manual");
       this.controller.syncNow({ trigger: "manual", mode });

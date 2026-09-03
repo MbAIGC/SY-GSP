@@ -149,6 +149,21 @@ function makeSpyController(extra = {}) {
   return { c, logs, emitted, notified, store };
 }
 
+test("暂停: 冲突集缺失时用上下文冲突补建，批量决策始终有对象", async () => {
+  const savedSets = [];
+  const { c } = makeSpyController({
+    conflictService: {
+      openSet: () => null,
+      saveSet: async (set) => { savedSets.push(set); },
+    },
+  });
+  await pauseViaFailed(c, [{ path: "data/note.sy", reason: "无法可靠判断最新版本" }]);
+  assert.equal(savedSets.length, 1);
+  assert.equal(savedSets[0].repoKey, KEY);
+  assert.equal(savedSets[0].conflicts[0].path, "data/note.sy");
+  assert.equal(c.conflictPaused.kind, "FILE_CONFLICTS");
+});
+
 test("暂停门: 自动/手动触发被拦截必须留痕;手动触发 emit conflict:reopen", async () => {
   const { c, logs, emitted, notified } = makeSpyController();
   await pauseViaFailed(c, [{ path: "a.md", reason: "双方修改" }]);
