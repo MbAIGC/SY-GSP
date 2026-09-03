@@ -3426,7 +3426,7 @@ var SyncController = class {
   }
   /** 用户冲突决策: 逐文件 keep_local/keep_remote → 重新规划执行 */
   async resolveConflicts(decisions) {
-    const overrides = new Map(Object.entries(decisions || {}));
+    const overrides = decisions instanceof Map ? new Map(decisions) : new Map(Object.entries(decisions || {}));
     this.logger.info("冲突处理: 收到 " + overrides.size + " 个文件决策(" + [...overrides.values()].filter((v) => v === "keep_remote").length + " 个保留远端, " + [...overrides.values()].filter((v) => v === "keep_local").length + " 个保留本地),开始重新规划");
     if (this.conflictPaused && this.conflictPaused.kind === "BASE_UNRESOLVED") {
       return this._resolveBaseUnresolved(overrides);
