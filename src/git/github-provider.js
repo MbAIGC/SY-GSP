@@ -75,6 +75,19 @@ export class GitHubProvider extends GitProvider {
         path: this._repoPath() + "/git/trees/" + treeSha,
         query: { recursive: "1" },
       });
+      // truncated: 大型仓库 Git Data API 只返回部分子树,禁止以不完整树参与规划(可能误判远端删除)
+      if (res.data && res.data.truncated) {
+        throw new SyncError({
+          category: SyncErrorCategory.GIT,
+          code: "TREE_TRUNCATED",
+          operation: "getTree",
+          httpStatus: res.status,
+          treeSha,
+          message: "远端目录树过大被截断(truncated),无法安全规划本轮同步,请换用更小的同步范围或减少单目录文件数",
+          retryable: false,
+          recoverable: true,
+        });
+      }
       return (res.data.tree || []).map((t) => ({
         path: t.path,
         mode: t.mode,
@@ -133,7 +146,7 @@ export class GitHubProvider extends GitProvider {
       });
       const bytes = new Uint8Array(res.data || 0);
       return {
-        sha: "",
+        sha: null, // raw 接口不返回对象 sha,显式置空,避免调用方误用空串做内容等价判断
         size: bytes.length,
         contentBase64: GitProvider.bytesToBase64(bytes),
         bytes,
@@ -223,7 +236,10 @@ export class GitHubProvider extends GitProvider {
       const mb = res.data.merge_base_commit;
       return mb && mb.sha ? mb.sha : null;
     } catch (err) {
-      return null; // 对比失败按无合并基处理,由调用方进入恢复流程
+      // 404 语义: 无共同祖先/引用不可达 → 无合并基,交由恢复流程;
+      // 其余错误(网络/5xx/限流)必须上抛,不能折叠成"无共同祖先"(会绕过重试与可见性)
+      if (err instanceof SyncError && err.httpStatus === 404) return null;
+      throw this._wrap(err, "getMergeBase", "读取共同祖先失败");
     }
   }
 

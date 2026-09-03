@@ -57,10 +57,28 @@ export class HttpClient {
       clearTimeout(timer);
     }
 
-    const data = await this._parse(response, opts.responseType || "json");
+    const responseType = opts.responseType || "json";
+    const data = await this._parse(response, responseType);
     if (!response.ok) {
-      const apiMessage =
-        data && typeof data === "object" ? data.message || data.errors || "" : "";
+      // L3: 错误信封因响应类型不同而形态不同——arraybuffer(如 raw 404)要解码为文本,
+      // 否则平台错误正文(如 "Not Found")全部丢失,只剩笼统的 HTTP 状态码
+      let apiMessage = "";
+      if (responseType === "arraybuffer") {
+        try {
+          const buf = data instanceof ArrayBuffer
+            ? data
+            : data && typeof data === "object" && typeof data.byteLength === "number"
+              ? data.buffer || data
+              : null;
+          if (buf) apiMessage = new TextDecoder().decode(new Uint8Array(buf));
+        } catch (e) {
+          apiMessage = "";
+        }
+      } else if (data && typeof data === "object") {
+        apiMessage = data.message || data.errors || "";
+      }
+      const message = String(apiMessage).trim();
+      apiMessage = message ? message : apiMessage;
       throw new SyncError({
         category: SyncErrorCategory.GIT,
         code: "HTTP_" + response.status,

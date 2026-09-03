@@ -25,8 +25,8 @@
     "zh_CN": "SY-GSP"
   },
   "description": {
-    "en_US": "SY-GSP is a SiYuan plugin that syncs notes with GitHub and Gitee repositories, built on the readable Sync Engine 2.0 (three-way merge, conflict center, confirmed-base tracking).",
-    "zh_CN": "SY-GSP 是一款思源笔记 GitHub/Gitee 同步插件，基于可读源码的同步引擎 2.0 构建：三方合并、冲突中心、确认基准跟踪。"
+    "en_US": "SY-GSP is a SiYuan plugin that syncs notes with GitHub repositories, built on the readable Sync Engine 2.0 (three-way merge, conflict center, confirmed-base tracking).",
+    "zh_CN": "SY-GSP 是一款思源笔记 GitHub 同步插件，基于可读源码的同步引擎 2.0 构建：三方合并、冲突中心、确认基准跟踪。"
   },
   "readme": {
     "en_US": "README_en_US.md",
@@ -41,7 +41,6 @@
     "git",
     "sync",
     "github",
-    "gitee",
     "同步"
   ]
 }

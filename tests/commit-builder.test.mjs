@@ -8,7 +8,6 @@ test("单批次: 消息含操作ID与统计", async () => {
     operationId: "op-1",
     uploads: [{ path: "a.md", op: "create", bytes: new Uint8Array(10) }],
     deletionsRemote: [{ path: "b.md" }],
-    provider: "github",
   });
   assert.equal(result.batches.length, 1);
   assert.equal(result.batches[0].part, 1);
@@ -43,33 +42,29 @@ test("多批次: 按体积分批并标注 part i/N", async () => {
   assert.equal(paths.length, 30);
 });
 
-test("GitHub 载荷: entries 带路径与模式, 删除为 sha:null", async () => {
+test("批次载荷: uploads 原样携带,deletePaths 携带远端 sha(供引擎构建删除树)", async () => {
   const b = new CommitBuilder({});
   const result = await b.build({
     operationId: "op-4",
-    provider: "github",
-    uploads: [{ path: "a.md", bytes: new TextEncoder().encode("hi") }],
+    uploads: [{ path: "a.md", op: "update", bytes: new TextEncoder().encode("hi") }],
     deletionsRemote: [{ path: "b.md", remoteSha: "sha-b" }],
   });
-  const gh = result.batches[0].github;
-  assert.equal(gh.entries.length, 1);
-  assert.equal(gh.entries[0].path, "a.md");
-  assert.equal(gh.entries[0].mode, "100644");
-  assert.deepEqual(gh.deletePaths, [{ path: "b.md", sha: "sha-b" }]);
+  const batch = result.batches[0];
+  assert.equal(batch.uploads.length, 1);
+  assert.equal(batch.uploads[0].path, "a.md");
+  assert.deepEqual(batch.deletePaths, [{ path: "b.md", sha: "sha-b" }]);
+  assert.equal(batch.deletions.length, 1);
 });
 
-test("Gitee 载荷: create/update/delete 操作序列", async () => {
+test("Gitee 暂不支持: build 不接受 provider 分派(载荷契约仅 GitHub)", async () => {
   const b = new CommitBuilder({});
   const result = await b.build({
     operationId: "op-5",
-    provider: "gitee",
-    uploads: [
-      { path: "new.md", op: "create", bytes: new TextEncoder().encode("n") },
-      { path: "upd.md", op: "update", bytes: new TextEncoder().encode("u") },
-    ],
+    uploads: [{ path: "new.md", op: "create", bytes: new TextEncoder().encode("n") }],
     deletionsRemote: [{ path: "del.md", remoteSha: "sha-d" }],
   });
-  const ops = result.batches[0].gitee.operations;
-  assert.deepEqual(ops.map((o) => o.type || o.op), ["create", "update", "delete"]);
-  assert.equal(ops[2].remoteSha, "sha-d");
+  assert.equal(result.batches.length, 1);
+  // 不产出任何平台专属 operation 序列
+  assert.equal(result.batches[0].gitee, undefined);
+  assert.equal(result.batches[0].github, undefined);
 });

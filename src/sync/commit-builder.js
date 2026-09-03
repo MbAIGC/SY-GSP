@@ -3,6 +3,8 @@
  * - 单次逻辑同步优先一个提交;超出阈值按确定性阈值拆分;
  * - 每个批次携带同一 operationId;
  * - 上传前请求大小预检,超限报 LARGE_FILE 而不是静默截断。
+ *
+ * 当前仅支持 GitHub(Git Data API 原子树提交 + 引用 CAS);Gitee 暂不支持。
  */
 
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
@@ -22,10 +24,10 @@ export class CommitBuilder {
    * 构建提交批次。
    * @param {object} opts {operationId, uploads:[{path, bytes}], deletionsRemote:[{path, remoteSha}]}
    * @returns {{batches:Array, skipped:Array}}
-   *   github 批次: {entries:[{path,sha,mode}], deletePaths:[...], size, message, part, total}
-   *   gitee 批次:  {operations:[{op,path,bytes,remoteSha}], message, part, total}
+   *   批次: {uploads, deletions, deletePaths, size, message, part, total}
+   *   deletePaths: [{path, sha}] 供 GitHub 树删除(sha=null 表示删除)
    */
-  build({ operationId, uploads = [], deletionsRemote = [], provider }) {
+  build({ operationId, uploads = [], deletionsRemote = [] }) {
     const skipped = [];
     const oversize = uploads.filter((u) => this._encodedSize(u.bytes) > this.requestLimit);
     for (const item of oversize) {
@@ -38,7 +40,7 @@ export class CommitBuilder {
     const eligible = uploads.filter((u) => !oversize.includes(u));
     const deletions = deletionsRemote.map((d) => ({ op: "delete", path: d.path, remoteSha: d.remoteSha }));
 
-    // 拆分以字节预算为主;GitHub 与 Gitee 都按统一预算切分
+    // 拆分以字节预算为主
     const chunks = this._chunk(eligible, deletions);
     const batches = chunks.map((chunk, idx) => ({
       part: idx + 1,
@@ -47,33 +49,28 @@ export class CommitBuilder {
       uploads: chunk.uploads,
       deletions: chunk.deletions,
       message: this._message(operationId, chunk, idx + 1, chunks.length),
-      github: provider === "github" ? chunk.github : null,
-      gitee: provider === "gitee" ? chunk.gitee : null,
+      deletePaths: chunk.deletePaths,
     }));
     return { batches, skipped };
   }
 
   _chunk(uploads, deletions) {
     const chunks = [];
-    let current = { uploads: [], deletions: [], size: 0, github: { entries: [], deletePaths: [] }, gitee: { operations: [] } };
+    let current = { uploads: [], deletions: [], size: 0, deletePaths: [] };
     const flush = () => {
       if (current.uploads.length === 0 && current.deletions.length === 0) return;
       chunks.push(current);
-      current = { uploads: [], deletions: [], size: 0, github: { entries: [], deletePaths: [] }, gitee: { operations: [] } };
+      current = { uploads: [], deletions: [], size: 0, deletePaths: [] };
     };
     for (const item of uploads) {
       const size = item.bytes ? item.bytes.length : 0;
       if (current.size + size > this.batchByteLimit && current.uploads.length > 0) flush();
       current.uploads.push(item);
       current.size += size;
-      // 载荷契约数据(供校验/测试): 引擎推送时自行 createBlob 并构建 entries,不消费此处的 sha
-      current.github.entries.push({ path: item.path, sha: null, mode: "100644" });
-      current.gitee.operations.push({ op: item.op === "create" ? "create" : "update", path: item.path, bytes: item.bytes, remoteSha: item.remoteSha || null });
     }
     for (const d of deletions) {
       current.deletions.push(d);
-      current.github.deletePaths.push({ path: d.path, sha: d.remoteSha });
-      current.gitee.operations.push(d);
+      current.deletePaths.push({ path: d.path, sha: d.remoteSha });
     }
     flush();
     return chunks;

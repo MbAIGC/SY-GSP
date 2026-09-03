@@ -65,20 +65,37 @@ export class SyncMetadataStore {
 
   /**
    * 写入确认基准(仅允许在远端确认成功后调用)。
+   * L5: 先改内存后持久化,持久化失败必须回滚内存——否则本轮"未确认成功"
+   * 的基准会留在内存里,被后续轮次当作已确认基准使用。
    */
   async setConfirmedCommit(repoKey, commitSha, operationId) {
+    const previous = this.data.repositories[repoKey];
     this.data.repositories[repoKey] = {
       lastConfirmedCommit: commitSha,
       lastSuccessfulAt: new Date().toISOString(),
       lastOperationId: operationId || "",
     };
-    await this._persist();
+    try {
+      await this._persist();
+    } catch (err) {
+      if (previous === undefined) delete this.data.repositories[repoKey];
+      else this.data.repositories[repoKey] = previous;
+      throw err;
+    }
   }
 
   /** 记录旧版基准线索(仅诊断用,不作为基准) */
   async setLegacyHint(repoKey, hint) {
+    const hadKey = Object.prototype.hasOwnProperty.call(this.data.legacyHints, repoKey);
+    const previous = this.data.legacyHints[repoKey];
     if (hint) this.data.legacyHints[repoKey] = hint;
-    await this._persist();
+    try {
+      await this._persist();
+    } catch (err) {
+      if (!hadKey) delete this.data.legacyHints[repoKey];
+      else this.data.legacyHints[repoKey] = previous;
+      throw err;
+    }
   }
 
   getLegacyHint(repoKey) {

@@ -28,6 +28,15 @@ export class DiagnosisPanel {
   show({ mode = "diagnosis" } = {}) {
     const q = this.q;
     const t = this.i18n;
+    // #5: 重复打开前先销毁旧对话框,避免每次调用都新建 Dialog 导致实例泄漏
+    if (this.dialog) {
+      try {
+        this.dialog.destroy();
+      } catch (err) {
+        console.warn("[SY-GSP] 关闭旧诊断面板失败:", err && err.message);
+      }
+      this.dialog = null;
+    }
     this.dialog = new q.Dialog({
       title: (t && t.sygspDiagnosisTitle) || "SY-GSP 只读诊断",
       content: '<div id="sygspDiagnosis" class="fn__flex-column" style="padding:16px;gap:8px;"></div>',

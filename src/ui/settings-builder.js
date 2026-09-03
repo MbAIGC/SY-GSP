@@ -19,8 +19,9 @@ export class SettingsPanelBuilder {
     this.metadataStore = deps.metadataStore;
   }
 
+  /** 当前远端平台。Gitee 暂不支持,恒为 github */
   currentPlatform() {
-    return this.utils && Number(this.utils.get("upload_sub_platform")) === 1 ? "gitee" : "github";
+    return "github";
   }
 
   async build() {
@@ -39,7 +40,15 @@ export class SettingsPanelBuilder {
     // 主设置文件覆盖已保存值(必须在注册之后,load 才能并入各设置项)
     await this.utils.load();
 
-    // 平台配置文件(独立于主 settings 文件,与旧版一致)
+    // 旧版 Gitee 标记归一: Gitee 暂不支持,upload_sub_platform 一律按 0 处理并落盘,
+    // 避免历史标记(1)让后续每次同步都被"检测到 Gitee 配置"误拦截
+    if (Number(this.utils.get("upload_sub_platform")) === 1) {
+      this.utils.set("upload_sub_platform", 0);
+      await this.utils.save();
+      this._legacyGiteeNormalized = true;
+    }
+
+    // 平台配置文件(独立于主 settings 文件,与旧版一致;当前仅 GitHub)
     const platform = this.currentPlatform();
     const platformFile = PLATFORM_CONFIG_FILES[platform] + ".json";
     const saved = await this.plugin.loadData(platformFile);
@@ -48,6 +57,17 @@ export class SettingsPanelBuilder {
     }
     this._platformFile = platformFile;
     this._refreshBaseHints();
+    if (this._legacyGiteeNormalized) {
+      // 历史 Gitee 用户可见提示(不弹 toast,避免打断;后续恢复 Gitee 时移除)
+      this.utils.addItem({
+        key: "giteeUnsupportedHint",
+        type: "hint",
+        direction: "row",
+        value: "",
+        title: "Gitee 暂不支持",
+        description: "检测到旧版 Gitee 配置,已切换为 GitHub 通道。Gitee 支持将在后续版本恢复;当前请填写 GitHub 仓库地址(历史 Gitee 数据文件已保留)",
+      });
+    }
     return this.utils;
   }
 
@@ -75,29 +95,14 @@ export class SettingsPanelBuilder {
       options: { 0: (t.platform && t.platform.git) || "Git 仓库" },
       action: { callback: () => {} },
     });
+    // 平台说明行: 当前仅支持 GitHub(Gitee 待后续版本恢复,不再提供切换项)
     u.addItem({
-      key: "upload_sub_platform",
-      type: "select",
-      value: val("upload_sub_platform"),
-      title: t.subGitPlatformType,
-      description: t.subGitplatformTypeDesc,
-      options: {
-        0: (t.platform && t.platform.subPlatform && t.platform.subPlatform.git.githubAPI) || "GitHub API",
-        1: (t.platform && t.platform.subPlatform && t.platform.subPlatform.git.giteeAPI) || "Gitee API",
-      },
-      action: {
-        callback: async () => {
-          const next = Number(u.take("upload_sub_platform"));
-          // 保存旧平台配置 → 切换 → 加载新平台配置 → 重建面板
-          await this._savePlatformFile();
-          const nextFile = PLATFORM_CONFIG_FILES[next === 1 ? "gitee" : "github"] + ".json";
-          const data = (await this.plugin.loadData(nextFile)) || {};
-          for (const key of PER_PLATFORM_KEYS) u.set(key, data[key] !== undefined ? data[key] : "");
-          this._platformFile = nextFile;
-          await this.utils.save();
-          if (this.onPlatformChanged) await this.onPlatformChanged();
-        },
-      },
+      key: "platformNote",
+      type: "hint",
+      direction: "row",
+      value: "",
+      title: (t.platform && t.platform.git) || "Git 仓库",
+      description: (t.platform && t.platform.subPlatform && t.platform.subPlatform.git.githubAPI) || "GitHub API(当前唯一支持的远端平台)",
     });
     u.addItem({
       key: "repository_address",

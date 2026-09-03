@@ -517,3 +517,217 @@ test("忽略路径规划层隐身: 远端被忽略文件不触发下载/删除",
   assert.equal(result.deletionsRemote, 0, "被忽略路径不得触发远端删除");
   assert.equal(result.uploads, 0);
 });
+
+// ============ 本轮修复回归(H1/H2/H3/H4、M5、#1/#2、markdown canonical) ============
+
+const REMOTE_404 = () =>
+  new SyncError({ category: SyncErrorCategory.GIT, code: "HTTP_404", httpStatus: 404, operation: "getBranchHead", message: "分支不存在" });
+
+test("H1: 已有确认基准且远端读取 404 → BASE_UNRESOLVED 暂停,本地绝不被删除", async () => {
+  const path = "data/20240101120000-abc/note.md";
+  const h = await makeHarness({ remoteFiles: { [path]: "v1" }, localFiles: { [path]: "v1" } });
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  // 分支/远端突然不可读(404),且本机已有确认基准
+  h.repo.provider.getBranchHead = async () => { throw REMOTE_404(); };
+
+  const ctx = h.makeCtx();
+  const result = await h.engine.run(ctx);
+  assert.equal(result.paused, true, "不得按空仓库继续跑(会把本地整批判删)");
+  assert.equal(result.kind, "BASE_UNRESOLVED");
+  assert.equal(ctx.state, SyncState.CONFLICT_PAUSED);
+  assert.notEqual(await h.kernel.getFile(path), null, "本地文件必须原样保留");
+  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), baseCommit.sha, "基准不推进");
+});
+
+test("H2: 本地为空 + 远端多提交(文件在首提交后改过)→ 引导下载而非假冲突", async () => {
+  const path = "data/20240101120000-abc/r.md";
+  const h = await makeHarness({ remoteFiles: { [path]: "v1" } }); // 首个提交: v1
+  h.repo.files[path] = "v2";
+  await h.repo.snapshot("second-commit"); // HEAD: v2(文件在首提交后已修改)
+  assert.equal(await h.kernel.getFile(path), null, "本地为空");
+
+  const ctx = h.makeCtx();
+  const result = await h.engine.run(ctx);
+  assert.equal(result.paused, undefined, "不得进入 FILE_CONFLICTS 暂停");
+  assert.equal(result.success, true);
+  assert.equal(result.downloads, 1);
+  assert.equal(await (await h.kernel.getFile(path)).text(), "v2");
+  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), h.repo.head, "BASE=已观察到的远端 HEAD");
+});
+
+test("H3: 推送确认漂移(并发写手在我方提交之上推进)→ BASE=我方提交,不写未物化并发头", async () => {
+  const path = "data/20240101120000-abc/mine.md";
+  const racer = "data/20240101120000-abc/racer.md";
+  const h = await makeHarness({ remoteFiles: { [path]: "old" }, localFiles: { [path]: "my edit" } });
+  const baseSha = h.repo.head;
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseSha, "prep");
+
+  let ourCommitSha = null;
+  const origUpdate = h.repo.provider.updateBranchRef;
+  h.repo.provider.updateBranchRef = async (newSha, opts) => {
+    // 我方 CAS 成功(head 前移到 newSha)
+    const r = await origUpdate(newSha, opts);
+    ourCommitSha = newSha;
+    // 回读确认前并发写手已在我方提交之上推进
+    h.repo.files[racer] = "racer content";
+    const racerCommit = await h.repo.snapshot("racer concurrent");
+    return { confirmedSha: racerCommit.sha, drifted: true };
+  };
+
+  const ctx = h.makeCtx();
+  const result = await h.engine.run(ctx);
+  assert.equal(result.success, true);
+  assert.ok(ourCommitSha, "我方提交应已产生");
+  assert.notEqual(h.metadataStore.getBaseCommit("github:o/r:main"), h.repo.head,
+    "BASE 不得写未物化的并发远端头(否则下一轮回滚并发修改)");
+  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), ourCommitSha, "BASE=我方提交");
+  const headTree = (await h.repo.provider.getCommit(h.repo.head)).treeSha;
+  const paths = (await h.repo.provider.getTree(headTree)).map((e) => e.path);
+  assert.ok(paths.includes(path) && paths.includes(racer));
+});
+
+test("H4: 上传全部超限(无批次)→ SKIPPED_ALL_UPLOADS 可见错误,BASE 不推进,无非法状态转换", async () => {
+  const path = "data/20240101120000-abc/big.md";
+  const h = await makeHarness({
+    remoteFiles: {},
+    localFiles: { [path]: "x".repeat(100) },
+    commitBuilder: new CommitBuilder({ requestLimit: 16 }), // 全部超限
+  });
+  const headBefore = h.repo.head;
+  const ctx = h.makeCtx();
+  await assert.rejects(
+    () => h.engine.run(ctx),
+    (err) => {
+      assert.equal(err.category, SyncErrorCategory.LARGE_FILE);
+      assert.equal(err.code, "SKIPPED_ALL_UPLOADS");
+      assert.ok(String(err.message).includes(path));
+      return true;
+    }
+  );
+  assert.equal(ctx.state, SyncState.FAILED, "不得进入 SUCCESS(禁止 COMMITTING→SUCCESS 非法转换)");
+  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), null, "BASE 不推进");
+  assert.equal(h.repo.head, headBefore, "远端无写入");
+});
+
+test("H4: 部分大文件跳过(其余已推)→ SKIPPED_LARGE_FILES,已推内容以我方提交推进 BASE", async () => {
+  const okPath = "data/20240101120000-abc/ok.md";
+  const bigPath = "data/20240101120000-abc/big.md";
+  const h = await makeHarness({
+    remoteFiles: {},
+    localFiles: { [okPath]: "small", [bigPath]: "y".repeat(6000) },
+    commitBuilder: new CommitBuilder({ requestLimit: 4096 }), // 小文件可通过,大文件超限
+  });
+  const ctx = h.makeCtx();
+  await assert.rejects(
+    () => h.engine.run(ctx),
+    (err) => {
+      assert.equal(err.code, "SKIPPED_LARGE_FILES");
+      return true;
+    }
+  );
+  // 小文件已推上远端,BASE=我方提交(已确认内容),大文件留待处理
+  const headTree = (await h.repo.provider.getCommit(h.repo.head)).treeSha;
+  const paths = (await h.repo.provider.getTree(headTree)).map((e) => e.path);
+  assert.ok(paths.includes(okPath));
+  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), h.repo.head, "已推内容记录进 BASE");
+  // 第二轮: 已推内容相等不再冗余上传(#7);大文件仍超限 → 空批次可见失败,不推进 BASE
+  const baseAfter1 = h.metadataStore.getBaseCommit("github:o/r:main");
+  const ctx2 = h.makeCtx();
+  await assert.rejects(() => h.engine.run(ctx2), (err) => err.code === "SKIPPED_ALL_UPLOADS");
+  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), baseAfter1, "跳过轮不推进 BASE");
+});
+
+test("M5: 下载/本地删除前复查——本地在快照后被修改 → LOCAL_CHANGED 中止,内容不被覆盖", async () => {
+  const path = "data/20240101120000-abc/note.md";
+  const h = await makeHarness({ remoteFiles: { [path]: "v2" } });
+  // 快照表示本地 == v1,apply 前用户已改成 v3(直接构造 apply 阶段的不一致)
+  await h.kernel.putFile(path, new Blob([enc("v3 user edit")]), false);
+  const ctx = h.makeCtx();
+  ctx.snapshotRawShas = new Map([[path, await sha("v1")]]);
+  ctx.observedRemoteHead = h.repo.head;
+  const plan = {
+    downloads: [{ path, op: "update" }],
+    deletionsLocal: [],
+    uploads: [],
+    deletionsRemote: [],
+    conflicts: [],
+    merges: [],
+    skippedDeletes: [],
+    unchanged: 0,
+  };
+  await assert.rejects(
+    () => h.engine._applyLocalChanges(ctx, plan),
+    (err) => err.code === "LOCAL_CHANGED"
+  );
+  assert.equal(await (await h.kernel.getFile(path)).text(), "v3 user edit", "不得覆盖同步期间的用户修改");
+  // 本地删除同样复查
+  await h.kernel.putFile(path, new Blob([enc("v3 user edit")]), false);
+  const plan2 = { downloads: [], deletionsLocal: [{ path }], uploads: [], deletionsRemote: [], conflicts: [], merges: [], skippedDeletes: [], unchanged: 0 };
+  await assert.rejects(
+    () => h.engine._applyLocalChanges(ctx, plan2),
+    (err) => err.code === "LOCAL_CHANGED"
+  );
+  assert.notEqual(await h.kernel.getFile(path), null, "不一致时不得删除本地文件");
+});
+
+test("#1: 删除被守卫拦截 → manifest 保留证据;守卫放行后删除收敛并移除记录", async () => {
+  const path = "data/20240101120000-abc/gone.md";
+  const h = await makeHarness({ remoteFiles: { [path]: "v1" } });
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  await h.kernel.putFile(path, new Blob([enc("v1")]), false);
+  // 第一轮: 用户删除本地,但守卫拦截(如清单缺失/枚举异常)
+  await h.kernel.removeFile(path);
+  h.engine.planner.guardLocalDelete = async () => ({ allow: false, reasons: ["本地清单缺失"] });
+  const r1 = await h.engine.run(h.makeCtx());
+  assert.equal(r1.success, true);
+  assert.equal(r1.deletionsRemote, 0);
+  assert.equal(r1.skippedDeletes, 1, "被拦截删除必须进入可见计数");
+  assert.ok(h.manifestStore.paths.has(path), "被拦截删除不得从 manifest 抹除(否则证据永久丢失)");
+  // 第二轮: 守卫放行 → 远端删除执行,manifest 记录移除
+  h.engine.planner.guardLocalDelete = async () => ({ allow: true, reasons: [] });
+  const r2 = await h.engine.run(h.makeCtx());
+  assert.equal(r2.success, true);
+  assert.equal(r2.deletionsRemote, 1);
+  const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
+  assert.equal(tree.some((e) => e.path === path), false, "远端文件已删除");
+  assert.equal(h.manifestStore.paths.has(path), false, "删除成功后移除拥有记录");
+});
+
+test("#2: 强制方向(以本地为准)+ 本地枚举异常 → 中止,不删除远端", async () => {
+  const onlyRemote = "data/20240101120000-abc/remote.md";
+  const localOnly = "data/20240101120000-abc/local.md";
+  const h = await makeHarness({
+    remoteFiles: { [onlyRemote]: "remote only" },
+    localFiles: { [localOnly]: "local" },
+  });
+  // 本地枚举发生异常(可能漏扫真实存在的本地文件)
+  const origScan = h.workspace.scan;
+  h.workspace.scan = async () => {
+    const r = await origScan();
+    return { files: r.files, enumErrorOccurred: true };
+  };
+  const ctx = h.makeCtx({ trigger: "conflict_resolution", mode: "local_over_remote" });
+  await assert.rejects(
+    () => h.engine.run(ctx),
+    (err) => err.code === "LOCAL_SCAN_INCOMPLETE"
+  );
+  const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
+  assert.ok(tree.some((e) => e.path === onlyRemote), "枚举异常时远端文件不得被镜像删除");
+});
+
+test("M4: markdown 模式两轮同步零变化收敛(canonical 表示层一致,无往返抖动)", async () => {
+  const path = "data/20240101120000-abc/doc.sy";
+  const h = await makeHarness({ localFiles: { [path]: "# 标题\n\n正文内容\n" } });
+  h.engine.config = Object.assign({}, h.engine.config, { syncFileType: "markdown" });
+  const r1 = await h.engine.run(h.makeCtx());
+  assert.equal(r1.success, true);
+  assert.equal(r1.uploads, 1);
+  const baseAfter1 = h.metadataStore.getBaseCommit("github:o/r:main");
+  const r2 = await h.engine.run(h.makeCtx());
+  assert.equal(r2.success, true);
+  assert.equal(r2.uploads, 0, "第二轮不得重复上传(sha 一致)");
+  assert.equal(r2.downloads, 0);
+  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), baseAfter1, "基准稳定");
+});

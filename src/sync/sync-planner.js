@@ -67,41 +67,27 @@ export class SyncPlanner {
 
     for (const path of allPaths) {
       const override = overrides.get(path);
-      if (override) {
-        this._applyOverride(plan, path, override, {
-          baseEntry: baseEntries.get(path),
-          remoteEntry: remoteEntries.get(path),
-          localExists: localSet.has(path),
-          localShas,
-        });
-        continue;
-      }
-      if (mode === "remote_over_local") {
-        this._applyOverride(plan, path, "keep_remote", {
-          baseEntry: baseEntries.get(path),
-          remoteEntry: remoteEntries.get(path),
-          localExists: localSet.has(path),
-          localShas,
-        });
-        continue;
-      }
-      if (mode === "local_over_remote") {
-        this._applyOverride(plan, path, "keep_local", {
-          baseEntry: baseEntries.get(path),
-          remoteEntry: remoteEntries.get(path),
-          localExists: localSet.has(path),
-          localShas,
-        });
-        continue;
-      }
-      await this._decideAuto(plan, path, {
+      const ctx = {
         baseEntry: baseEntries.get(path),
         remoteEntry: remoteEntries.get(path),
         localExists: localSet.has(path),
         localShas,
         enumErrorOccurred,
         bootstrap: opts.bootstrap === true,
-      });
+      };
+      if (override) {
+        this._applyOverride(plan, path, override, ctx);
+        continue;
+      }
+      if (mode === "remote_over_local") {
+        this._applyOverride(plan, path, "keep_remote", ctx);
+        continue;
+      }
+      if (mode === "local_over_remote") {
+        this._applyOverride(plan, path, "keep_local", ctx);
+        continue;
+      }
+      await this._decideAuto(plan, path, ctx);
     }
     return plan;
   }
@@ -189,7 +175,8 @@ export class SyncPlanner {
     if (localState === "changed" && remoteState === "changed") {
       const localSha = localShas.get(path);
       if (localSha && localSha === remoteEntry.sha) {
-        plan.uploads.push({ path, op: "update" }); // 内容相同,视为已同步
+        // #7: 双方内容实际一致 → 无需上传,不制造冗余提交;BASE 会在本轮成功后推进
+        plan.unchanged += 1;
         return;
       }
       if (isMergeable(path)) {
@@ -238,9 +225,10 @@ export class SyncPlanner {
 
   /**
    * 用户显式决策/强制方向: 覆盖三方矩阵。
-   * 「接受本地/远端」不是无条件覆盖: 仍受删除守卫与枚举异常约束。
+   * 「接受本地/远端」不是无条件覆盖: 删除远端仍受枚举完整性约束——
+   * 本地枚举异常时"以本地为准"可能漏扫真实存在的本地文件,禁止据此删除远端(#2)。
    */
-  _applyOverride(plan, path, decision, { baseEntry, remoteEntry, localExists, localShas }) {
+  _applyOverride(plan, path, decision, { baseEntry, remoteEntry, localExists, localShas, enumErrorOccurred }) {
     if (decision === "keep_local") {
       if (localExists) {
         const sha = localShas.get(path);
@@ -251,6 +239,10 @@ export class SyncPlanner {
         }
         plan.uploads.push({ path, op: baseEntry ? "update" : "create" });
       } else if (remoteEntry) {
+        if (enumErrorOccurred) {
+          plan.skippedDeletes.push({ path, reasons: ["本地枚举异常,拒绝按强制方向删除远端"] });
+          return;
+        }
         plan.deletionsRemote.push({ path, remoteSha: remoteEntry.sha });
       } else {
         plan.unchanged += 1;

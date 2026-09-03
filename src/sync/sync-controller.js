@@ -2,7 +2,9 @@
  * SyncController: 入口编排(2.0 方案 §3)。
  * - 唯一对外入口: 手动/自动/启动/重试/冲突解决 都经过这里;
  * - 持有 SyncQueue(同仓库分支串行)、RetryPolicy(有限重试)、通知策略;
- * - 冲突暂停状态持久化,重启后仍保持,直到用户处理;
+ * - 冲突暂停状态按 仓库分支键(repoKey) 隔离并持久化,重启后仍保持,直到用户处理;
+ * - 暂停是"每仓库分支"的状态: 单仓库插件下与旧字段行为一致,但不再有
+ *   "字段被某个仓库写死、另一仓库无法进入恢复流程"的单点问题(H5);
  * - 不直接接触 Git API 细节与文件合并细节。
  */
 
@@ -10,7 +12,7 @@ import { SyncQueue } from "./sync-queue.js";
 import { RetryPolicy, REMOTE_CHANGED_MAX } from "./retry-policy.js";
 import { SyncEngine } from "./sync-engine.js";
 import { createSyncContext, SyncState, SyncTrigger, SyncMode, transition } from "./sync-context.js";
-import { SyncError, SyncErrorCategory, toSyncError, classifyError } from "./sync-error.js";
+import { SyncError, SyncErrorCategory, toSyncError } from "./sync-error.js";
 
 export const ENGINE_STATE_FILE = "engine-state.json";
 
@@ -21,7 +23,8 @@ export class SyncController {
    *   makeEngineDeps: (ctx) => {provider, workspace, contentAdapter, metadataStore,
    *     manifestStore, conflictService, planner, merger, commitBuilder, events, config},
    *   repoInfo: () => {provider, owner, repo, branch, token},
-   *   autoSync: {pause(), resume(), markAutoTick()}
+   *   autoSync: {pause(), resume(), markAutoTick()},
+   *   conflictService?: 冲突集管理(成功后关闭该次操作集并清理)
    * }
    */
   constructor(deps) {
@@ -33,12 +36,14 @@ export class SyncController {
     this.makeEngineDeps = deps.makeEngineDeps;
     this.repoInfo = deps.repoInfo;
     this.autoSync = deps.autoSync;
+    this.conflictService = deps.conflictService || null;
     this.logger = deps.logger || { info() {}, warn() {}, error() {} };
     this.queue = new SyncQueue();
     this.retryPolicy = new RetryPolicy({ enabled: false });
     this.state = SyncState.IDLE;
     this.lastContext = null;
-    this.conflictPaused = null; // {kind, repoKey, operationId, reason, conflictCount}
+    /** @type {Map<repoKey, {kind, repoKey, operationId, reason, conflictCount, conflicts}>} */
+    this._conflictByRepo = new Map();
     this._engineState = {}; // 引擎状态文件唯一属主: 控制器持有并合并写入
     this.autoTick = false;
     this._autoSkipNotified = false;
@@ -50,8 +55,21 @@ export class SyncController {
     try {
       const saved = await this.plugin.loadData(ENGINE_STATE_FILE);
       this._engineState = saved && typeof saved === "object" ? saved : {};
-      if (saved && saved.conflictPaused) {
-        this.conflictPaused = saved.conflictPaused;
+      const map = new Map();
+      if (saved && saved.conflictByRepo && typeof saved.conflictByRepo === "object") {
+        for (const [key, record] of Object.entries(saved.conflictByRepo)) {
+          if (record && record.kind) map.set(key, record);
+        }
+      }
+      // 旧版单字段(未按仓库隔离)的兼容迁移: 有 repoKey 则挂到对应键,否则按当前仓库键挂载
+      if (saved && saved.conflictPaused && saved.conflictPaused.kind) {
+        const legacy = saved.conflictPaused;
+        const target = legacy.repoKey || this.repoKey();
+        if (!map.has(target)) map.set(target, legacy);
+        delete this._engineState.conflictPaused;
+      }
+      this._conflictByRepo = map;
+      if (map.size > 0) {
         this.state = SyncState.CONFLICT_PAUSED;
         this.events.emit("state:changed", { state: this.state, conflictPaused: this.conflictPaused });
       }
@@ -74,8 +92,13 @@ export class SyncController {
     // 合并写: 冲突暂停状态与其他键(如 firstWriteConfirmed)共存,
     // 任何一方保存都不得清掉另一方(实证缺陷: 每次同步成功都会抹掉首次确认标记)
     this._engineState = Object.assign({}, this._engineState || {}, patch);
-    if (this.conflictPaused) this._engineState.conflictPaused = this.conflictPaused;
-    else delete this._engineState.conflictPaused;
+    const serialized = {};
+    for (const [key, record] of this._conflictByRepo) {
+      if (record) serialized[key] = record;
+    }
+    if (Object.keys(serialized).length > 0) this._engineState.conflictByRepo = serialized;
+    else delete this._engineState.conflictByRepo;
+    delete this._engineState.conflictPaused;
     this.plugin.saveData(ENGINE_STATE_FILE, this._engineState).catch((err) => {
       this.notify(this.i18n("sygspPersistFailed", "⚠️ 状态保存失败,重启后可能丢失暂停状态"), "error");
       console.warn("[SY-GSP] 状态持久化失败:", err && err.message);
@@ -85,6 +108,16 @@ export class SyncController {
   /** 自动同步定时器回调前打标: 区分定时触发与手动触发 */
   markAutoTick() {
     this.autoTick = true;
+  }
+
+  repoKey() {
+    const info = this.repoInfo();
+    return SyncQueue.keyOf(info);
+  }
+
+  /** 当前仓库分支的暂停记录(旧插件代码依赖的字段形状保持不变) */
+  get conflictPaused() {
+    return this._conflictByRepo.get(this.repoKey()) || null;
   }
 
   isConflictPaused() {
@@ -98,8 +131,9 @@ export class SyncController {
   async syncNow({ trigger = SyncTrigger.MANUAL, mode = SyncMode.AUTO, overrides = null } = {}) {
     const info = this.repoInfo();
     const key = SyncQueue.keyOf(info);
+    const pausedRecord = this._conflictByRepo.get(key);
 
-    if (this.conflictPaused) {
+    if (pausedRecord) {
       const isResolution = overrides !== null || mode !== SyncMode.AUTO;
       if (!isResolution) {
         const wasAuto = this.autoTick;
@@ -112,7 +146,7 @@ export class SyncController {
           return { skipped: true };
         }
         // 手动触发: 重新打开冲突处理入口
-        this.events.emit("conflict:reopen", { conflictPaused: this.conflictPaused });
+        this.events.emit("conflict:reopen", { conflictPaused: pausedRecord });
         return { skipped: true, conflict: true };
       }
     }
@@ -126,7 +160,7 @@ export class SyncController {
 
     const ctx = createSyncContext({
       trigger,
-      mode: this.conflictPaused && overrides ? SyncMode.AUTO : mode,
+      mode: pausedRecord && overrides ? SyncMode.AUTO : mode,
       provider: info.provider,
       owner: info.owner,
       repo: info.repo,
@@ -166,7 +200,8 @@ export class SyncController {
           return result;
         }
         this.logger.info("同步完成 #" + ctx.id + " ↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) +
-          " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0));
+          " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) +
+          " 拦删" + (result.skippedDeletes || 0) + " 超大" + (result.skippedLarge || 0));
         await this._onFinished(ctx, result);
         return result;
       } catch (err) {
@@ -205,8 +240,10 @@ export class SyncController {
           });
         }
         // 重新规划: 以全新上下文重跑,不复用旧 tree/commit;
-        // originTrigger 保留最初触发者(如向导选边),使重试不改变流程语义
+        // originTrigger 保留最初触发者(如向导选边),使重试不改变流程语义;
+        // M3: 用户逐文件决策(overrides)必须随重试保留,否则冲突决策会被静默丢弃
         const originTrigger = ctx.originTrigger || ctx.trigger;
+        const overrides = ctx.overrides || null;
         ctx = createSyncContext({
           trigger: SyncTrigger.RETRY,
           mode: ctx.mode,
@@ -217,6 +254,7 @@ export class SyncController {
         });
         ctx.originTrigger = originTrigger;
         ctx.attempt = attempt;
+        if (overrides) ctx.overrides = overrides;
         this.lastContext = ctx;
       }
     }
@@ -224,10 +262,23 @@ export class SyncController {
 
   async _onFinished(ctx, result) {
     this.state = SyncState.SUCCESS;
-    if (this.conflictPaused) {
-      this.conflictPaused = null;
+    const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+    const hadPause = this._conflictByRepo.has(key);
+    const pausedRecord = this._conflictByRepo.get(key) || null;
+    if (hadPause) {
+      this._conflictByRepo.delete(key);
       this._autoSkipNotified = false;
       this._persistState();
+      // #4: 关闭"暂停时创建的冲突集"(以暂停时的 operationId 为准,不是成功轮的 ctx.id)
+      // 并做有界清理,避免 sync-conflicts.json 无限增长、open 集残留
+      if (this.conflictService && pausedRecord) {
+        try {
+          await this.conflictService.closeSet(pausedRecord.operationId);
+          await this.conflictService.prune(key);
+        } catch (err) {
+          this.logger.warn("冲突集清理失败: " + ((err && err.message) || err));
+        }
+      }
       this.autoSync.resume();
       this.notify(this.i18n("sygspResolvedMsg", "✅ 冲突已处理,自动同步已恢复"), "info");
     }
@@ -239,14 +290,15 @@ export class SyncController {
     if (ctx.state === SyncState.CONFLICT_PAUSED) {
       const kind = ctx.baseUnresolved ? "BASE_UNRESOLVED" : "FILE_CONFLICTS";
       const conflictList = (ctx.conflicts || []).filter((c) => c && c.path && c.path !== "__base__");
-      this.conflictPaused = {
+      const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+      this._conflictByRepo.set(key, {
         kind,
-        repoKey: this.repoKey(),
+        repoKey: key,
         operationId: ctx.id,
         reason: kind === "BASE_UNRESOLVED" ? (ctx.conflicts[0] && ctx.conflicts[0].detail) || "基准无法解析" : "存在未处理冲突",
         conflictCount: kind === "FILE_CONFLICTS" ? (ctx.conflicts || []).length : 0,
         conflicts: conflictList.slice(0, 20).map((c) => ({ path: c.path, reason: c.reason || c.detail || "" })),
-      };
+      });
       this._persistState();
       if (conflictList.length > 0) {
         this.logger.warn("冲突文件(" + conflictList.length + " 个): " +
@@ -262,11 +314,6 @@ export class SyncController {
     this.state = SyncState.FAILED;
     this.events.emit("state:changed", { state: this.state, ctx, error: syncErr });
     this.events.emit("sync:error", { ctx, error: syncErr });
-  }
-
-  repoKey() {
-    const info = this.repoInfo();
-    return SyncQueue.keyOf(info);
   }
 
   /** 用户冲突决策: 逐文件 keep_local/keep_remote → 重新规划执行 */
@@ -292,14 +339,18 @@ export class SyncController {
     const mode = choice === "keep_local" ? SyncMode.LOCAL_OVER_REMOTE : SyncMode.REMOTE_OVER_LOCAL;
     const result = await this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, mode });
     if (result && result.result && result.result.success) {
-      this.conflictPaused = null;
-      this._persistState(); // 合并写,保留其他状态键
+      const key = this.repoKey();
+      if (this._conflictByRepo.has(key)) {
+        this._conflictByRepo.delete(key);
+        this._persistState(); // 合并写,保留其他状态键
+      }
     }
     return result;
   }
 
   dismissConflictPause() {
-    this.conflictPaused = null;
+    const key = this.repoKey();
+    this._conflictByRepo.delete(key);
     this._persistState();
     this.events.emit("state:changed", { state: this.state });
   }

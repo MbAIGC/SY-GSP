@@ -46,7 +46,17 @@ export function createKernel(q) {
     form.append("file", blob);
     const resp = await fetch("/api/file/putFile", { method: "POST", body: form });
     if (!resp.ok) throw new Error("写入本地文件失败 " + path + ": HTTP " + resp.status);
-    return resp.json();
+    // L2: putFile 的 200 响应也可能是业务错误信封,必须校验 code(仅检查 resp.ok 会吞掉失败)
+    let json;
+    try {
+      json = await resp.json();
+    } catch (e) {
+      throw new Error("写入本地文件失败 " + path + ": 响应无法解析");
+    }
+    if (json && typeof json.code === "number" && json.code !== 0) {
+      throw new Error("写入本地文件失败 " + path + ": " + (json.msg || json.code));
+    }
+    return json;
   }
 
   async function removeFile(path) {

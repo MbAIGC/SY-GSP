@@ -73,7 +73,7 @@ test("迁移: 损坏的旧版 JSON 进入错误报告,不中断", async () => {
   const metadataStore = new SyncMetadataStore(makeFakePlugin());
   await metadataStore.load();
   const report = await new Migration(kernel, { async setAndSave() {} }, metadataStore).migrate({
-    provider: "gitee",
+    provider: "github",
     owner: "o",
     repo: "r",
     branch: "main",

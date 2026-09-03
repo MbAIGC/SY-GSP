@@ -125,7 +125,12 @@ export class ContentAdapter {
       return { conflictPath: "data/" + (info.box || notebookIdOf(path)) + conflictDocPath + ".sy", docId: res };
     }
     const ext = extname(path);
-    const conflictPath = path.replace(basename(path), basename(path, ext) + stamp + ext);
+    // L4: 不能 path.replace(basename(path), …)——字符串替换命中的是"第一次出现",
+    // 目录名含同名片段时会改错位置;改为按最后一个 "/" 切分,只在文件名部分改名
+    const slash = String(path).lastIndexOf("/");
+    const dir = slash >= 0 ? String(path).slice(0, slash + 1) : "";
+    const file = slash >= 0 ? String(path).slice(slash + 1) : String(path);
+    const conflictPath = dir + basename(file, ext) + stamp + ext;
     await this.kernel.putFile(conflictPath, localBlob, false);
     await this.kernel.putFile(path, remoteBlob, false);
     return { conflictPath };

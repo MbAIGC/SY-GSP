@@ -38,14 +38,19 @@ export class NotificationService {
   }
 
   syncSuccess(result, { automatic = false, successNotify = true } = {}) {
-    const detail = result
+    let detail = result
       ? " (↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) + " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) + ")"
       : "";
+    if (result && result.skippedDeletes > 0) detail += " 拦删" + result.skippedDeletes;
+    if (result && result.skippedLarge > 0) detail += " 超大跳过" + result.skippedLarge;
     if (automatic) {
       if (successNotify) this.toast((this.i18n && this.i18n.gSyncSuccessMsg) || "✅ 同步成功" + detail, "info");
     } else {
       this.toast((this.i18n && this.i18n.gSyncSuccessMsg) || "✅ 同步成功" + detail, "info");
     }
+    // 成功即解除"同类自动失败只提示一次"的抑制,后续失败恢复可见
+    this._autoFailNotified = false;
+    this._lastAutoFailCategory = undefined;
     this._badge("success");
   }
 

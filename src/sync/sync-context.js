@@ -38,6 +38,7 @@ const TRANSITIONS = Object.freeze({
   ],
   [SyncState.FETCHING_REMOTE]: [
     SyncState.RESOLVING_BASE,
+    SyncState.CONFLICT_PAUSED, // 远端读取 404 但已有确认基准(H1): 拒绝按空仓库处理,交恢复向导
     SyncState.FAILED,
     SyncState.CANCELLED,
   ],

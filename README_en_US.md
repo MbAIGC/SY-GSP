@@ -2,7 +2,7 @@
 
 [中文](./README.md)
 
-SY-GSP is a SiYuan note plugin that syncs notes with GitHub / Gitee repositories. It is a complete rewrite based on the "Sync Engine 2.0" design: three-way merge, a conflict center, and confirmed-base tracking — it never fakes success.
+SY-GSP is a SiYuan note plugin that syncs notes with GitHub repositories. It is a complete rewrite based on the "Sync Engine 2.0" design: three-way merge, a conflict center, and confirmed-base tracking — it never fakes success.
 
 > The predecessor of this plugin was SGSP (forked from [xstarling/sy-git-sync-plugin](https://github.com/xstarling/sy-git-sync-plugin) v0.3.0). SY-GSP is a brand-new implementation; the legacy source is archived under `SGSP-V1/` in this repository for reference only.
 
@@ -13,7 +13,7 @@ SY-GSP is a SiYuan note plugin that syncs notes with GitHub / Gitee repositories
 - **Conflict center**: on conflict, auto sync pauses and the conflict snapshot is persisted. You choose per file between "keep local" and "keep remote"; sync resumes automatically afterwards.
 - **Classified errors with bounded retry**: network / timeout / remote-moved / push-rejected errors are classified; only retryable categories are retried a limited number of times, and every retry re-plans first.
 - **First-sync wizard**: without a base, the plugin runs read-only diagnosis and shows a plan preview; the first write happens only after you confirm the direction.
-- **Dual platform**: GitHub (atomic tree commit + CAS ref update) and Gitee (per-file Contents API), detected from the repository address.
+- **Dual platform**: GitHub (atomic tree commit + CAS ref update). Gitee is currently unsupported and will be re-added in a later version (history preserved in git).repository address.
 - **Sync history**: the last 100 sync records are persisted locally with state, phase and error details.
 - **Full settings parity**: sync range / strategy / note format / sync mode, ignore rules, asset prefix, plus new options for auto retry, success notifications and per-request size limits.
 - **Migration**: legacy SGSP settings are imported automatically on first run; the legacy base commit is shown as a hint only.

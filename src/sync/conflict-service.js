@@ -10,6 +10,8 @@ import { SyncError, SyncErrorCategory } from "./sync-error.js";
 export const CONFLICT_FILE = "sync-conflicts.json";
 /** 单文件快照内容上限(超过则只保存引用与提示) */
 const SNAPSHOT_BYTE_LIMIT = 5 * 1024 * 1024;
+/** 单仓库保留的冲突集上限(含已关闭/已决策/已取代),防止 sync-conflicts.json 无限增长(#4) */
+const KEEP_HISTORY_PER_REPO = 16;
 
 export class ConflictService {
   constructor(plugin) {
@@ -66,6 +68,7 @@ export class ConflictService {
     }
     this.sets[opts.operationId] = set;
     await this._persist();
+    await this.prune(opts.repoKey);
     return set;
   }
 
@@ -99,6 +102,28 @@ export class ConflictService {
       set.status = "closed";
       await this._persist();
     }
+  }
+
+  /**
+   * 清理单仓库的历史冲突集(#4): 保留所有 open 集与最近的若干历史集,
+   * 删除更早的 closed/decided/superseded 集,避免文件随冲突轮次无限增长。
+   */
+  async prune(repoKey) {
+    const entries = Object.values(this.sets).filter((s) => s.repoKey === repoKey);
+    if (entries.length <= KEEP_HISTORY_PER_REPO) return;
+    entries.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    const keep = new Set();
+    let keptHistory = 0;
+    for (const s of entries) {
+      if (s.status === "open" || keptHistory < KEEP_HISTORY_PER_REPO) {
+        keep.add(s.operationId);
+        if (s.status !== "open") keptHistory += 1;
+      }
+    }
+    for (const key of Object.keys(this.sets)) {
+      if (this.sets[key].repoKey === repoKey && !keep.has(key)) delete this.sets[key];
+    }
+    await this._persist();
   }
 
   _capSnapshots(snapshots) {

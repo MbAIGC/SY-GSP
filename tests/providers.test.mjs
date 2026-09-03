@@ -1,9 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { GitHubProvider } from "../src/git/github-provider.js";
-import { GiteeProvider } from "../src/git/gitee-provider.js";
 import { GitProvider } from "../src/git/git-provider.js";
-import { SyncErrorCategory } from "../src/sync/sync-error.js";
+import { SyncError, SyncErrorCategory } from "../src/sync/sync-error.js";
 
 /** fetch 记录器: 按注册的响应序列应答 */
 function mockFetch(routes) {
@@ -32,7 +31,6 @@ const jsonResponse = (body, status = 200) => ({
 });
 
 const gh = () => new GitHubProvider({ owner: "o", repo: "r", branch: "main", token: "tk" });
-const gt = () => new GiteeProvider({ owner: "o", repo: "r", branch: "main", token: "tk" });
 
 test("GitHub getBranchHead 返回 HEAD 指针", async () => {
   const calls = mockFetch([{ match: (u) => /\/git\/ref\/heads\/main$/.test(u), respond: () => jsonResponse({ object: { sha: "abc" } }) }]);
@@ -90,90 +88,46 @@ test("GitHub getMergeBase / getInitialCommit", async () => {
   assert.equal((await p.getInitialCommit()).sha, "first");
 });
 
-test("Gitee 读接口: 分支/树/blob", async () => {
-  mockFetch([
-    { match: (u) => u.includes("/branches/main"), respond: () => jsonResponse({ commit: { sha: "g1" } }) },
-    { match: (u) => /\/commits\/g1$/.test(u), respond: () => jsonResponse({ sha: "g1", commit: { tree: { sha: "tree1" } } }) },
-    { match: (u) => /\/git\/trees\/tree1\?recursive=1/.test(u), respond: () => jsonResponse({ tree: [{ path: "a.md", type: "blob", sha: "b1", size: 3 }] }) },
-    { match: (u) => /\/git\/blobs\/b1/.test(u), respond: () => jsonResponse({ content: "aGk=", encoding: "base64" }) },
-  ]);
-  const p = gt();
-  assert.equal((await p.getBranchHead()).sha, "g1");
-  assert.equal((await p.getCommit("g1")).treeSha, "tree1");
-  const tree = await p.getTree("tree1");
-  assert.equal(tree[0].path, "a.md");
-  const blob = await p.getBlob("b1");
-  assert.equal(GitProvider.bytesToText(blob.bytes), "hi");
+test("GitHub getMergeBase: 网络/5xx 不再折叠成 null(上抛),仅 404 视为无合并基", async () => {
+  mockFetch([{ match: () => true, respond: () => jsonResponse({ message: "boom" }, 500) }]);
+  await assert.rejects(
+    () => gh().getMergeBase("base", "head"),
+    (err) => err instanceof SyncError && err.httpStatus === 500
+  );
+  mockFetch([{ match: () => true, respond: () => jsonResponse({ message: "Not Found" }, 404) }]);
+  assert.equal(await gh().getMergeBase("base", "head"), null);
 });
 
-test("Gitee 不支持原子 updateRef → 明确报错,而不是静默降级", async () => {
+test("GitHub getTree: truncated=true 拒绝规划(避免不完整树误判删除)", async () => {
+  const provider = gh();
+  provider.http = { request: async () => ({ status: 200, data: { truncated: true, tree: [{ path: "a.md", type: "blob", sha: "b", mode: "100644" }] } }) };
   await assert.rejects(
-    () => gt()._updateRefRaw(),
-    (err) => err.code === "ATOMIC_WRITE_UNSUPPORTED" && /原子/.test(err.message)
+    () => provider.getTree("t1"),
+    (err) => err.code === "TREE_TRUNCATED" && err.recoverable === true
   );
 });
 
-test("Gitee applyFileOperations: 成功记录操作日志并跟踪 HEAD", async () => {
-  const calls = mockFetch([
-    { match: (u) => /\/branches\/main(\?|$)/.test(u), respond: () => jsonResponse({ commit: { sha: "h1" } }) },
-    { match: (u, i) => /\/contents\/a\.md(\?|$)/.test(u) && i.method === "PUT", respond: () => jsonResponse({ commit: { sha: "h2" }, content: { sha: "blob1" } }) },
-  ]);
-  const result = await gt().applyFileOperations([
-    { op: "update", path: "a.md", bytes: new TextEncoder().encode("v"), remoteSha: "old" },
-  ], { message: "m", branch: "main" });
-  assert.equal(result.operations.length, 1);
-  assert.equal(result.operations[0].op, "update");
-  assert.equal(result.operations[0].afterSha, "blob1");
-  assert.equal(result.operations[0].commitSha, "h2");
-  assert.equal(result.remoteHead, "h1"); // remoteHead 取回读确认的分支头,而非单文件提交
-  const put = calls.find((c) => c.init.method === "PUT");
-  assert.ok(put.url.startsWith("https://gitee.com/api/v5/repos/o/r/contents/"));
-  const body = JSON.parse(put.init.body);
-  assert.equal(body.sha, "old");
-  assert.equal(body.branch, "main");
+test("GitHub 下载: raw 接口 sha 显式为 null(不再返回空串误导等价判断)", async () => {
+  const provider = gh();
+  provider.http = { request: async () => ({ status: 200, data: new TextEncoder().encode("x").buffer }) };
+  const file = await provider.getFileContent("a.md", "main");
+  assert.equal(file.sha, null);
 });
 
-test("Gitee applyFileOperations: 中途失败 → PARTIAL_REMOTE_WRITE 可恢复错误", async () => {
-  mockFetch([
-    { match: (u) => /\/branches\/main(\?|$)/.test(u), respond: () => jsonResponse({ commit: { sha: "h1" } }) },
-    { match: (u) => /\/contents\/ok\.md\?/.test(u), respond: () => jsonResponse({ commit: { sha: "h" }, content: { sha: "b" } }) },
-    { match: (u) => /\/contents\/bad\.md\?/.test(u), respond: () => jsonResponse({ message: "conflict" }, 409) },
-  ]);
+test("Gitee 不再提供: 平台分支代码已删除(导入即失败),待后续版本恢复", async () => {
   await assert.rejects(
-    () => gt().applyFileOperations([
-      { op: "update", path: "ok.md", bytes: new TextEncoder().encode("1"), remoteSha: "s1" },
-      { op: "update", path: "bad.md", bytes: new TextEncoder().encode("2"), remoteSha: "s2" },
-    ], { message: "m", branch: "main" }),
-    (err) => {
-      assert.equal(err.code, "PARTIAL_REMOTE_WRITE");
-      assert.equal(err.recoverable, true);
-      assert.ok(err.detail.includes("ok.md"));
-      return true;
-    }
+    () => import("../src/git/gitee-provider.js"),
+    (err) => /Cannot find|ERR_MODULE_NOT_FOUND/.test(String((err && err.message) || err))
   );
-});
-
-test("Gitee 删除: DELETE 同时携带 query 与 body 参数", async () => {
-  const calls = mockFetch([
-    { match: (u) => /\/branches\/main(\?|$)/.test(u), respond: () => jsonResponse({ commit: { sha: "h1" } }) },
-    { match: (u, i) => /\/contents\/del\.md\?/.test(u) && i.method === "DELETE", respond: () => jsonResponse({ commit: { sha: "h" } }) },
-  ]);
-  await gt().applyFileOperations([{ op: "delete", path: "del.md", remoteSha: "ds" }], { message: "m", branch: "main" });
-  const del = calls.find((c) => c.init.method === "DELETE");
-  assert.ok(del.url.includes("sha=ds"));
-  assert.equal(JSON.parse(del.init.body).sha, "ds");
 });
 
 test("provider 实例提供引擎所需的工具方法(gitBlobSha/bytesToBase64)", async () => {
-  const mk = (Cls) => new Cls({ owner: "o", repo: "r", branch: "main", token: "t" });
-  for (const p of [mk(GitHubProvider), mk(GiteeProvider)]) {
-    assert.equal(typeof p.gitBlobSha, "function", p.platform + ".gitBlobSha 应为实例方法");
-    assert.equal(typeof p.bytesToBase64, "function", p.platform + ".bytesToBase64 应为实例方法");
-  }
+  const p = gh();
+  assert.equal(typeof p.gitBlobSha, "function", "gitBlobSha 应为实例方法");
+  assert.equal(typeof p.bytesToBase64, "function", "bytesToBase64 应为实例方法");
   const bytes = GitProvider.textToBytes("hello\n");
-  const gh = mk(GitHubProvider);
-  assert.equal(await gh.gitBlobSha(bytes), await GitProvider.gitBlobSha(bytes));
-  assert.equal(gh.bytesToBase64(bytes), GitProvider.bytesToBase64(bytes));
+  assert.equal(await p.gitBlobSha(bytes), await GitProvider.gitBlobSha(bytes));
+  assert.equal(p.bytesToBase64(bytes), GitProvider.bytesToBase64(bytes));
 });
 
 /** 回读确认专用桩: 按队列返回 HEAD,父链由 parentsMap 描述 */
@@ -250,12 +204,4 @@ test("GitHub 下载: 合法 JSON 正文按文本返回,不再被误判为信封�
   provider.http = { request: async () => ({ status: 200, data: new TextEncoder().encode('{"a":1}') .buffer }) };
   const file = await provider.getFileContent("cfg.json", "main");
   assert.equal(file.text, '{"a":1}');
-});
-
-test("Gitee 下载: 空信封数据不崩溃", async () => {
-  const { GiteeProvider } = await import("../src/git/gitee-provider.js");
-  const provider = new GiteeProvider({ token: "t", owner: "o", repo: "r", branch: "main" });
-  provider.http = { request: async () => ({ status: 200, data: null }) };
-  const file = await provider.getFileContent("x.md", "main");
-  assert.equal(file.bytes.length, 0);
 });

@@ -2,12 +2,12 @@
  * SettingsPanel: 设置界面(SettingUtils 轻量实现 + 全部设置项)。
  * - 与旧版相同的设置键名(迁移直接复用);
  * - 新增键: sygsp_auto_retry / sygsp_success_notify / sygsp_blob_request_limit;
- * - 平台切换时重载子平台配置文件(与旧版交互一致)。
+ * - 远端平台当前仅支持 GitHub;Gitee 暂不支持(历史 gitee 平台配置文件保留,
+ *   待后续版本恢复;upload_sub_platform 仅作旧版标记兼容,统一归一为 0)。
  */
 
 export const PLATFORM_CONFIG_FILES = {
   github: "plugin_config_git_sync_github",
-  gitee: "plugin_config_git_sync_gitee",
 };
 
 export const SETTING_DEFAULTS = Object.freeze({

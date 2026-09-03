@@ -88,7 +88,7 @@ test("本地变更、远端未变 → upload update", async () => {
   assert.deepEqual(plan.uploads, [{ path: "f.md", op: "update" }]);
 });
 
-test("双方变更但结果一致 → upload update(幂等同步)", async () => {
+test("双方变更但结果一致 → 无动作(不再制造冗余上传提交;BASE 由成功轮推进)", async () => {
   const p = plannerWith();
   const plan = await p.build({
     baseEntries: new Map([["f.md", entry("S0")]]),
@@ -96,7 +96,8 @@ test("双方变更但结果一致 → upload update(幂等同步)", async () => 
     localFiles: [{ path: "f.md" }],
     localShas: new Map([["f.md", "S1"]]),
   });
-  assert.deepEqual(plan.uploads, [{ path: "f.md", op: "update" }]);
+  assert.equal(plan.unchanged, 1);
+  assert.equal(plan.uploads.length, 0);
   assert.equal(plan.conflicts.length, 0);
 });
 

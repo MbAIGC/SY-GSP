@@ -9,7 +9,6 @@ import { createKernel } from "../local/kernel.js";
 import { WorkspaceAdapter } from "../local/workspace-adapter.js";
 import { ContentAdapter } from "../local/content-adapter.js";
 import { GitHubProvider } from "../git/github-provider.js";
-import { GiteeProvider } from "../git/gitee-provider.js";
 import { SyncPlanner } from "../sync/sync-planner.js";
 import { ThreeWayMerger } from "../sync/three-way-merger.js";
 import { CommitBuilder } from "../sync/commit-builder.js";
@@ -225,8 +224,20 @@ export default class SyGspPlugin extends q.Plugin {
     }
   }
 
+  /**
+   * 远端平台。Gitee 暂不支持(代码/UI/测试已移除,git 历史保留,后续再补充):
+   * 恒为 GitHub。
+   */
   _platform() {
-    return this.settingUtils && Number(this.settingUtils.take("upload_sub_platform")) === 1 ? "gitee" : "github";
+    return "github";
+  }
+
+  /** 历史 Gitee 配置检测: 旧版平台标记(upload_sub_platform=1)或 gitee.com 仓库地址 */
+  _isGiteeConfigured() {
+    if (!this.settingUtils) return false;
+    if (Number(this.settingUtils.take("upload_sub_platform")) === 1) return true;
+    const addr = String(this.settingUtils.take("repository_address") || "");
+    return /gitee\.com/i.test(addr);
   }
 
   _repoInfo() {
@@ -262,6 +273,7 @@ export default class SyGspPlugin extends q.Plugin {
         resume: () => this._restartAutoSyncIfConfigured(),
       },
       makeEngineDeps: (ctx) => self._makeEngineDeps(ctx),
+      conflictService: this.conflictService,
       logger: {
         info: (t) => this.logs.info(t),
         warn: (t) => this.logs.warn(t),
@@ -273,10 +285,7 @@ export default class SyGspPlugin extends q.Plugin {
   _makeEngineDeps(ctx) {
     const info = this._repoInfo();
     const self = this;
-    const provider =
-      info.provider === "gitee"
-        ? new GiteeProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token })
-        : new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
+    const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
     const workspace = new WorkspaceAdapter(this.kernel, {
       getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
       getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
@@ -350,7 +359,8 @@ export default class SyGspPlugin extends q.Plugin {
     this.events.on("sync:success", ({ ctx, result }) => {
       this.logs.info(
         "同步成功 " + result.operationId + " ↑" + result.uploads + " ↓" + result.downloads +
-        " 删远" + result.deletionsRemote + " 删本" + result.deletionsLocal
+        " 删远" + result.deletionsRemote + " 删本" + result.deletionsLocal +
+        " 拦删" + (result.skippedDeletes || 0) + " 超大跳过" + (result.skippedLarge || 0)
       );
       this._recordHistory(ctx, "SUCCESS", null, result);
       this.notification.syncSuccess(result, {
@@ -398,8 +408,27 @@ export default class SyGspPlugin extends q.Plugin {
   // ---------- 同步入口 ----------
 
   async syncNow({ trigger = "manual", mode = "auto" } = {}) {
+    const automatic = trigger === "automatic" || trigger === "startup";
     const info = this._repoInfo();
+    // Gitee 暂不支持: 入口直接拦截并可见提示,不进入 GitHub 通道
+    if (this._isGiteeConfigured()) {
+      this.logs.warn("检测到 Gitee 配置(旧版平台标记或 gitee.com 地址): Gitee 暂不支持,本轮同步已跳过");
+      if (!automatic) {
+        this.notification.toast(this.i18n.giteeUnsupported || "Gitee 暂不支持,已停止同步。请改用 GitHub 仓库地址", "error", 6000);
+      }
+      return { skipped: true, unsupported: true };
+    }
     if (!info.owner || !info.repo || !info.branch || !info.token) {
+      // #5: 自动/启动触发不得弹出设置或向导(否则每轮定时都会重复弹窗);
+      // 缺失配置只记录日志,并至多提示一次,等待用户手动完成配置
+      if (automatic) {
+        this.logs.info("自动同步跳过: 设置未完整填写(" + (!info.owner ? "仓库地址" : !info.token ? "Token" : "分支") + "缺失)");
+        if (!this._autoConfigWarned) {
+          this._autoConfigWarned = true;
+          this.notification.toast(this.i18n.warnFinishSettingConfig || "请先完整填写设置,再手动发起首次同步", "error");
+        }
+        return { skipped: true };
+      }
       this.notification.toast(this.i18n.warnFinishSettingConfig || "请先完整填写设置", "error");
       this.openSetting();
       return { skipped: true };
@@ -407,11 +436,21 @@ export default class SyGspPlugin extends q.Plugin {
     // 首同步门控以元数据已确认基准为准: 标记键曾被历史版本整文件覆盖抹掉,
     // 不能作为判据;有基准(基准可解析)即走正常同步,无基准才进入首同步向导
     if (this._hasUnresolvedBase() && mode === "auto" && trigger !== "conflict_resolution") {
+      // #5: 自动/启动触发不弹向导,只记录日志,等待用户手动走首次同步
+      if (automatic) {
+        this.logs.info("自动同步跳过: 尚无确认基准,首次同步需要手动发起(进入首同步向导)");
+        return { skipped: true, firstRun: true };
+      }
       this.diagnosisPanel.show({ mode: "first_sync" });
       return { skipped: true, firstRun: true };
     }
     const strategy = Number(this.settingUtils.get("sync_strategy")) || 0;
     if (mode === "auto" && strategy === 1) {
+      // 方向选择是交互动作: 自动/启动触发不弹窗,记录日志跳过
+      if (automatic) {
+        this.logs.info("自动同步跳过: 同步策略为'每次选择方向',需手动触发");
+        return { skipped: true, chooseDirection: true };
+      }
       this._openDirectionDialog();
       return { skipped: true, chooseDirection: true };
     }
@@ -619,6 +658,10 @@ export default class SyGspPlugin extends q.Plugin {
 
   openSyncHistoryPanel() {
     const info = this._repoInfo();
+    if (this._isGiteeConfigured()) {
+      this.notification.toast(this.i18n.giteeUnsupported || "Gitee 暂不支持,无法打开同步历史。请改用 GitHub 仓库地址", "error", 6000);
+      return;
+    }
     if (!info.owner || !info.repo || !info.branch || !info.token) {
       this.notification.toast(this.i18n.warnFinishSettingConfig || "请先完整填写设置", "error");
       return;
@@ -660,9 +703,7 @@ export default class SyGspPlugin extends q.Plugin {
   }
 
   _makeProvider(info) {
-    return info.provider === "gitee"
-      ? new GiteeProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token })
-      : new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
+    return new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
   }
 
   /** 历史面板: 回滚(覆盖本地)/下载(另存到隔离目录) */
@@ -699,6 +740,14 @@ export default class SyGspPlugin extends q.Plugin {
   async _runDiagnosis() {
     const checks = [];
     const info = this._repoInfo();
+    if (this._isGiteeConfigured()) {
+      checks.push({
+        name: "Gitee 支持状态",
+        ok: false,
+        detail: "检测到旧版 Gitee 配置: Gitee 暂不支持,请在设置中改用 GitHub 仓库地址(历史代码与数据保留,后续版本再补充)",
+      });
+      return checks;
+    }
     checks.push({
       name: "仓库配置",
       ok: !!(info.owner && info.repo && info.branch),
@@ -755,6 +804,9 @@ export default class SyGspPlugin extends q.Plugin {
   async _previewPlan() {
     const info = this._repoInfo();
     const rows = [];
+    if (this._isGiteeConfigured()) {
+      return [{ name: "Gitee 支持状态", detail: "Gitee 暂不支持,请改用 GitHub 仓库地址" }];
+    }
     if (!info.owner || !info.branch) {
       return [{ name: "同步计划", detail: "配置不完整,无法预览" }];
     }
@@ -812,6 +864,8 @@ export default class SyGspPlugin extends q.Plugin {
               downloads: result.downloads,
               deletionsRemote: result.deletionsRemote,
               deletionsLocal: result.deletionsLocal,
+              skippedDeletes: result.skippedDeletes || 0,
+              skippedLarge: result.skippedLarge || 0,
               commitSha: result.commitSha,
             }
           : null,
