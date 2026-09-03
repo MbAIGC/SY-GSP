@@ -277,8 +277,8 @@ export default class SyGspPlugin extends q.Plugin {
         ? new GiteeProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token })
         : new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
     const workspace = new WorkspaceAdapter(this.kernel, {
-      getUserIgnore: () => this.settingUtils.take("ignore_file") || "",
-      getSyncRange: () => Number(this.settingUtils.take("sync_range")) || 0,
+      getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
+      getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
       getNotebooks: async () => {
         const res = await this.kernel.lsNotebooks();
         return (res && res.notebooks) || [];
@@ -322,6 +322,12 @@ export default class SyGspPlugin extends q.Plugin {
   }
 
   _saveEngineState(patch) {
+    // 状态文件由控制器唯一持有并合并写;装配早期(控制器未就绪)回退直写
+    if (this.controller && typeof this.controller.patchEngineState === "function") {
+      this.controller.patchEngineState(patch);
+      this._engineState = this.controller.engineState;
+      return Promise.resolve();
+    }
     const current = this._engineState || {};
     this._engineState = Object.assign({}, current, patch);
     return this.saveData(ENGINE_STATE_FILE, this._engineState).catch((err) => {
@@ -397,14 +403,15 @@ export default class SyGspPlugin extends q.Plugin {
       this.openSetting();
       return { skipped: true };
     }
-    const state = this._engineState || (await this.loadData(ENGINE_STATE_FILE)) || {};
+    const state = (this.controller ? this.controller.engineState : null) ||
+      this._engineState || (await this.loadData(ENGINE_STATE_FILE)) || {};
     this._engineState = state;
     if (!state.firstWriteConfirmed && mode === "auto" && trigger !== "conflict_resolution") {
       // 2.0 灰度: 首次写入前必须经过只读诊断与计划预览确认
       this.diagnosisPanel.show({ mode: "first_sync" });
       return { skipped: true, firstRun: true };
     }
-    const strategy = Number(this.settingUtils.take("sync_strategy")) || 0;
+    const strategy = Number(this.settingUtils.get("sync_strategy")) || 0;
     if (mode === "auto" && strategy === 1) {
       this._openDirectionDialog();
       return { skipped: true, chooseDirection: true };
@@ -753,14 +760,14 @@ export default class SyGspPlugin extends q.Plugin {
       return [{ name: "同步计划", detail: "配置不完整,无法预览" }];
     }
     const workspace = new WorkspaceAdapter(this.kernel, {
-      getUserIgnore: () => this.settingUtils.take("ignore_file") || "",
-      getSyncRange: () => Number(this.settingUtils.take("sync_range")) || 0,
+      getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
+      getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
       getNotebooks: async () => {
         const res = await this.kernel.lsNotebooks();
         return (res && res.notebooks) || [];
       },
     });
-    const scan = await workspace.scan({ range: Number(this.settingUtils.take("sync_range")) || 0 });
+    const scan = await workspace.scan({ range: Number(this.settingUtils.get("sync_range")) || 0 });
     rows.push({
       name: "本地扫描(同步范围内)",
       detail: scan.files.length + " 个文件" + (scan.enumErrorOccurred ? "(存在目录枚举异常)" : ""),

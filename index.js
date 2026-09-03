@@ -112,6 +112,7 @@ function createKernel(q2) {
 var DEFAULT_IGNORES = Object.freeze([
   "data/plugins/*",
   "data/widgets/*",
+  "data/storage/*",
   ".lock",
   "temp/*"
 ]);
@@ -3220,6 +3221,7 @@ var SyncController = class {
     this.state = SyncState.IDLE;
     this.lastContext = null;
     this.conflictPaused = null;
+    this._engineState = {};
     this.autoTick = false;
     this._autoSkipNotified = false;
     this.retryTimer = null;
@@ -3228,6 +3230,7 @@ var SyncController = class {
   async restore() {
     try {
       const saved = await this.plugin.loadData(ENGINE_STATE_FILE);
+      this._engineState = saved && typeof saved === "object" ? saved : {};
       if (saved && saved.conflictPaused) {
         this.conflictPaused = saved.conflictPaused;
         this.state = SyncState.CONFLICT_PAUSED;
@@ -3237,9 +3240,19 @@ var SyncController = class {
       console.warn("[SY-GSP] 恢复暂停状态失败:", err && err.message);
     }
   }
-  _persistState() {
-    const payload = this.conflictPaused ? { conflictPaused: this.conflictPaused } : {};
-    this.plugin.saveData(ENGINE_STATE_FILE, payload).catch((err) => {
+  /** 当前引擎状态(含其他组件经 patchEngineState 写入的键) */
+  get engineState() {
+    return this._engineState || {};
+  }
+  /** 其他组件写入引擎状态的唯一入口(合并写,不整文件覆盖) */
+  patchEngineState(patch) {
+    this._persistState(patch);
+  }
+  _persistState(patch = {}) {
+    this._engineState = Object.assign({}, this._engineState || {}, patch);
+    if (this.conflictPaused) this._engineState.conflictPaused = this.conflictPaused;
+    else delete this._engineState.conflictPaused;
+    this.plugin.saveData(ENGINE_STATE_FILE, this._engineState).catch((err) => {
       this.notify(this.i18n("sygspPersistFailed", "⚠️ 状态保存失败,重启后可能丢失暂停状态"), "error");
       console.warn("[SY-GSP] 状态持久化失败:", err && err.message);
     });
@@ -3421,7 +3434,6 @@ var SyncController = class {
     const mode = choice === "keep_local" ? SyncMode.LOCAL_OVER_REMOTE : SyncMode.REMOTE_OVER_LOCAL;
     const result = await this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, mode });
     if (result && result.result && result.result.success) {
-      await this.plugin.saveData(ENGINE_STATE_FILE, {});
       this.conflictPaused = null;
       this._persistState();
     }
@@ -5576,8 +5588,8 @@ var SyGspPlugin = class extends q.Plugin {
     const self = this;
     const provider = info.provider === "gitee" ? new GiteeProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token }) : new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
     const workspace = new WorkspaceAdapter(this.kernel, {
-      getUserIgnore: () => this.settingUtils.take("ignore_file") || "",
-      getSyncRange: () => Number(this.settingUtils.take("sync_range")) || 0,
+      getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
+      getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
       getNotebooks: async () => {
         const res = await this.kernel.lsNotebooks();
         return res && res.notebooks || [];
@@ -5619,6 +5631,11 @@ var SyGspPlugin = class extends q.Plugin {
     };
   }
   _saveEngineState(patch) {
+    if (this.controller && typeof this.controller.patchEngineState === "function") {
+      this.controller.patchEngineState(patch);
+      this._engineState = this.controller.engineState;
+      return Promise.resolve();
+    }
     const current = this._engineState || {};
     this._engineState = Object.assign({}, current, patch);
     return this.saveData(ENGINE_STATE_FILE, this._engineState).catch((err) => {
@@ -5688,13 +5705,13 @@ var SyGspPlugin = class extends q.Plugin {
       this.openSetting();
       return { skipped: true };
     }
-    const state = this._engineState || await this.loadData(ENGINE_STATE_FILE) || {};
+    const state = (this.controller ? this.controller.engineState : null) || this._engineState || await this.loadData(ENGINE_STATE_FILE) || {};
     this._engineState = state;
     if (!state.firstWriteConfirmed && mode === "auto" && trigger !== "conflict_resolution") {
       this.diagnosisPanel.show({ mode: "first_sync" });
       return { skipped: true, firstRun: true };
     }
-    const strategy = Number(this.settingUtils.take("sync_strategy")) || 0;
+    const strategy = Number(this.settingUtils.get("sync_strategy")) || 0;
     if (mode === "auto" && strategy === 1) {
       this._openDirectionDialog();
       return { skipped: true, chooseDirection: true };
@@ -6003,14 +6020,14 @@ var SyGspPlugin = class extends q.Plugin {
       return [{ name: "同步计划", detail: "配置不完整,无法预览" }];
     }
     const workspace = new WorkspaceAdapter(this.kernel, {
-      getUserIgnore: () => this.settingUtils.take("ignore_file") || "",
-      getSyncRange: () => Number(this.settingUtils.take("sync_range")) || 0,
+      getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
+      getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
       getNotebooks: async () => {
         const res = await this.kernel.lsNotebooks();
         return res && res.notebooks || [];
       }
     });
-    const scan = await workspace.scan({ range: Number(this.settingUtils.take("sync_range")) || 0 });
+    const scan = await workspace.scan({ range: Number(this.settingUtils.get("sync_range")) || 0 });
     rows.push({
       name: "本地扫描(同步范围内)",
       detail: scan.files.length + " 个文件" + (scan.enumErrorOccurred ? "(存在目录枚举异常)" : "")

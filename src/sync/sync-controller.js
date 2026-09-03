@@ -39,6 +39,7 @@ export class SyncController {
     this.state = SyncState.IDLE;
     this.lastContext = null;
     this.conflictPaused = null; // {kind, repoKey, operationId, reason, conflictCount}
+    this._engineState = {}; // 引擎状态文件唯一属主: 控制器持有并合并写入
     this.autoTick = false;
     this._autoSkipNotified = false;
     this.retryTimer = null;
@@ -48,6 +49,7 @@ export class SyncController {
   async restore() {
     try {
       const saved = await this.plugin.loadData(ENGINE_STATE_FILE);
+      this._engineState = saved && typeof saved === "object" ? saved : {};
       if (saved && saved.conflictPaused) {
         this.conflictPaused = saved.conflictPaused;
         this.state = SyncState.CONFLICT_PAUSED;
@@ -58,11 +60,23 @@ export class SyncController {
     }
   }
 
-  _persistState() {
-    const payload = this.conflictPaused
-      ? { conflictPaused: this.conflictPaused }
-      : {};
-    this.plugin.saveData(ENGINE_STATE_FILE, payload).catch((err) => {
+  /** 当前引擎状态(含其他组件经 patchEngineState 写入的键) */
+  get engineState() {
+    return this._engineState || {};
+  }
+
+  /** 其他组件写入引擎状态的唯一入口(合并写,不整文件覆盖) */
+  patchEngineState(patch) {
+    this._persistState(patch);
+  }
+
+  _persistState(patch = {}) {
+    // 合并写: 冲突暂停状态与其他键(如 firstWriteConfirmed)共存,
+    // 任何一方保存都不得清掉另一方(实证缺陷: 每次同步成功都会抹掉首次确认标记)
+    this._engineState = Object.assign({}, this._engineState || {}, patch);
+    if (this.conflictPaused) this._engineState.conflictPaused = this.conflictPaused;
+    else delete this._engineState.conflictPaused;
+    this.plugin.saveData(ENGINE_STATE_FILE, this._engineState).catch((err) => {
       this.notify(this.i18n("sygspPersistFailed", "⚠️ 状态保存失败,重启后可能丢失暂停状态"), "error");
       console.warn("[SY-GSP] 状态持久化失败:", err && err.message);
     });
@@ -271,9 +285,8 @@ export class SyncController {
     const mode = choice === "keep_local" ? SyncMode.LOCAL_OVER_REMOTE : SyncMode.REMOTE_OVER_LOCAL;
     const result = await this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, mode });
     if (result && result.result && result.result.success) {
-      await this.plugin.saveData(ENGINE_STATE_FILE, {});
       this.conflictPaused = null;
-      this._persistState();
+      this._persistState(); // 合并写,保留其他状态键
     }
     return result;
   }

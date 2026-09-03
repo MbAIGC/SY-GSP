@@ -40,3 +40,13 @@ test("仓库地址解析(https/git/ssh/带 .git)", () => {
   assert.deepEqual(parseRepoAddress("https://gitee.com/o/r"), { host: "gitee.com", owner: "o", repo: "r" });
   assert.deepEqual(parseRepoAddress("不是地址"), { host: "", owner: "", repo: "" });
 });
+
+test("默认忽略: data/storage 为设备本地状态,不再进入同步范围", async () => {
+  const { buildIgnoreList, isIgnored } = await import("../src/local/ignore-rules.js");
+  const patterns = buildIgnoreList("", []);
+  assert.equal(isIgnored("data/storage/petal/petals.json", patterns), true);
+  assert.equal(isIgnored("data/storage/local.json", patterns), true);
+  assert.equal(isIgnored("data/storage/bazaar.json", patterns), true);
+  assert.equal(isIgnored("data/20240101120000-abc/note.sy", patterns), false, "正常笔记不受影响");
+  assert.equal(isIgnored("data/assets/img.png", patterns), false, "资源不受影响");
+});

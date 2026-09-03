@@ -5,10 +5,11 @@
  * - 用户配置以 ";" 分隔,自动去空白与首尾斜杠。
  */
 
-/** 默认忽略项(与旧版一致) */
+/** 默认忽略项(与旧版一致;storage 为设备本地运行状态,跨设备同步无意义) */
 export const DEFAULT_IGNORES = Object.freeze([
   "data/plugins/*",
   "data/widgets/*",
+  "data/storage/*",
   ".lock",
   "temp/*",
 ]);
