@@ -14,6 +14,7 @@ export const SyncErrorCategory = Object.freeze({
   BRANCH: "BRANCH",
   REMOTE_CHANGED: "REMOTE_CHANGED",
   PUSH_REJECTED: "PUSH_REJECTED",
+  RATE_LIMIT: "RATE_LIMIT",
   CONFLICT: "CONFLICT",
   LARGE_FILE: "LARGE_FILE",
   LOCAL_FILE: "LOCAL_FILE",
@@ -38,6 +39,8 @@ export class SyncError extends Error {
     this.path = (fields && fields.path) || "";
     this.detail = (fields && fields.detail) || "";
     this.retryable = !!(fields && fields.retryable);
+    // 限流类错误建议的等待毫秒数(来自 Retry-After / X-RateLimit-Reset),由重试策略消费
+    this.retryDelayMs = (fields && fields.retryDelayMs) || 0;
     this.recoverable = !!(fields && fields.recoverable);
     this.cause = (fields && fields.cause) || null;
   }

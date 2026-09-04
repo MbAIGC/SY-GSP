@@ -15,6 +15,9 @@ export function formatLocalTime(iso) {
   );
 }
 
+/** 日志级别 → 中文标签(存储仍用英文 level,渲染层转换) */
+const LEVEL_LABELS = { info: "信息", warn: "警告", error: "错误" };
+
 export class RuntimeLogs {
   constructor(limit = 500) {
     this.limit = limit;
@@ -91,9 +94,11 @@ export class RuntimeLogs {
     }
   }
 
+  /** 渲染: 最新在前(用户最关心最近发生了什么)。存储顺序与容量淘汰逻辑不变 */
   render() {
-    return this.entries
-      .map((e) => "[" + formatLocalTime(e.at) + "] [" + e.level + "] " + e.text)
+    return [...this.entries]
+      .reverse()
+      .map((e) => "[" + formatLocalTime(e.at) + "] [" + (LEVEL_LABELS[e.level] || e.level) + "] " + e.text)
       .join("\n");
   }
 }
@@ -136,7 +141,7 @@ export function openLogsDialog({ q, i18n, logs }) {
   textarea.style.cssText = "font-family:monospace;font-size:12px;min-height:0;resize:none;";
   const fill = () => {
     textarea.value = logs.render() || emptyHint;
-    textarea.scrollTop = textarea.scrollHeight;
+    textarea.scrollTop = 0; // 最新在前,滚动停在顶部
   };
   refresh.addEventListener("click", fill);
   fill();

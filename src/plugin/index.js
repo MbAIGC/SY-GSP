@@ -719,8 +719,13 @@ export default class SyGspPlugin extends q.Plugin {
       "清单残留: " + report.manifestResidual.length,
       "冲突残留: " + report.conflictResidual,
       "当前 BASE: " + (report.baseCommit ? report.baseCommit.slice(0, 8) : "无"),
+      (report.strayNotebookPaths && report.strayNotebookPaths.length
+        ? "⚠️ 本地残留(不在笔记本列表,重建时将一并清理): " + report.strayNotebookPaths.length + " 个文件\n  " +
+          report.strayNotebookPaths.slice(0, 10).join("\n  ") +
+          (report.strayNotebookPaths.length > 10 ? "\n  …等共 " + report.strayNotebookPaths.length + " 个" : "")
+        : ""),
       "\n请选择重建基准。此操作会清空另一端的同步范围内容。",
-    ];
+    ].filter(Boolean);
     const dialog = new q.Dialog({ title: "同步重建", content: '<div id="sygspRebuild" style="padding:16px;white-space:pre-wrap"></div>', width: "560px" });
     const root = dialog.element.querySelector("#sygspRebuild");
     root.textContent = lines.join("\n");

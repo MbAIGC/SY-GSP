@@ -43,7 +43,9 @@ export class ContentAdapter {
       if (!exported || !exported.content || String(exported.content).length === 0) {
         throw new Error("数据完整性异常: 导出 Markdown 内容为空,已停止 -> " + path);
       }
-      const stripped = String(exported.content).replace(/^---\s*\n([\s\S]*?)\n---\s*/, "");
+      // front-matter 剥离: 容忍 BOM 与 CRLF/LF 行尾,仅剥离文件头处的一块;
+      // 不剥离正文中间的 "---" 分隔线,避免误伤合法内容
+      const stripped = String(exported.content).replace(/^\uFEFF?\s*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n)?/, "");
       return new Blob([stripped]);
     }
     const blob = await this.kernel.getFile(path);

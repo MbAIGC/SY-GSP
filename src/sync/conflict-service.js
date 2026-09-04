@@ -45,6 +45,15 @@ export class ConflictService {
    *   snapshots:{baseB64,localB64,remoteB64}}]}
    */
   async saveSet(opts) {
+    // 同仓库仅保留一个 open 集;被取代前,先迁移旧集中同路径的既有决策,
+    // 避免"用户已决策的文件在新一轮冲突集里决策被静默清空、反复回到冲突中心"
+    const previous = this.openSet(opts.repoKey);
+    const previousDecisions = new Map();
+    if (previous) {
+      for (const c of previous.conflicts || []) {
+        if (c && c.path && c.decision && c.decision !== "later") previousDecisions.set(c.path, c.decision);
+      }
+    }
     const conflicts = (opts.conflicts || []).map((c) => ({
       path: c.path,
       reason: c.reason || "",
@@ -52,17 +61,16 @@ export class ConflictService {
       localSha: c.localSha || null,
       remoteSha: c.remoteSha || null,
       snapshots: this._capSnapshots(c.snapshots),
-      status: "open",
-      decision: null,
+      status: previousDecisions.has(c.path) ? "decided" : "open",
+      decision: previousDecisions.has(c.path) ? previousDecisions.get(c.path) : null,
     }));
     const set = {
       repoKey: opts.repoKey,
       operationId: opts.operationId,
       createdAt: new Date().toISOString(),
-      status: "open",
+      status: conflicts.every((c) => c.status !== "open") ? "decided" : "open",
       conflicts,
     };
-    // 同仓库仅保留一个 open 集
     for (const [key, s] of Object.entries(this.sets)) {
       if (s.repoKey === opts.repoKey && s.status === "open") s.status = "superseded";
     }
@@ -84,13 +92,21 @@ export class ConflictService {
     await this._persist();
   }
 
-  /** 收集一个冲突集的覆盖决策(供引擎重新规划) */
+  /**
+   * 收集一个冲突集的覆盖决策(供引擎重新规划)。
+   * "resolved"(用户已手动编辑)按 keep_local 执行: 用户编辑后的本地内容即最新事实,
+   * 忽略它会导致用户的修改被静默跳过、同一文件反复回到冲突中心。
+   */
   collectOverrides(operationId) {
     const set = this.sets[operationId];
     if (!set) return new Map();
     const overrides = new Map();
     for (const c of set.conflicts) {
-      if (c.decision === "keep_local" || c.decision === "keep_remote") overrides.set(c.path, c.decision);
+      if (c.decision === "keep_local" || c.decision === "keep_remote") {
+        overrides.set(c.path, c.decision);
+      } else if (c.decision === "resolved") {
+        overrides.set(c.path, "keep_local");
+      }
     }
     return overrides;
   }

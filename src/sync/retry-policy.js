@@ -3,6 +3,9 @@
  * - NETWORK/TIMEOUT: 最多 3 次,延迟 1s/3s/9s + 小幅随机抖动;
  * - REMOTE_CHANGED/PUSH_REJECTED: 最多 4 次,有界退避,每次必须重新规划(由引擎重新执行,这里只判定资格);
  *   该类不受 enabled 开关约束(CAS 保护下的安全收敛),开关只治理网络暂态;
+ * - RATE_LIMIT: 最多 2 次,按服务端给出的重置时间(Retry-After / X-RateLimit-Reset)退避后
+ *   重新规划;同样不受 enabled 开关约束,但单次等待超过 MAX_RATE_LIMIT_WAIT_MS 时放弃
+ *   自动等待,转为可见失败(避免一次同步挂起一小时);
  * - 其余(AUTH/PERMISSION/REPOSITORY/BRANCH/LARGE_FILE/CONFLICT/...)不自动重试。
  */
 
@@ -11,6 +14,9 @@ import { SyncError } from "./sync-error.js";
 
 const NETWORK_MAX = 3;
 export const REMOTE_CHANGED_MAX = 4;
+/** 限流自动重试上限与单次最长等待(超过即转为可见失败,由下一轮自动同步自然恢复) */
+export const RATE_LIMIT_MAX = 2;
+export const MAX_RATE_LIMIT_WAIT_MS = 2 * 60 * 1000;
 const BASE_DELAYS_MS = [1000, 3000, 9000];
 
 /** 默认允许自动重试的错误类别(诊断/设置说明引用) */
@@ -19,6 +25,7 @@ export const DEFAULT_RETRYABLE_CATEGORIES = Object.freeze([
   SyncErrorCategory.TIMEOUT,
   SyncErrorCategory.REMOTE_CHANGED,
   SyncErrorCategory.PUSH_REJECTED,
+  SyncErrorCategory.RATE_LIMIT,
 ]);
 
 const NO_RETRY_CATEGORIES = [
@@ -53,9 +60,19 @@ export class RetryPolicy {
     // 不受"自动重试"开关约束(开关只治理网络暂态类);仍有界(REMOTE_CHANGED_MAX)
     const casRace = category === SyncErrorCategory.REMOTE_CHANGED ||
       category === SyncErrorCategory.PUSH_REJECTED;
-    if (!this.enabled && !casRace) return notEligible("自动重试未开启");
+    // 限流: 等待后重规划是恢复的唯一路径,不受开关约束;单次等待有硬上限
+    const rateLimit = category === SyncErrorCategory.RATE_LIMIT;
+    if (!this.enabled && !casRace && !rateLimit) return notEligible("自动重试未开启");
     if (err.retryable === false) return notEligible("错误标记为不可重试");
 
+    if (rateLimit) {
+      if (attempt >= RATE_LIMIT_MAX) return notEligible("已达限流重试上限");
+      const wait = Number(err.retryDelayMs) > 0 ? Number(err.retryDelayMs) : 5000;
+      if (wait > MAX_RATE_LIMIT_WAIT_MS) {
+        return notEligible("限流重置时间过久(" + Math.ceil(wait / 60000) + " 分钟),不自动等待,请稍后手动同步");
+      }
+      return { retry: true, delayMs: wait + 500, replan: true, reason: "GitHub 限流,按服务端重置时间退避后重新规划" };
+    }
     if (category === SyncErrorCategory.NETWORK || category === SyncErrorCategory.TIMEOUT) {
       if (attempt >= NETWORK_MAX) return notEligible("已达网络类重试上限");
       return { retry: true, delayMs: this._delay(attempt), replan: false, reason: "网络类暂态错误" };

@@ -397,7 +397,7 @@ var ContentAdapter = class {
       if (!exported || !exported.content || String(exported.content).length === 0) {
         throw new Error("数据完整性异常: 导出 Markdown 内容为空,已停止 -> " + path);
       }
-      const stripped = String(exported.content).replace(/^---\s*\n([\s\S]*?)\n---\s*/, "");
+      const stripped = String(exported.content).replace(/^\uFEFF?\s*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n)?/, "");
       return new Blob([stripped]);
     }
     const blob = await this.kernel.getFile(path);
@@ -569,6 +569,7 @@ var SyncErrorCategory = Object.freeze({
   BRANCH: "BRANCH",
   REMOTE_CHANGED: "REMOTE_CHANGED",
   PUSH_REJECTED: "PUSH_REJECTED",
+  RATE_LIMIT: "RATE_LIMIT",
   CONFLICT: "CONFLICT",
   LARGE_FILE: "LARGE_FILE",
   LOCAL_FILE: "LOCAL_FILE",
@@ -592,6 +593,7 @@ var SyncError = class extends Error {
     this.path = fields && fields.path || "";
     this.detail = fields && fields.detail || "";
     this.retryable = !!(fields && fields.retryable);
+    this.retryDelayMs = fields && fields.retryDelayMs || 0;
     this.recoverable = !!(fields && fields.recoverable);
     this.cause = fields && fields.cause || null;
   }
@@ -764,6 +766,20 @@ var HttpClient = class {
       }
       const message = String(apiMessage).trim();
       apiMessage = message ? message : apiMessage;
+      const rateLimit = this._detectRateLimit(response, message);
+      if (rateLimit) {
+        throw new SyncError({
+          category: SyncErrorCategory.RATE_LIMIT,
+          code: "RATE_LIMITED",
+          operation: method + " " + this._safeUrl(opts),
+          httpStatus: response.status,
+          message: "已触发 GitHub API 限流" + (rateLimit.retryDelayMs > 0 ? "(约 " + Math.ceil(rateLimit.retryDelayMs / 1e3) + " 秒后重置)" : ""),
+          detail: redact(typeof apiMessage === "string" ? apiMessage : JSON.stringify(apiMessage)),
+          retryable: true,
+          retryDelayMs: rateLimit.retryDelayMs,
+          recoverable: false
+        });
+      }
       throw new SyncError({
         category: SyncErrorCategory.GIT,
         code: "HTTP_" + response.status,
@@ -776,6 +792,29 @@ var HttpClient = class {
       });
     }
     return { status: response.status, headers: response.headers, data, link: response.headers.get("link") || "" };
+  }
+  /**
+   * 限流识别: 403/429 且满足以下任一特征——
+   * - X-RateLimit-Remaining: 0(主速率限制耗尽);
+   * - Retry-After 头存在(二次限流);
+   * - 错误正文含 "rate limit"(GitHub 主/次限流的固定文案)。
+   * 返回 {retryDelayMs}: 优先 Retry-After(秒),其次 X-RateLimit-Reset(纪元秒 − 当前时间)。
+   */
+  _detectRateLimit(response, apiMessage) {
+    if (response.status !== 403 && response.status !== 429) return null;
+    const headers = response.headers;
+    const remaining = headers ? headers.get("x-ratelimit-remaining") : null;
+    const retryAfter = headers ? headers.get("retry-after") : null;
+    const resetEpoch = headers ? headers.get("x-ratelimit-reset") : null;
+    const textHit = /rate limit/i.test(String(apiMessage || ""));
+    if (remaining !== "0" && !retryAfter && !textHit) return null;
+    let retryDelayMs = 0;
+    if (retryAfter && Number(retryAfter) > 0) {
+      retryDelayMs = Number(retryAfter) * 1e3;
+    } else if (resetEpoch && Number(resetEpoch) > 0) {
+      retryDelayMs = Math.max(0, Number(resetEpoch) * 1e3 - Date.now());
+    }
+    return { retryDelayMs: Math.round(retryDelayMs) };
   }
   _buildUrl(opts) {
     let url = opts.url || this.baseUrl + (opts.path || "");
@@ -1108,7 +1147,11 @@ var GitHubProvider = class _GitHubProvider extends GitProvider {
     return "GitHub";
   }
   _repoPath() {
-    return "/repos/" + this.owner + "/" + this.repo;
+    return "/repos/" + encodeURIComponent(this.owner) + "/" + encodeURIComponent(this.repo);
+  }
+  /** 分支名可含 "/",直接拼路径会产生错误请求;按路径段编码(保留斜杠层级) */
+  _branchRefPath() {
+    return "/git/ref/heads/" + this.branch.split("/").map((seg) => encodeURIComponent(seg)).join("/");
   }
   _wrap(err, operation, message) {
     if (err instanceof SyncError) return err;
@@ -1137,7 +1180,7 @@ var GitHubProvider = class _GitHubProvider extends GitProvider {
   }
   async getBranchHead() {
     try {
-      const res = await this.http.request({ path: this._repoPath() + "/git/ref/heads/" + this.branch, noCache: true });
+      const res = await this.http.request({ path: this._repoPath() + this._branchRefPath(), noCache: true });
       return { sha: res.data.object.sha };
     } catch (err) {
       throw this._wrap(err, "getBranchHead", "读取分支 HEAD 失败");
@@ -1248,7 +1291,8 @@ var GitHubProvider = class _GitHubProvider extends GitProvider {
   async compareCommits(baseRef, headRef) {
     try {
       const res = await this.http.request({
-        path: this._repoPath() + "/compare/" + encodeURIComponent(baseRef) + "..." + encodeURIComponent(headRef)
+        path: this._repoPath() + "/compare/" + encodeURIComponent(baseRef) + "..." + encodeURIComponent(headRef),
+        query: { per_page: 100 }
       });
       return (res.data.files || []).map((f) => ({
         filename: f.filename,
@@ -1352,7 +1396,7 @@ var GitHubProvider = class _GitHubProvider extends GitProvider {
   async _updateRefRaw(newSha) {
     try {
       await this.http.request({
-        path: this._repoPath() + "/git/refs/heads/" + this.branch,
+        path: this._repoPath() + "/git/refs/heads/" + this.branch.split("/").map((seg) => encodeURIComponent(seg)).join("/"),
         method: "PATCH",
         body: { sha: newSha, force: false }
       });
@@ -1411,7 +1455,11 @@ var SyncPlanner = class {
       localShas = /* @__PURE__ */ new Map(),
       mode = "auto",
       overrides = /* @__PURE__ */ new Map(),
-      enumErrorOccurred = false
+      enumErrorOccurred = false,
+      // new/new 时间裁决: 默认允许,阈值 30s(设备时钟偏差远大于 2s,2s 会系统性偏向一侧);
+      // 首同步双方均有内容时由引擎传入 false,禁止时间静默裁决
+      allowTimeArbitration = true,
+      newFileTimeThresholdMs = 3e4
     } = opts;
     const localSet = new Set(localFiles.map((f) => f.path));
     const allPaths = /* @__PURE__ */ new Set([...baseEntries.keys(), ...remoteEntries.keys(), ...localSet]);
@@ -1442,7 +1490,12 @@ var SyncPlanner = class {
         localUpdated: ((_a = localFiles.find((file) => file.path === path)) == null ? void 0 : _a.updated) || 0,
         remoteCommitDate: opts.remoteCommitDate || null,
         enumErrorOccurred,
-        bootstrap: opts.bootstrap === true
+        bootstrap: opts.bootstrap === true,
+        allowTimeArbitration,
+        newFileTimeThresholdMs,
+        // 超出下载上限的远端文件: Map<path, size>。本端读不到其内容,
+        // 自动上传等于"盲写覆盖远端",必须交人工决策(由引擎传入)
+        blockedDownloads: opts.blockedDownloads || null
       };
       if (override) {
         this._applyOverride(plan, path, override, ctx);
@@ -1473,8 +1526,8 @@ var SyncPlanner = class {
     const sha = localShas.get(path);
     const ref = baseEntry ? baseEntry.sha : remoteEntry ? remoteEntry.sha : null;
     if (sha === null || sha === void 0) {
-      const bytes = await this.readLocal(path) || { bytes: null };
-      if (!bytes) return "deleted";
+      const bytes = await this.readLocal(path);
+      if (!bytes || !bytes.bytes) return "deleted";
       const refBytes = baseEntry ? await this.readRemoteBlobBySha(baseEntry.sha) : remoteEntry ? await this.readRemoteBlobBySha(remoteEntry.sha) : null;
       return refBytes && bytesEqual(refBytes.bytes, bytes.bytes) ? "unchanged" : "changed";
     }
@@ -1484,6 +1537,18 @@ var SyncPlanner = class {
     const { baseEntry, remoteEntry, localExists, localShas, enumErrorOccurred, bootstrap } = ctx;
     const localState = await this._localState(path, ctx);
     const remoteState = !remoteEntry ? "deleted" : !baseEntry ? "new" : remoteEntry.sha === baseEntry.sha ? "unchanged" : "changed";
+    const blockedSize = ctx.blockedDownloads ? ctx.blockedDownloads.get(path) : null;
+    const deleteOnly = localState === "deleted" && remoteState === "unchanged";
+    if (blockedSize && localState !== "unchanged" && !deleteOnly) {
+      plan.conflicts.push({
+        path,
+        reason: "远端文件超出大小上限(" + blockedSize + " 字节),无法自动同步,需人工处理",
+        baseSha: baseEntry ? baseEntry.sha : null,
+        localSha: localShas.get(path) || null,
+        remoteSha: remoteEntry ? remoteEntry.sha : null
+      });
+      return;
+    }
     if (localState === "deleted" && remoteState === "deleted") {
       plan.unchanged += 1;
       return;
@@ -1510,14 +1575,25 @@ var SyncPlanner = class {
         plan.unchanged += 1;
         return;
       }
+      if (!ctx.allowTimeArbitration) {
+        plan.conflicts.push({
+          path,
+          reason: "首同步双方均有同名文件且内容不同,需人工确认保留哪一方",
+          baseSha: null,
+          localSha,
+          remoteSha: remoteEntry.sha
+        });
+        return;
+      }
       const localTime = Number(ctx.localUpdated) || 0;
       const remoteTime = Date.parse(ctx.remoteCommitDate || "") || 0;
       const delta = localTime && remoteTime ? localTime - remoteTime : 0;
-      if (delta > 2e3) {
+      const threshold = Number(ctx.newFileTimeThresholdMs) || 3e4;
+      if (delta > threshold) {
         plan.uploads.push({ path, op: "create" });
         return;
       }
-      if (delta < -2e3) {
+      if (delta < -threshold) {
         plan.downloads.push({ path, op: "create" });
         return;
       }
@@ -1563,6 +1639,10 @@ var SyncPlanner = class {
       return;
     }
     if (localState === "unchanged" && remoteState === "deleted") {
+      if (enumErrorOccurred) {
+        plan.skippedDeletes.push({ path, reasons: ["枚举异常,拒绝按远端删除移除本地文件"] });
+        return;
+      }
       plan.deletionsLocal.push({ path });
       return;
     }
@@ -1920,6 +2000,7 @@ var ThreeWayMerger = class {
 // src/sync/commit-builder.js
 var BATCH_BYTE_LIMIT = 80 * 1024 * 1024;
 var DEFAULT_REQUEST_LIMIT = 32 * 1024 * 1024;
+var DELETE_ENTRY_BUDGET = 256;
 var CommitBuilder = class {
   constructor({ requestLimit = DEFAULT_REQUEST_LIMIT, batchByteLimit = BATCH_BYTE_LIMIT } = {}) {
     this.requestLimit = requestLimit;
@@ -1956,6 +2037,12 @@ var CommitBuilder = class {
     }));
     return { batches, skipped };
   }
+  /**
+   * 按请求体积拆分批次。预算统一用 base64 编码后体积(与单文件预检同口径):
+   * 实际网络请求按编码后大小计,原始字节预算会使单批实际请求超出约 1/3。
+   * 删除条目按固定开销计入预算(树 API 只写 sha,开销很小但非零),
+   * 且不与上传批次无限绑定——超过预算的删除独立成批,避免最后一批失控。
+   */
   _chunk(uploads, deletions) {
     const chunks = [];
     let current = { uploads: [], deletions: [], size: 0, deletePaths: [] };
@@ -1965,14 +2052,16 @@ var CommitBuilder = class {
       current = { uploads: [], deletions: [], size: 0, deletePaths: [] };
     };
     for (const item of uploads) {
-      const size = item.bytes ? item.bytes.length : 0;
+      const size = this._encodedSize(item.bytes);
       if (current.size + size > this.batchByteLimit && current.uploads.length > 0) flush();
       current.uploads.push(item);
       current.size += size;
     }
     for (const d of deletions) {
+      if (current.size + DELETE_ENTRY_BUDGET > this.batchByteLimit && (current.uploads.length > 0 || current.deletions.length > 0)) flush();
       current.deletions.push(d);
       current.deletePaths.push({ path: d.path, sha: d.remoteSha });
+      current.size += DELETE_ENTRY_BUDGET;
     }
     flush();
     return chunks;
@@ -2021,6 +2110,13 @@ var ConflictService = class {
    *   snapshots:{baseB64,localB64,remoteB64}}]}
    */
   async saveSet(opts) {
+    const previous = this.openSet(opts.repoKey);
+    const previousDecisions = /* @__PURE__ */ new Map();
+    if (previous) {
+      for (const c of previous.conflicts || []) {
+        if (c && c.path && c.decision && c.decision !== "later") previousDecisions.set(c.path, c.decision);
+      }
+    }
     const conflicts = (opts.conflicts || []).map((c) => ({
       path: c.path,
       reason: c.reason || "",
@@ -2028,14 +2124,14 @@ var ConflictService = class {
       localSha: c.localSha || null,
       remoteSha: c.remoteSha || null,
       snapshots: this._capSnapshots(c.snapshots),
-      status: "open",
-      decision: null
+      status: previousDecisions.has(c.path) ? "decided" : "open",
+      decision: previousDecisions.has(c.path) ? previousDecisions.get(c.path) : null
     }));
     const set = {
       repoKey: opts.repoKey,
       operationId: opts.operationId,
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-      status: "open",
+      status: conflicts.every((c) => c.status !== "open") ? "decided" : "open",
       conflicts
     };
     for (const [key, s] of Object.entries(this.sets)) {
@@ -2057,13 +2153,21 @@ var ConflictService = class {
     if (set.conflicts.every((c) => c.status !== "open")) set.status = "decided";
     await this._persist();
   }
-  /** 收集一个冲突集的覆盖决策(供引擎重新规划) */
+  /**
+   * 收集一个冲突集的覆盖决策(供引擎重新规划)。
+   * "resolved"(用户已手动编辑)按 keep_local 执行: 用户编辑后的本地内容即最新事实,
+   * 忽略它会导致用户的修改被静默跳过、同一文件反复回到冲突中心。
+   */
   collectOverrides(operationId) {
     const set = this.sets[operationId];
     if (!set) return /* @__PURE__ */ new Map();
     const overrides = /* @__PURE__ */ new Map();
     for (const c of set.conflicts) {
-      if (c.decision === "keep_local" || c.decision === "keep_remote") overrides.set(c.path, c.decision);
+      if (c.decision === "keep_local" || c.decision === "keep_remote") {
+        overrides.set(c.path, c.decision);
+      } else if (c.decision === "resolved") {
+        overrides.set(c.path, "keep_local");
+      }
     }
     return overrides;
   }
@@ -2145,11 +2249,16 @@ var RebuildService = class {
       });
     }
     const local = /* @__PURE__ */ new Map();
+    const unreadable = [];
     for (const file of scan.files) {
       const format = this._format(file.path);
-      const blob = await this.contentAdapter.readFileBlob(file.path, format);
-      const bytes = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
-      local.set(file.path, await this.provider.gitBlobSha(bytes));
+      try {
+        const blob = await this.contentAdapter.readFileBlob(file.path, format);
+        const bytes = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
+        local.set(file.path, await this.provider.gitBlobSha(bytes));
+      } catch (err) {
+        unreadable.push({ path: file.path, reason: String(err && err.message || err) });
+      }
     }
     const head = await this.provider.getBranchHead();
     const commit = await this.provider.getCommit(head.sha);
@@ -2173,6 +2282,7 @@ var RebuildService = class {
     const manifestPaths = this.manifestStore ? [...this.manifestStore.paths] : [];
     const actualPaths = /* @__PURE__ */ new Set([...local.keys(), ...remote.keys()]);
     const manifestResidual = manifestPaths.filter((path) => !actualPaths.has(path));
+    const strayNotebookPaths = await this._strayNotebookPaths([...local.keys(), ...remote.keys()]);
     return {
       inspectedAt: (/* @__PURE__ */ new Date()).toISOString(),
       remoteHead: head.sha,
@@ -2182,10 +2292,28 @@ var RebuildService = class {
       different,
       onlyLocal,
       onlyRemote,
+      unreadable,
       manifestResidual,
+      strayNotebookPaths,
       baseCommit: this.metadataStore.getBaseCommit(repoKey),
       conflictResidual: openSet ? (openSet.conflicts || []).filter((item) => item.status === "open").length : 0
     };
+  }
+  /** 磁盘/远端存在但不在内核笔记本列表中的 data/<id>/ 路径(列表不可得时不判定) */
+  async _strayNotebookPaths(paths) {
+    if (!this.workspace || typeof this.workspace.getNotebooks !== "function") return [];
+    let notebooks;
+    try {
+      notebooks = await this.workspace.getNotebooks();
+    } catch (err) {
+      return [];
+    }
+    const ids = new Set((notebooks || []).map((n) => n && n.id).filter(Boolean));
+    if (ids.size === 0) return [];
+    return paths.filter((path) => {
+      const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
+      return !!m && !ids.has(m[1]);
+    });
   }
   _format(path) {
     return this.config.syncFileType === "markdown" && /\.sy$/i.test(path) ? "markdown" : "raw";
@@ -2274,12 +2402,15 @@ var SyncQueue = class {
 // src/sync/retry-policy.js
 var NETWORK_MAX = 3;
 var REMOTE_CHANGED_MAX = 4;
+var RATE_LIMIT_MAX = 2;
+var MAX_RATE_LIMIT_WAIT_MS = 2 * 60 * 1e3;
 var BASE_DELAYS_MS = [1e3, 3e3, 9e3];
 var DEFAULT_RETRYABLE_CATEGORIES = Object.freeze([
   SyncErrorCategory.NETWORK,
   SyncErrorCategory.TIMEOUT,
   SyncErrorCategory.REMOTE_CHANGED,
-  SyncErrorCategory.PUSH_REJECTED
+  SyncErrorCategory.PUSH_REJECTED,
+  SyncErrorCategory.RATE_LIMIT
 ]);
 var NO_RETRY_CATEGORIES = [
   SyncErrorCategory.AUTH,
@@ -2307,8 +2438,17 @@ var RetryPolicy = class {
     if (!(err instanceof SyncError)) return notEligible("非 SyncError");
     if (NO_RETRY_CATEGORIES.indexOf(category) >= 0) return notEligible("该错误类型不自动重试");
     const casRace = category === SyncErrorCategory.REMOTE_CHANGED || category === SyncErrorCategory.PUSH_REJECTED;
-    if (!this.enabled && !casRace) return notEligible("自动重试未开启");
+    const rateLimit = category === SyncErrorCategory.RATE_LIMIT;
+    if (!this.enabled && !casRace && !rateLimit) return notEligible("自动重试未开启");
     if (err.retryable === false) return notEligible("错误标记为不可重试");
+    if (rateLimit) {
+      if (attempt >= RATE_LIMIT_MAX) return notEligible("已达限流重试上限");
+      const wait = Number(err.retryDelayMs) > 0 ? Number(err.retryDelayMs) : 5e3;
+      if (wait > MAX_RATE_LIMIT_WAIT_MS) {
+        return notEligible("限流重置时间过久(" + Math.ceil(wait / 6e4) + " 分钟),不自动等待,请稍后手动同步");
+      }
+      return { retry: true, delayMs: wait + 500, replan: true, reason: "GitHub 限流,按服务端重置时间退避后重新规划" };
+    }
     if (category === SyncErrorCategory.NETWORK || category === SyncErrorCategory.TIMEOUT) {
       if (attempt >= NETWORK_MAX) return notEligible("已达网络类重试上限");
       return { retry: true, delayMs: this._delay(attempt), replan: false, reason: "网络类暂态错误" };
@@ -2438,6 +2578,8 @@ var SyncTrigger = Object.freeze({
   STARTUP: "startup",
   RETRY: "retry",
   CONFLICT_RESOLUTION: "conflict_resolution",
+  /** 冲突决策执行成功后的验证轮: 确认结果收敛(第二次同步应为 0 变更/0 冲突) */
+  VERIFY: "verify",
   REBUILD: "rebuild",
   DIAGNOSIS: "diagnosis"
 });
@@ -2608,6 +2750,11 @@ var SyncEngine = class {
       this._emit("engine:phase", { ctx, state: SyncState.PLANNING });
       ctx.expectedRemoteHead = remoteHead ? remoteHead.sha : null;
       const overrides = ctx.overrides || /* @__PURE__ */ new Map();
+      const firstSyncBothSides = !baseResolution.baseSha && baseEntries.size === 0 && scan.files.length > 0 && remoteEntries.size > 0;
+      const downloadLimit = this.commitBuilder && this.commitBuilder.requestLimit || 0;
+      const blockedDownloads = new Map(
+        downloadLimit > 0 ? [...remoteEntries].filter(([, e]) => (e.size || 0) > downloadLimit).map(([p, e]) => [p, e.size || 0]) : []
+      );
       const plan = await this.planner.build({
         baseEntries,
         remoteEntries,
@@ -2617,12 +2764,14 @@ var SyncEngine = class {
         overrides,
         enumErrorOccurred: scan.enumErrorOccurred,
         bootstrap: ctx.bootstrapDownload === true,
-        remoteCommitDate: ctx.remoteCommitDate
+        remoteCommitDate: ctx.remoteCommitDate,
+        allowTimeArbitration: !firstSyncBothSides,
+        blockedDownloads
       });
       ctx.plan = plan;
       transition(ctx, SyncState.MERGING);
       this._emit("engine:phase", { ctx, state: SyncState.MERGING });
-      await this._runMerges(ctx, plan, baseEntries);
+      await this._runMerges(ctx, plan);
       if (plan.conflicts.length > 0) {
         await this._saveConflicts(ctx, plan);
         transition(ctx, SyncState.CONFLICT_PAUSED, "conflicts=" + plan.conflicts.length);
@@ -2639,8 +2788,9 @@ var SyncEngine = class {
       }
       const remoteWrites = plan.uploads.length + plan.deletionsRemote.length;
       if (remoteWrites === 0) {
+        const drifts2 = [];
         try {
-          await this._applyLocalChanges(ctx, plan);
+          await this._applyLocalChanges(ctx, plan, { drifts: drifts2, remoteEntries });
         } catch (err) {
           if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
             return this._pauseLocalChanged(ctx, err);
@@ -2664,11 +2814,14 @@ var SyncEngine = class {
             paths: plan.deletionsLocal.map((item) => item.path)
           });
         }
-        if (remoteHead) {
-          await this.metadataStore.setConfirmedCommit(this.config.repoKey, remoteHead.sha, ctx.id);
+        ctx.canonicalDrifts = drifts2.length;
+        const driftSha2 = await this._applyCanonicalCorrections(ctx, drifts2);
+        const confirmedSha2 = driftSha2 || (remoteHead ? remoteHead.sha : null);
+        if (confirmedSha2) {
+          await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha2, ctx.id);
         }
         transition(ctx, SyncState.SUCCESS, "无远端变更");
-        finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, remoteHead ? remoteHead.sha : null, plan) });
+        finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, confirmedSha2, plan) });
         return ctx.result;
       }
       transition(ctx, SyncState.COMMITTING);
@@ -2702,14 +2855,19 @@ var SyncEngine = class {
           recoverable: false
         });
       }
+      await this._writeMergedResults(ctx, plan);
+      const drifts = [];
       try {
-        await this._applyLocalChanges(ctx, plan);
+        await this._applyLocalChanges(ctx, plan, { drifts, remoteEntries });
       } catch (err) {
         if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
           return this._pauseLocalChanged(ctx, err);
         }
         throw err;
       }
+      ctx.canonicalDrifts = drifts.length;
+      const driftSha = await this._applyCanonicalCorrections(ctx, drifts);
+      const confirmedSha = driftSha || push.baseSha || push.finalSha;
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: plan.deletionsRemote.length > 0 });
       if (plan.skippedDeletes.length > 0) {
         this._emit("engine:operation", {
@@ -2728,12 +2886,9 @@ var SyncEngine = class {
         });
       }
       if (skipped.length > 0) {
-        if (push.baseSha) {
-          await this.metadataStore.setConfirmedCommit(this.config.repoKey, push.baseSha, ctx.id);
-        }
+        await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
         throw this._skippedError(skipped, plan, "部分大文件未上传,本轮不标记完整成功");
       }
-      const confirmedSha = push.baseSha || push.finalSha;
       if (confirmedSha) {
         await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
       }
@@ -2880,6 +3035,20 @@ var SyncEngine = class {
    * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
    * 本地为准方向若本地枚举异常,禁止删远端(可能因漏扫而误删)。
    */
+  /**
+   * 内核已注册的笔记本 id 集合(重建"以本地为准"的本地全貌依据)。
+   * 不可用/失败/为空返回 null: 表示无法判定,禁止做残留清理(宁可漏删不可误删)。
+   */
+  async _registeredNotebookIds() {
+    if (!this.workspace || typeof this.workspace.getNotebooks !== "function") return null;
+    try {
+      const notebooks = await this.workspace.getNotebooks();
+      const ids = (notebooks || []).map((n) => n && n.id).filter(Boolean);
+      return ids.length > 0 ? new Set(ids) : null;
+    } catch (err) {
+      return null;
+    }
+  }
   async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false } = {}) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {
@@ -2918,8 +3087,19 @@ var SyncEngine = class {
     const remotePaths = new Set(remoteEntries.keys());
     transition(ctx, SyncState.MERGING);
     this._emit("engine:phase", { ctx, state: SyncState.MERGING });
+    const registeredIds = keepLocal && rebuildRemote ? await this._registeredNotebookIds() : null;
+    const isStray = (path) => {
+      if (!registeredIds) return false;
+      const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
+      return !!m && !registeredIds.has(m[1]);
+    };
     if (keepLocal) {
+      const strayLocal = [];
       for (const path of localPaths) {
+        if (isStray(path)) {
+          strayLocal.push(path);
+          continue;
+        }
         const remoteEntry = remoteEntries.get(path);
         if (remoteEntry && remoteEntry.sha === localShas.get(path)) {
           plan.unchanged += 1;
@@ -2928,9 +3108,13 @@ var SyncEngine = class {
         plan.uploads.push({ path, op: remoteEntry ? "update" : "create" });
       }
       for (const path of remotePaths) {
-        if (!localPaths.has(path)) {
+        if (!localPaths.has(path) || isStray(path)) {
           plan.deletionsRemote.push({ path, remoteSha: remoteEntries.get(path).sha });
         }
+      }
+      for (const path of strayLocal) {
+        plan.deletionsLocal.push({ path });
+        localShas.delete(path);
       }
     } else {
       for (const path of remotePaths) {
@@ -2981,17 +3165,30 @@ var SyncEngine = class {
           throw this._skippedError(skipped, plan, "强制方向(以本地为准)部分大文件未上传,本轮不标记完整成功");
         }
         confirmedSha = push.baseSha || push.finalSha;
-        if (rebuildRemote) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localPaths);
       }
+      if (plan.deletionsLocal.length > 0) {
+        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: true });
+        this._emit("engine:operation", {
+          ctx,
+          operation: "本地残留(不在笔记本列表)已清理",
+          count: plan.deletionsLocal.length,
+          paths: plan.deletionsLocal.map((item) => item.path)
+        });
+      }
+      if (rebuildRemote && remoteWrites > 0) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localShas);
     } else {
+      const drifts = [];
       try {
-        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote });
+        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote, drifts, remoteEntries });
       } catch (err) {
         if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
           return this._pauseLocalChanged(ctx, err);
         }
         throw err;
       }
+      ctx.canonicalDrifts = drifts.length;
+      const driftSha = await this._applyCanonicalCorrections(ctx, drifts);
+      if (driftSha) confirmedSha = driftSha;
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
     }
     if (confirmedSha) {
@@ -3001,20 +3198,31 @@ var SyncEngine = class {
     finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, confirmedSha, plan) });
     return ctx.result;
   }
-  async _assertRemoteMatchesLocal(ctx, commitSha, localPaths) {
+  /**
+   * 以本地为准重建后的回读校验: 逐路径比对存在性**与内容 sha**,
+   * 任何残留/缺失/内容不一致都以可见错误结束且不推进 BASE。
+   */
+  async _assertRemoteMatchesLocal(ctx, commitSha, localShas) {
     const commit = await this.provider.getCommit(commitSha);
     const remoteEntries = this._withoutIgnoredEntries(await this._treeMap(await this.provider.getTree(commit.treeSha)));
     const remotePaths = new Set(remoteEntries.keys());
+    const localPaths = new Set(localShas.keys());
     const residual = [...remotePaths].filter((path) => !localPaths.has(path));
     const missing = [...localPaths].filter((path) => !remotePaths.has(path));
-    if (residual.length || missing.length) {
+    const mismatched = [...localPaths].filter((path) => remotePaths.has(path) && remoteEntries.get(path).sha !== localShas.get(path)).map((path) => path + " (远端 " + String(remoteEntries.get(path).sha).slice(0, 8) + " vs 本地 " + String(localShas.get(path)).slice(0, 8) + ")");
+    if (residual.length || missing.length || mismatched.length) {
       throw new SyncError({
         category: SyncErrorCategory.GIT,
         code: "REBUILD_VERIFY_FAILED",
         operation: "verifyRebuild",
         phase: SyncState.VERIFYING_REMOTE_HEAD,
         message: "以本地为准重建后远端文件仍不一致",
-        detail: "远端残留: " + residual.slice(0, 20).join(", ") + "；远端缺失: " + missing.slice(0, 20).join(", ") + "，操作=" + ctx.id,
+        detail: [
+          residual.length ? "远端残留: " + residual.slice(0, 20).join(", ") : "",
+          missing.length ? "远端缺失: " + missing.slice(0, 20).join(", ") : "",
+          mismatched.length ? "内容不一致: " + mismatched.slice(0, 20).join("; ") : "",
+          "操作=" + ctx.id
+        ].filter(Boolean).join("；"),
         retryable: false,
         recoverable: true
       });
@@ -3044,7 +3252,8 @@ var SyncEngine = class {
       });
       if (result.merged) {
         const format = this._docFormat(path);
-        await this.contentAdapter.writeFileBlob(path, new Blob([result.content]), format, "update");
+        plan.mergedWrites = plan.mergedWrites || [];
+        plan.mergedWrites.push({ path, bytes: result.content, format });
         plan.uploads.push({ path, bytes: result.content, op: "update", merged: true });
       } else {
         plan.conflicts.push({
@@ -3057,6 +3266,60 @@ var SyncEngine = class {
       }
     }
     plan.merges.length = 0;
+  }
+  /** 推送确认后把合并结果写入本地(与 _runMerges 的暂存配对) */
+  async _writeMergedResults(ctx, plan) {
+    const writes = plan.mergedWrites || [];
+    for (const item of writes) {
+      await this.contentAdapter.writeFileBlob(item.path, new Blob([item.bytes]), item.format, "update");
+    }
+    if (writes.length > 0) {
+      this._emit("engine:operation", {
+        ctx,
+        operation: "合并结果已写入本地",
+        count: writes.length,
+        paths: writes.map((w) => w.path)
+      });
+    }
+    plan.mergedWrites = [];
+  }
+  /**
+   * markdown 往返漂移修正(canonical drift):
+   * 下载导入后再次导出的内容若与远端不一致(思源 md 导入/导出非恒等变换),
+   * 把"回读到的 canonical 内容"在同一轮内补推为修正提交。否则本地每轮都会
+   * 被判为"已修改"重新上传,两台设备互相制造假修改 → 冲突永不收敛。
+   * @returns {Promise<string|null>} 修正提交确认后的 BASE sha(无漂移时为 null)
+   */
+  async _applyCanonicalCorrections(ctx, drifts) {
+    const items = (drifts || []).filter((d) => d.bytes && d.bytes.length > 0);
+    if (items.length === 0) return null;
+    this._emit("engine:operation", {
+      ctx,
+      operation: "markdown 往返漂移已修正",
+      count: items.length,
+      paths: items.map((d) => d.path)
+    });
+    const { batches, skipped } = this.commitBuilder.build({
+      operationId: ctx.id + "-drift",
+      uploads: items.map((d) => ({ path: d.path, bytes: d.bytes, op: "update", canonicalDrift: true })),
+      deletionsRemote: []
+    });
+    if (batches.length === 0) {
+      throw this._skippedError(skipped, { uploads: items, deletionsRemote: [] }, "canonical 修正写入全部被跳过");
+    }
+    if (ctx.state === SyncState.MERGING) transition(ctx, SyncState.COMMITTING);
+    const push = await this._pushAtomic(ctx, batches);
+    if (!push || !push.finalSha) {
+      throw new SyncError({
+        category: SyncErrorCategory.REMOTE_CHANGED,
+        code: "PUSH_UNCONFIRMED",
+        operation: "pushCorrections",
+        message: "canonical 修正推送后无法确认远端引用状态,本轮不标记成功",
+        retryable: true,
+        recoverable: false
+      });
+    }
+    return push.baseSha || push.finalSha;
   }
   async _pauseLocalChanged(ctx, err) {
     ctx.conflicts = [{
@@ -3222,9 +3485,19 @@ var SyncEngine = class {
    * 远端确认后应用本地侧变更(下载/本地删除)。
    * M5: 破坏性写入前复查本地与快照是否一致,同步期间被用户修改/新建的文件一律
    * 中止覆盖,抛出可恢复错误,下一轮重新规划。
+   * canonical 漂移检测: markdown 文档写入后回读导出,与远端树 sha 不一致时记录
+   * 漂移(drifts),由 _applyCanonicalCorrections 同轮补推修正提交。
    */
-  async _applyLocalChanges(ctx, plan, { allowRebuildOverwrite = false } = {}) {
+  async _applyLocalChanges(ctx, plan, { allowRebuildOverwrite = false, drifts = null, remoteEntries = /* @__PURE__ */ new Map() } = {}) {
+    const downloadLimit = this.commitBuilder && this.commitBuilder.requestLimit || 0;
     for (const item of plan.downloads) {
+      const entry = remoteEntries.get(item.path);
+      const remoteSize = entry && entry.size || 0;
+      if (downloadLimit > 0 && remoteSize > downloadLimit) {
+        plan.skippedLargeDownloads = plan.skippedLargeDownloads || [];
+        plan.skippedLargeDownloads.push({ path: item.path, size: remoteSize });
+        continue;
+      }
       if (item.op === "update") {
         if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
       } else if (!allowRebuildOverwrite) {
@@ -3238,6 +3511,14 @@ var SyncEngine = class {
       const blob = new Blob([src.bytes]);
       const writeOp = item.op === "create" && !localExistsNow ? "create" : "update";
       await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), writeOp);
+      if (drifts && this._docFormat(item.path) === "markdown") {
+        const reBytes = await this._mergeLocalBytes(item.path);
+        const reSha = reBytes ? await this.provider.gitBlobSha(reBytes) : null;
+        const expectedSha = (remoteEntries.get(item.path) || {}).sha || null;
+        if (reSha !== expectedSha) {
+          drifts.push({ path: item.path, bytes: reBytes, expectedSha, actualSha: reSha });
+        }
+      }
     }
     for (const item of plan.deletionsLocal) {
       if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
@@ -3246,14 +3527,32 @@ var SyncEngine = class {
     if (plan.deletionsLocal.length > 0) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
+    if ((plan.skippedLargeDownloads || []).length > 0) {
+      this._emit("engine:operation", {
+        ctx,
+        operation: "超大远端文件已跳过下载",
+        count: plan.skippedLargeDownloads.length,
+        paths: plan.skippedLargeDownloads.map((item) => item.path)
+      });
+    }
     if (plan.downloads.length > 0 && !plan.downloads.some((item) => /\.sy$/i.test(item.path))) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
   }
-  /** 断言本地文件自快照以来未变化(sha 级复查);缺失即视为变化 */
+  /** 断言本地文件自快照以来未变化(sha 级复查);快照无记录或内容变化一律中止 */
   async _assertLocalUnchanged(ctx, path, message) {
     const snapshotSha = (ctx.snapshotRawShas || /* @__PURE__ */ new Map()).get(path);
-    if (snapshotSha === void 0) return;
+    if (snapshotSha === void 0) {
+      throw new SyncError({
+        category: SyncErrorCategory.CONFLICT,
+        code: "LOCAL_CHANGED",
+        operation: "applyLocalChanges",
+        path,
+        message: "本地快照缺少该文件的复查记录,已中止覆盖: " + path,
+        retryable: false,
+        recoverable: true
+      });
+    }
     await this._localShaOrThrow(path, snapshotSha, message);
   }
   /** 断言下载-create 目标在快照后仍未出现(出现即视为同步期间的新建,不得覆盖) */
@@ -3318,6 +3617,10 @@ var SyncEngine = class {
       skippedDeletes: plan.skippedDeletes.length,
       skippedDeleteReasons: plan.skippedDeletes,
       skippedLarge: (ctx.skippedLarge || []).length,
+      skippedLargeDownloads: (plan.skippedLargeDownloads || []).length,
+      // canonical 漂移修正不在 uploads 计数内(内容以回读版本为准),单独可见:
+      // 修正提交会让远端 HEAD 前移,结果不体现会表现为"零操作却有新提交"
+      canonicalDrifts: ctx.canonicalDrifts || 0,
       unchanged: plan.unchanged,
       conflicts: 0
     };
@@ -3511,7 +3814,7 @@ var SyncController = class {
           }));
           return result;
         }
-        this.logger.info("同步完成 #" + ctx.id + " ↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) + " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) + " 拦删" + (result.skippedDeletes || 0) + " 超大" + (result.skippedLarge || 0));
+        this.logger.info("同步完成 #" + ctx.id + " ↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) + " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) + " 拦删" + (result.skippedDeletes || 0) + " 超大" + (result.skippedLarge || 0) + " 大跳下" + (result.skippedLargeDownloads || 0) + " 漂移修" + (result.canonicalDrifts || 0));
         await this._onFinished(ctx, result);
         return result;
       } catch (err) {
@@ -3630,9 +3933,17 @@ var SyncController = class {
     this.events.emit("state:changed", { state: this.state, ctx, error: syncErr });
     this.events.emit("sync:error", { ctx, error: syncErr });
   }
-  /** 用户冲突决策: 逐文件 keep_local/keep_remote → 重新规划执行 */
+  /**
+   * 用户冲突决策: 逐文件 keep_local/keep_remote/resolved → 重新规划执行。
+   * "resolved"(用户已手动编辑)等价 keep_local: 本地当前内容即最新事实。
+   * 执行成功后自动追加一轮验证同步(决策闭环): 若决策未完全生效(重规划又产生
+   * 同样的冲突),验证轮会重新暂停并向用户暴露,而不是静默关闭冲突集。
+   */
   async resolveConflicts(decisions) {
     const overrides = decisions instanceof Map ? new Map(decisions) : new Map(Object.entries(decisions || {}));
+    for (const [path, decision] of overrides) {
+      if (decision === "resolved") overrides.set(path, "keep_local");
+    }
     const valid = [...overrides.entries()].filter(
       ([path, decision]) => path === "__base__" || decision === "keep_local" || decision === "keep_remote"
     );
@@ -3653,7 +3964,28 @@ var SyncController = class {
     if (this.conflictPaused && this.conflictPaused.kind === "BASE_UNRESOLVED") {
       return this._resolveBaseUnresolved(accepted);
     }
-    return this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, overrides: accepted });
+    const result = await this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, overrides: accepted });
+    if (result && result.success) {
+      await this._verifyResolution();
+    }
+    return result;
+  }
+  /**
+   * 冲突决策验证轮: 决策执行成功后再跑一次同步,确认结果收敛(第二次同步应为
+   * 0 变更/0 冲突)。若验证轮再次暂停,说明决策未完全生效或仍有未处理冲突,
+   * 暂停门与冲突对话框会重新出现——让"决策是否生效"始终可见。
+   */
+  async _verifyResolution() {
+    try {
+      this.logger.info("冲突处理: 决策执行成功,开始验证轮同步");
+      const verify = await this.syncNow({ trigger: SyncTrigger.VERIFY });
+      if (verify && verify.success) {
+        const r = verify;
+        this.logger.info("冲突决策验证通过: ↑" + (r.uploads || 0) + " ↓" + (r.downloads || 0) + " 删远" + (r.deletionsRemote || 0) + " 删本" + (r.deletionsLocal || 0) + ",结果已收敛");
+      }
+    } catch (err) {
+      this.logger.warn("冲突决策验证轮未通过: " + String(err && err.message || err));
+    }
   }
   /** 基准失效恢复: 明确选择一方为新基准后执行一次强制方向同步 */
   async _resolveBaseUnresolved(overrides) {
@@ -3667,7 +3999,7 @@ var SyncController = class {
     }
     const mode = choice === "keep_local" ? SyncMode.LOCAL_OVER_REMOTE : SyncMode.REMOTE_OVER_LOCAL;
     const result = await this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, mode });
-    if (result && result.result && result.result.success) {
+    if (result && result.success) {
       const key = this.repoKey();
       if (this._conflictByRepo.has(key)) {
         this._conflictByRepo.delete(key);
@@ -3697,6 +4029,7 @@ var SyncMetadataStore = class {
   constructor(plugin) {
     this.plugin = plugin;
     this.data = { schemaVersion: SCHEMA_VERSION, repositories: {}, legacyHints: {} };
+    this.versionMismatch = false;
   }
   static keyOf({ provider, owner, repo, branch }) {
     return provider + ":" + owner + "/" + repo + ":" + branch;
@@ -3705,6 +4038,17 @@ var SyncMetadataStore = class {
     try {
       const data = await this.plugin.loadData(METADATA_FILE);
       if (data && typeof data === "object") {
+        this.versionMismatch = Number(data.schemaVersion) > SCHEMA_VERSION;
+        if (this.versionMismatch) {
+          throw new SyncError({
+            category: SyncErrorCategory.LOCAL_FILE,
+            code: "METADATA_VERSION_TOO_NEW",
+            operation: "loadMetadata",
+            message: "同步元数据 schema 版本更新(文件 v" + data.schemaVersion + " > 插件 v" + SCHEMA_VERSION + "),拒绝按旧语义读取。请升级插件后使用",
+            retryable: false,
+            recoverable: true
+          });
+        }
         this.data = {
           schemaVersion: data.schemaVersion || SCHEMA_VERSION,
           repositories: data.repositories || {},
@@ -3712,7 +4056,9 @@ var SyncMetadataStore = class {
         };
       }
     } catch (err) {
-      if (err && !/not found|不存在/i.test(String(err.message || err))) {
+      if (err instanceof SyncError) throw err;
+      const notFound = err && err.code === "FILE_NOT_FOUND" || /not found|不存在/i.test(String(err && err.message || err));
+      if (!notFound) {
         throw new SyncError({
           category: SyncErrorCategory.LOCAL_FILE,
           code: "METADATA_LOAD_FAILED",
@@ -4640,9 +4986,10 @@ var NotificationService = class {
 };
 
 // src/ui/conflict-dialog.js
+var STATUS_LABELS = { open: "待处理", decided: "已决策" };
 var ConflictDialog = class {
   /**
-   * @param {object} deps {q, i18n, conflictService, onDecide(async decisionsMap), notify}
+   * @param {object} deps {q, i18n, conflictService, onDecide(async decisionsMap), notify, logger}
    */
   constructor(deps) {
     this.q = deps.q;
@@ -4656,6 +5003,8 @@ var ConflictDialog = class {
     } };
     this.dialog = null;
     this.set = null;
+    this._kernel = null;
+    this._nameIndex = null;
   }
   /** 展示一个冲突集;conflictSet 为 ConflictService.saveSet 返回值 */
   show(conflictSet) {
@@ -4664,15 +5013,16 @@ var ConflictDialog = class {
     const t = this.i18n;
     this.dialog = new q2.Dialog({
       title: t && t.gSyncConflictTitle || "⚠️ 检测到同步冲突",
-      content: '<div id="sygspConflictDialog" class="fn__flex-column" style="padding:16px;gap:8px;"></div>',
-      width: "720px",
-      height: "60vh",
+      content: '<div id="sygspConflictDialog" class="fn__flex-column" style="padding:16px;gap:10px;"></div>',
+      width: "760px",
+      height: "68vh",
       destroyCallback: () => {
         this.dialog = null;
       }
     });
     const root = this.dialog.element.querySelector("#sygspConflictDialog");
     this._render(root, conflictSet);
+    this._resolveNames(conflictSet);
   }
   close() {
     if (this.dialog) {
@@ -4680,46 +5030,125 @@ var ConflictDialog = class {
       this.dialog = null;
     }
   }
+  /** 解析笔记本名与文档标题,完成后用友好名重渲染(失败静默保持原始路径) */
+  async _resolveNames(set) {
+    if (!this._kernel) return;
+    const index = { notebooks: /* @__PURE__ */ new Map(), docs: /* @__PURE__ */ new Map() };
+    try {
+      const res = await this._kernel.lsNotebooks();
+      for (const n of res && res.notebooks || []) {
+        if (n && n.id) index.notebooks.set(n.id, n.name || n.id);
+      }
+    } catch (err) {
+      this.logger.warn("冲突中心: 笔记本名解析失败 " + String(err && err.message || err));
+    }
+    try {
+      const res = await this._kernel.sql("select id, content, hpath from blocks where type = 'd'");
+      for (const row of res || []) {
+        if (row && row.id) index.docs.set(row.id, row.content || row.hpath || row.id);
+      }
+    } catch (err) {
+      this.logger.warn("冲突中心: 文档名解析失败 " + String(err && err.message || err));
+    }
+    if (this.dialog && this.set && this.set.operationId === set.operationId) {
+      this._nameIndex = index;
+      const root = this.dialog.element.querySelector("#sygspConflictDialog");
+      if (root) this._render(root, this.set);
+    }
+  }
+  /**
+   * 路径 → 友好名称。
+   * - .sy 文档: "笔记本名 / 文档标题";
+   * - .siyuan/conf.json: "笔记本配置";
+   * - 其余(assets 等): "笔记本名 / 文件名"。
+   * @returns {{title:string, sub:string}} title 为友好名,sub 为原始路径(小字展示,保留可诊断性)
+   */
+  _friendlyLabel(path) {
+    const sub = String(path || "");
+    const idx = this._nameIndex;
+    const segments = sub.replace(/\\/g, "/").split("/").filter(Boolean);
+    let notebookId = "";
+    if (segments[0] === "data" && segments[1]) notebookId = segments[1];
+    const notebookName = idx && notebookId && idx.notebooks.get(notebookId) || notebookId;
+    const fileName = segments[segments.length - 1] || sub;
+    if (/\.siyuan\//.test(sub)) {
+      const isConf = fileName === "conf.json";
+      return { title: (isConf ? "笔记本配置" : "笔记本系统文件") + (notebookName ? "(" + notebookName + ")" : ""), sub };
+    }
+    if (/\.sy$/i.test(fileName)) {
+      const docId = fileName.replace(/\.sy$/i, "");
+      const docTitle = idx && idx.docs.get(docId) || docId;
+      return { title: (notebookName ? notebookName + " / " : "") + docTitle, sub };
+    }
+    return { title: (notebookName ? notebookName + " / " : "") + fileName, sub };
+  }
   _render(root, set) {
     const t = this.i18n;
     root.textContent = "";
+    const openConflicts = (set.conflicts || []).filter((c) => c && (!c.status || c.status === "open"));
+    const decidedCount = (set.conflicts || []).length - openConflicts.length;
     const desc = document.createElement("div");
     desc.className = "b3-label__text";
-    desc.textContent = t && t.gSyncConflictDesc || "本地与远端的数据同时被修改,自动同步已暂停。请选择处理方式:";
+    desc.textContent = t && t.gSyncConflictDesc || "本地与远端的数据同时被修改,自动同步已暂停。请逐个选择处理方式,全部处理完毕后自动执行:";
     root.appendChild(desc);
-    const count = document.createElement("div");
-    count.className = "ft__on-surface";
-    count.textContent = t && t.sygspConflictCount || "冲突文件: " + set.conflicts.length;
-    root.appendChild(count);
+    const summary = document.createElement("div");
+    summary.className = "ft__on-surface";
+    summary.style.fontSize = "12px";
+    summary.textContent = "共 " + (set.conflicts || []).length + " 个冲突文件" + (decidedCount > 0 ? " · 已处理 " + decidedCount + " · 待处理 " + openConflicts.length : "");
+    root.appendChild(summary);
     const list = document.createElement("div");
     list.className = "fn__flex-1";
     list.style.overflow = "auto";
-    for (const conflict of set.conflicts) {
+    if (openConflicts.length === 0) {
+      const done = document.createElement("div");
+      done.className = "b3-label__text";
+      done.textContent = "全部冲突已决策,正在执行…";
+      list.appendChild(done);
+    }
+    for (const conflict of set.conflicts || []) {
       list.appendChild(this._conflictRow(conflict));
     }
     root.appendChild(list);
-    root.appendChild(this._actionBar(set));
+    root.appendChild(this._actionBar(set, openConflicts.length));
   }
   _conflictRow(conflict) {
     const t = this.i18n;
     const row = document.createElement("div");
     row.className = "b3-label";
     row.dataset.path = conflict.path;
-    const pathLine = document.createElement("div");
-    pathLine.className = "fn__flex";
-    pathLine.style.alignItems = "center";
+    row.style.cssText = "margin:0 0 8px;padding:10px 12px;border:1px solid var(--b3-border-color);border-radius:6px;";
+    const label = this._friendlyLabel(conflict.path);
+    const titleLine = document.createElement("div");
+    titleLine.className = "fn__flex";
+    titleLine.style.alignItems = "center";
+    titleLine.style.gap = "8px";
     const name = document.createElement("span");
-    name.className = "fn__flex-1 ft__breakword";
-    name.textContent = conflict.path;
-    pathLine.appendChild(name);
+    name.className = "fn__flex-1";
+    name.style.fontWeight = "600";
+    name.style.wordBreak = "break-all";
+    name.textContent = label.title;
+    titleLine.appendChild(name);
+    if (conflict.status && conflict.status !== "open") {
+      const badge = document.createElement("span");
+      badge.className = "ft__on-surface";
+      badge.style.fontSize = "12px";
+      badge.textContent = STATUS_LABELS[conflict.status] || conflict.status;
+      titleLine.appendChild(badge);
+    }
+    row.appendChild(titleLine);
+    const pathLine = document.createElement("div");
+    pathLine.className = "ft__on-surface ft__breakword";
+    pathLine.style.fontSize = "12px";
+    pathLine.textContent = conflict.path;
     row.appendChild(pathLine);
     const reason = document.createElement("div");
-    reason.className = "b3-label__text";
-    reason.textContent = conflict.reason || "";
+    reason.className = "ft__on-surface";
+    reason.style.marginTop = "4px";
+    reason.textContent = String(conflict.reason || "").replace(String(conflict.path), "该文件");
     row.appendChild(reason);
     const buttons = document.createElement("div");
     buttons.className = "fn__flex fn__flex-wrap";
-    buttons.style.gap = "8px";
+    buttons.style.cssText = "gap:8px;margin-top:8px;";
     buttons.appendChild(this._btn(t && t.gSyncKeepLocal || "保留本地版本", () => this._decideOne(conflict.path, "keep_local")));
     buttons.appendChild(this._btn(t && t.gSyncKeepRemote || "保留远端版本", () => this._decideOne(conflict.path, "keep_remote")));
     if (conflict.snapshots && (conflict.snapshots.localB64 || conflict.snapshots.remoteB64)) {
@@ -4728,17 +5157,21 @@ var ConflictDialog = class {
     row.appendChild(buttons);
     return row;
   }
-  _actionBar(set) {
+  _actionBar(set, openCount) {
     const t = this.i18n;
     const bar = document.createElement("div");
-    bar.className = "fn__flex";
-    bar.style.gap = "8px";
+    bar.className = "fn__flex fn__flex-wrap";
+    bar.style.cssText = "gap:8px;padding-top:8px;border-top:1px solid var(--b3-border-color);";
     bar.appendChild(this._btn(t && t.sygspKeepAllLocal || "全部保留本地", () => this._decideAll("keep_local"), "b3-button b3-button--text"));
     bar.appendChild(this._btn(t && t.sygspKeepAllRemote || "全部保留远端", () => this._decideAll("keep_remote"), "b3-button b3-button--text"));
     const spacer = document.createElement("div");
     spacer.className = "fn__flex-1";
     bar.appendChild(spacer);
-    bar.appendChild(this._btn(t && t.gSyncLater || "稍后处理", () => this.close(), "b3-button b3-button--cancel"));
+    if (openCount === 0) {
+      bar.appendChild(this._btn("关闭", () => this.close(), "b3-button b3-button--cancel"));
+    } else {
+      bar.appendChild(this._btn(t && t.gSyncLater || "稍后处理", () => this._later(), "b3-button b3-button--cancel"));
+    }
     return bar;
   }
   _btn(label, onClick, cls = "b3-button b3-button--outline") {
@@ -4766,7 +5199,11 @@ var ConflictDialog = class {
     for (const conflict of conflicts) {
       await this.conflictService.decide(operationId, conflict.path, decision);
     }
-    this.close();
+    this.set = this._viewSetAfterDecisions(operationId);
+    if (this.dialog && this.dialog.element) {
+      const root = this.dialog.element.querySelector("#sygspConflictDialog");
+      this._render(root, this.set);
+    }
     await this._flushIfAllDecided(operationId);
   }
   _viewSetAfterDecisions(operationId) {
@@ -4777,7 +5214,18 @@ var ConflictDialog = class {
       conflicts: source.conflicts.filter((c) => c && c.status === "open")
     };
   }
+  /**
+   * 决策执行闸门: 冲突集中**仍有待处理文件时不提交引擎**,
+   * 保持弹窗打开让用户继续决策(修复"每决策一个文件就关闭重开一次"的体验);
+   * 全部决策完毕才收集 overrides 重新规划执行。
+   */
   async _flushIfAllDecided(operationId = this.set.operationId) {
+    const source = this.conflictService.sets[operationId];
+    const openLeft = (source && source.conflicts || []).filter((c) => c && c.status === "open").length;
+    if (openLeft > 0) {
+      this.logger.info("冲突处理: 还有 " + openLeft + " 个文件待决策,暂不执行");
+      return;
+    }
     const overrides = this.conflictService.collectOverrides(operationId);
     if (overrides.size === 0) return;
     if (this.dialog) this.close();
@@ -4787,6 +5235,12 @@ var ConflictDialog = class {
       const msg = err && (err.message || err.toString()) || String(err);
       this.notify("❌ " + (this.i18n && this.i18n.gSyncResolveFailedMsg || "处理冲突的同步失败,冲突仍待处理") + ": " + msg, "error");
     }
+  }
+  /** 稍后处理: 关闭弹窗;已做的决策保留在冲突集中,下次打开继续,不触发执行 */
+  _later() {
+    const operationId = this.set ? this.set.operationId : "";
+    this.logger.info("冲突处理: 用户选择稍后处理" + (operationId ? " #" + operationId : "") + ",已做决策保留");
+    this.close();
   }
   async _exportCopies(conflict) {
     try {
@@ -5079,6 +5533,7 @@ function formatLocalTime(iso) {
   const pad = (n) => String(n).padStart(2, "0");
   return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
 }
+var LEVEL_LABELS = { info: "信息", warn: "警告", error: "错误" };
 var RuntimeLogs = class {
   constructor(limit = 500) {
     this.limit = limit;
@@ -5151,8 +5606,9 @@ var RuntimeLogs = class {
       }
     }
   }
+  /** 渲染: 最新在前(用户最关心最近发生了什么)。存储顺序与容量淘汰逻辑不变 */
   render() {
-    return this.entries.map((e) => "[" + formatLocalTime(e.at) + "] [" + e.level + "] " + e.text).join("\n");
+    return [...this.entries].reverse().map((e) => "[" + formatLocalTime(e.at) + "] [" + (LEVEL_LABELS[e.level] || e.level) + "] " + e.text).join("\n");
   }
 };
 function openLogsDialog({ q: q2, i18n, logs }) {
@@ -5185,7 +5641,7 @@ function openLogsDialog({ q: q2, i18n, logs }) {
   textarea.style.cssText = "font-family:monospace;font-size:12px;min-height:0;resize:none;";
   const fill = () => {
     textarea.value = logs.render() || emptyHint;
-    textarea.scrollTop = textarea.scrollHeight;
+    textarea.scrollTop = 0;
   };
   refresh.addEventListener("click", fill);
   fill();
@@ -6438,8 +6894,9 @@ var SyGspPlugin = class extends q.Plugin {
       "清单残留: " + report.manifestResidual.length,
       "冲突残留: " + report.conflictResidual,
       "当前 BASE: " + (report.baseCommit ? report.baseCommit.slice(0, 8) : "无"),
+      report.strayNotebookPaths && report.strayNotebookPaths.length ? "⚠️ 本地残留(不在笔记本列表,重建时将一并清理): " + report.strayNotebookPaths.length + " 个文件\n  " + report.strayNotebookPaths.slice(0, 10).join("\n  ") + (report.strayNotebookPaths.length > 10 ? "\n  …等共 " + report.strayNotebookPaths.length + " 个" : "") : "",
       "\n请选择重建基准。此操作会清空另一端的同步范围内容。"
-    ];
+    ].filter(Boolean);
     const dialog = new q.Dialog({ title: "同步重建", content: '<div id="sygspRebuild" style="padding:16px;white-space:pre-wrap"></div>', width: "560px" });
     const root = dialog.element.querySelector("#sygspRebuild");
     root.textContent = lines.join("\n");

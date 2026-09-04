@@ -14,15 +14,29 @@ test("formatLocalTime: 非法输入原样返回,不抛错", () => {
   assert.equal(formatLocalTime(""), "");
 });
 
-test("render: 输出本地时间行(前缀不再是 UTC 截取)", () => {
+test("render: 输出本地时间行,级别中文化", () => {
   const logs = new RuntimeLogs();
   logs.info("测试信息");
   const out = logs.render();
-  assert.ok(out.includes("[info] 测试信息"), "含级别与文本: " + out);
+  assert.ok(out.includes("[信息] 测试信息"), "含中文级别与文本: " + out);
   const m = out.match(/^\[(\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/);
   assert.ok(m, "行首为不含年份的本地时间: " + out);
   assert.equal(m[1], formatLocalTime(logs.entries[0].at));
   assert.ok(!out.includes("Z]"), "不得再显示 UTC ISO 原串");
+});
+
+test("render: 最新在前", () => {
+  const logs = new RuntimeLogs();
+  logs.info("第一条");
+  logs.warn("第二条");
+  logs.error("第三条");
+  const lines = logs.render().split("\n");
+  assert.match(lines[0], /第三条/, "最新日志在第一行");
+  assert.match(lines[1], /第二条/);
+  assert.match(lines[2], /第一条/);
+  assert.ok(lines[0].includes("[错误]") && lines[2].includes("[信息]"), "级别使用中文标签");
+  // 存储顺序保持旧→新(容量淘汰/持久化依赖该顺序)
+  assert.deepEqual(logs.entries.map((e) => e.text), ["第一条", "第二条", "第三条"]);
 });
 
 test("subscribe: 新日志实时回调;退订后不再回调", () => {
@@ -84,6 +98,65 @@ test("批量决策视图不清空冲突服务原始集合", async () => {
   await dialog._decideAll("keep_remote");
   assert.equal(set.conflicts.length, 2, "决策后仍须保留原始冲突集合");
   assert.equal(set.conflicts.every((c) => c.decision === "keep_remote"), true);
+});
+
+test("决策闸门: 多文件冲突逐个决策,全部处理完毕才提交执行", async () => {
+  const { ConflictDialog } = await import("../src/ui/conflict-dialog.js");
+  const set = { operationId: "op-multi", conflicts: [
+    { path: "a.md", status: "open" }, { path: "b.md", status: "open" }, { path: "c.md", status: "open" },
+  ] };
+  const calls = [];
+  const service = {
+    sets: { "op-multi": set },
+    async decide(_op, path, decision) {
+      const item = set.conflicts.find((c) => c.path === path);
+      item.status = "decided";
+      item.decision = decision;
+    },
+    collectOverrides: (_op) => {
+      const m = new Map();
+      for (const c of set.conflicts) if (c.decision) m.set(c.path, c.decision);
+      return m;
+    },
+  };
+  const dialog = new ConflictDialog({ conflictService: service, i18n: {}, notify() {}, onDecide: async (m) => { calls.push(m); } });
+  dialog.set = set;
+
+  await dialog._decideOne("a.md", "keep_local");
+  assert.equal(calls.length, 0, "还有未决策文件时不得提交引擎(修复'每决策一个就关闭重开')");
+
+  await dialog._decideOne("b.md", "keep_remote");
+  assert.equal(calls.length, 0, "仍有 c.md 待决策");
+
+  await dialog._decideOne("c.md", "keep_local");
+  assert.equal(calls.length, 1, "全部决策完毕后提交一次");
+  assert.equal(calls[0].size, 3);
+  assert.equal(calls[0].get("a.md"), "keep_local");
+  assert.equal(calls[0].get("b.md"), "keep_remote");
+});
+
+test("友好名称: 笔记本名+文档标题、笔记本配置、普通文件", async () => {
+  const { ConflictDialog } = await import("../src/ui/conflict-dialog.js");
+  const dialog = new ConflictDialog({ conflictService: {}, i18n: {}, notify() {}, onDecide: async () => {} });
+  dialog._nameIndex = {
+    notebooks: new Map([["20260902191353-9549go4", "我的笔记"]]),
+    docs: new Map([["20260902191354-abcd123", "同步说明"]]),
+  };
+
+  const doc = dialog._friendlyLabel("data/20260902191353-9549go4/20260902191354-abcd123.sy");
+  assert.equal(doc.title, "我的笔记 / 同步说明");
+  assert.equal(doc.sub, "data/20260902191353-9549go4/20260902191354-abcd123.sy", "原始路径保留在小字中");
+
+  const conf = dialog._friendlyLabel("data/20260902191353-9549go4/.siyuan/conf.json");
+  assert.equal(conf.title, "笔记本配置(我的笔记)");
+
+  const asset = dialog._friendlyLabel("data/20260902191353-9549go4/assets/pic.png");
+  assert.equal(asset.title, "我的笔记 / pic.png");
+
+  // 无索引(kernel 不可用)时仍从路径提取 id 展示,原始路径始终保留在 sub
+  const fallback = dialog._friendlyLabel("data/notebook-id/doc.sy");
+  assert.equal(fallback.title, "notebook-id / doc");
+  assert.equal(fallback.sub, "data/notebook-id/doc.sy");
 });
 
 test("容量上限: 超过 limit 丢弃最旧条目", () => {

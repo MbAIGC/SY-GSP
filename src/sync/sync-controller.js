@@ -224,7 +224,8 @@ export class SyncController {
         }
         this.logger.info("同步完成 #" + ctx.id + " ↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) +
           " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) +
-          " 拦删" + (result.skippedDeletes || 0) + " 超大" + (result.skippedLarge || 0));
+          " 拦删" + (result.skippedDeletes || 0) + " 超大" + (result.skippedLarge || 0) +
+          " 大跳下" + (result.skippedLargeDownloads || 0) + " 漂移修" + (result.canonicalDrifts || 0));
         await this._onFinished(ctx, result);
         return result;
       } catch (err) {
@@ -361,11 +362,19 @@ export class SyncController {
     this.events.emit("sync:error", { ctx, error: syncErr });
   }
 
-  /** 用户冲突决策: 逐文件 keep_local/keep_remote → 重新规划执行 */
+  /**
+   * 用户冲突决策: 逐文件 keep_local/keep_remote/resolved → 重新规划执行。
+   * "resolved"(用户已手动编辑)等价 keep_local: 本地当前内容即最新事实。
+   * 执行成功后自动追加一轮验证同步(决策闭环): 若决策未完全生效(重规划又产生
+   * 同样的冲突),验证轮会重新暂停并向用户暴露,而不是静默关闭冲突集。
+   */
   async resolveConflicts(decisions) {
     const overrides = decisions instanceof Map
       ? new Map(decisions)
       : new Map(Object.entries(decisions || {}));
+    for (const [path, decision] of overrides) {
+      if (decision === "resolved") overrides.set(path, "keep_local");
+    }
     const valid = [...overrides.entries()].filter(([path, decision]) =>
       path === "__base__" || decision === "keep_local" || decision === "keep_remote"
     );
@@ -389,7 +398,31 @@ export class SyncController {
       // 基准恢复: decisions = {__base__: "keep_local"|"keep_remote"}
       return this._resolveBaseUnresolved(accepted);
     }
-    return this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, overrides: accepted });
+    const result = await this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, overrides: accepted });
+    if (result && result.success) {
+      await this._verifyResolution();
+    }
+    return result;
+  }
+
+  /**
+   * 冲突决策验证轮: 决策执行成功后再跑一次同步,确认结果收敛(第二次同步应为
+   * 0 变更/0 冲突)。若验证轮再次暂停,说明决策未完全生效或仍有未处理冲突,
+   * 暂停门与冲突对话框会重新出现——让"决策是否生效"始终可见。
+   */
+  async _verifyResolution() {
+    try {
+      this.logger.info("冲突处理: 决策执行成功,开始验证轮同步");
+      const verify = await this.syncNow({ trigger: SyncTrigger.VERIFY });
+      if (verify && verify.success) {
+        const r = verify;
+        this.logger.info("冲突决策验证通过: ↑" + (r.uploads || 0) + " ↓" + (r.downloads || 0) +
+          " 删远" + (r.deletionsRemote || 0) + " 删本" + (r.deletionsLocal || 0) + ",结果已收敛");
+      }
+    } catch (err) {
+      // 验证轮失败不掩盖首次决策执行的成功;冲突暂停/错误由常规事件链路呈现
+      this.logger.warn("冲突决策验证轮未通过: " + String((err && err.message) || err));
+    }
   }
 
   /** 基准失效恢复: 明确选择一方为新基准后执行一次强制方向同步 */
@@ -404,11 +437,12 @@ export class SyncController {
     }
     const mode = choice === "keep_local" ? SyncMode.LOCAL_OVER_REMOTE : SyncMode.REMOTE_OVER_LOCAL;
     const result = await this.syncNow({ trigger: SyncTrigger.CONFLICT_RESOLUTION, mode });
-    if (result && result.result && result.result.success) {
+    if (result && result.success) {
+      // _onFinished 已清理暂停记录;这里兜底幂等清理(合并写,保留其他状态键)
       const key = this.repoKey();
       if (this._conflictByRepo.has(key)) {
         this._conflictByRepo.delete(key);
-        this._persistState(); // 合并写,保留其他状态键
+        this._persistState();
       }
     }
     return result;

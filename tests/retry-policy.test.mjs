@@ -88,3 +88,38 @@ test("CAS 重试: 预算 4 次且有退避延迟", async () => {
   }
   assert.equal(policy.decide(err, 4).retry, false, "第 5 次应达上限");
 });
+
+test("限流: 不受开关约束,按服务端重置时间退避,最多 2 次", () => {
+  const policy = new RetryPolicy({ enabled: false });
+  const e = new SyncError({
+    category: SyncErrorCategory.RATE_LIMIT, code: "RATE_LIMITED", message: "已触发限流",
+    retryable: true, retryDelayMs: 10000,
+  });
+  const d1 = policy.decide(e, 0);
+  assert.equal(d1.retry, true, "限流重试应绕过自动重试开关");
+  assert.equal(d1.replan, true, "限流恢复必须重新规划");
+  assert.equal(d1.delayMs, 10500, "按重置时间退避并留 500ms 余量");
+  assert.equal(policy.decide(e, 1).retry, true);
+  assert.equal(policy.decide(e, 2).retry, false, "第 3 次达上限");
+});
+
+test("限流: 重置时间超过 2 分钟不自动等待,转为可见失败", () => {
+  const policy = new RetryPolicy({ enabled: true });
+  const e = new SyncError({
+    category: SyncErrorCategory.RATE_LIMIT, code: "RATE_LIMITED", message: "已触发限流",
+    retryable: true, retryDelayMs: 60 * 60 * 1000, // 主限流常见: 1 小时后重置
+  });
+  const d = policy.decide(e, 0);
+  assert.equal(d.retry, false, "不自动挂起一小时");
+  assert.match(d.reason, /重置时间过久/);
+});
+
+test("限流: 无服务端等待信息时使用默认短退避", () => {
+  const policy = new RetryPolicy({ enabled: false });
+  const e = new SyncError({
+    category: SyncErrorCategory.RATE_LIMIT, code: "RATE_LIMITED", message: "已触发限流", retryable: true,
+  });
+  const d = policy.decide(e, 0);
+  assert.equal(d.retry, true);
+  assert.ok(d.delayMs > 0 && d.delayMs <= 10000, "无 Retry-After 时用短退避兜底");
+});

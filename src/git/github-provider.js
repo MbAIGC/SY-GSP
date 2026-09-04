@@ -21,7 +21,13 @@ export class GitHubProvider extends GitProvider {
   }
 
   _repoPath() {
-    return "/repos/" + this.owner + "/" + this.repo;
+    // owner/repo 来自用户输入,统一编码,防特殊字符拼出非预期 API 路径
+    return "/repos/" + encodeURIComponent(this.owner) + "/" + encodeURIComponent(this.repo);
+  }
+
+  /** 分支名可含 "/",直接拼路径会产生错误请求;按路径段编码(保留斜杠层级) */
+  _branchRefPath() {
+    return "/git/ref/heads/" + this.branch.split("/").map((seg) => encodeURIComponent(seg)).join("/");
   }
 
   _wrap(err, operation, message) {
@@ -53,7 +59,7 @@ export class GitHubProvider extends GitProvider {
 
   async getBranchHead() {
     try {
-      const res = await this.http.request({ path: this._repoPath() + "/git/ref/heads/" + this.branch, noCache: true });
+      const res = await this.http.request({ path: this._repoPath() + this._branchRefPath(), noCache: true });
       return { sha: res.data.object.sha };
     } catch (err) {
       throw this._wrap(err, "getBranchHead", "读取分支 HEAD 失败");
@@ -173,8 +179,10 @@ export class GitHubProvider extends GitProvider {
 
   async compareCommits(baseRef, headRef) {
     try {
+      // compare 的 files 默认仅返回前 30 条,显式提高单页上限,降低历史面板漏文件的概率
       const res = await this.http.request({
         path: this._repoPath() + "/compare/" + encodeURIComponent(baseRef) + "..." + encodeURIComponent(headRef),
+        query: { per_page: 100 },
       });
       return (res.data.files || []).map((f) => ({
         filename: f.filename,
@@ -287,7 +295,7 @@ export class GitHubProvider extends GitProvider {
   async _updateRefRaw(newSha) {
     try {
       await this.http.request({
-        path: this._repoPath() + "/git/refs/heads/" + this.branch,
+        path: this._repoPath() + "/git/refs/heads/" + this.branch.split("/").map((seg) => encodeURIComponent(seg)).join("/"),
         method: "PATCH",
         body: { sha: newSha, force: false },
       });

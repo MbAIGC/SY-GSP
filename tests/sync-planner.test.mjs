@@ -44,11 +44,11 @@ test("远端新增、本地无 → download create", async () => {
   assert.deepEqual(plan.downloads, [{ path: "r.md", op: "create" }]);
 });
 
-test("无 BASE 同路径不同: 本地明显较新 → 上传本地", async () => {
+test("无 BASE 同路径不同: 本地明显较新(>30s 阈值)→ 上传本地", async () => {
   const p = plannerWith();
   const plan = await p.build({
     remoteEntries: new Map([["both.md", entry("SR")]]),
-    localFiles: [{ path: "both.md", updated: 20000 }],
+    localFiles: [{ path: "both.md", updated: 200000 }],
     localShas: new Map([["both.md", "SL"]]),
     remoteCommitDate: new Date(10000).toISOString(),
   });
@@ -56,16 +56,28 @@ test("无 BASE 同路径不同: 本地明显较新 → 上传本地", async () =
   assert.equal(plan.conflicts.length, 0);
 });
 
-test("无 BASE 同路径不同: 远端明显较新 → 下载远端", async () => {
+test("无 BASE 同路径不同: 远端明显较新(>30s 阈值)→ 下载远端", async () => {
   const p = plannerWith();
   const plan = await p.build({
     remoteEntries: new Map([["both.md", entry("SR")]]),
     localFiles: [{ path: "both.md", updated: 10000 }],
     localShas: new Map([["both.md", "SL"]]),
-    remoteCommitDate: new Date(20000).toISOString(),
+    remoteCommitDate: new Date(200000).toISOString(),
   });
   assert.deepEqual(plan.downloads, [{ path: "both.md", op: "create" }]);
   assert.equal(plan.conflicts.length, 0);
+});
+
+test("无 BASE 同路径不同且时间差在阈值内(2s 级)→ 不再静默裁决,进冲突", async () => {
+  const p = plannerWith();
+  const plan = await p.build({
+    remoteEntries: new Map([["both.md", entry("SR")]]),
+    localFiles: [{ path: "both.md", updated: 20000 }],
+    localShas: new Map([["both.md", "SL"]]),
+    remoteCommitDate: new Date(10000).toISOString(),
+  });
+  assert.equal(plan.uploads.length + plan.downloads.length, 0, "10s 差异不得静默选边");
+  assert.equal(plan.conflicts.length, 1);
 });
 
 test("无 BASE 同路径不同且时间不可判定 → 可处理冲突", async () => {

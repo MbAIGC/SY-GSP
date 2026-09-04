@@ -82,6 +82,24 @@ export class HttpClient {
       }
       const message = String(apiMessage).trim();
       apiMessage = message ? message : apiMessage;
+      // GitHub 主速率限制以 403 返回(而非 429),仅靠状态码会把限流误判为权限不足
+      // 且不重试;识别特征头/正文后归为 RATE_LIMIT,并提取建议等待时间供重试策略退避。
+      const rateLimit = this._detectRateLimit(response, message);
+      if (rateLimit) {
+        throw new SyncError({
+          category: SyncErrorCategory.RATE_LIMIT,
+          code: "RATE_LIMITED",
+          operation: method + " " + this._safeUrl(opts),
+          httpStatus: response.status,
+          message: "已触发 GitHub API 限流" + (rateLimit.retryDelayMs > 0
+            ? "(约 " + Math.ceil(rateLimit.retryDelayMs / 1000) + " 秒后重置)"
+            : ""),
+          detail: redact(typeof apiMessage === "string" ? apiMessage : JSON.stringify(apiMessage)),
+          retryable: true,
+          retryDelayMs: rateLimit.retryDelayMs,
+          recoverable: false,
+        });
+      }
       throw new SyncError({
         category: SyncErrorCategory.GIT,
         code: "HTTP_" + response.status,
@@ -94,6 +112,31 @@ export class HttpClient {
       });
     }
     return { status: response.status, headers: response.headers, data, link: response.headers.get("link") || "" };
+  }
+
+  /**
+   * 限流识别: 403/429 且满足以下任一特征——
+   * - X-RateLimit-Remaining: 0(主速率限制耗尽);
+   * - Retry-After 头存在(二次限流);
+   * - 错误正文含 "rate limit"(GitHub 主/次限流的固定文案)。
+   * 返回 {retryDelayMs}: 优先 Retry-After(秒),其次 X-RateLimit-Reset(纪元秒 − 当前时间)。
+   */
+  _detectRateLimit(response, apiMessage) {
+    if (response.status !== 403 && response.status !== 429) return null;
+    const headers = response.headers;
+    const remaining = headers ? headers.get("x-ratelimit-remaining") : null;
+    const retryAfter = headers ? headers.get("retry-after") : null;
+    const resetEpoch = headers ? headers.get("x-ratelimit-reset") : null;
+    const textHit = /rate limit/i.test(String(apiMessage || ""));
+    if (remaining !== "0" && !retryAfter && !textHit) return null;
+
+    let retryDelayMs = 0;
+    if (retryAfter && Number(retryAfter) > 0) {
+      retryDelayMs = Number(retryAfter) * 1000;
+    } else if (resetEpoch && Number(resetEpoch) > 0) {
+      retryDelayMs = Math.max(0, Number(resetEpoch) * 1000 - Date.now());
+    }
+    return { retryDelayMs: Math.round(retryDelayMs) };
   }
 
   _buildUrl(opts) {

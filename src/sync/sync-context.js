@@ -110,6 +110,8 @@ export const SyncTrigger = Object.freeze({
   STARTUP: "startup",
   RETRY: "retry",
   CONFLICT_RESOLUTION: "conflict_resolution",
+  /** 冲突决策执行成功后的验证轮: 确认结果收敛(第二次同步应为 0 变更/0 冲突) */
+  VERIFY: "verify",
   REBUILD: "rebuild",
   DIAGNOSIS: "diagnosis",
 });

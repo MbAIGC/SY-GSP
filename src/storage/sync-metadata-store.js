@@ -20,6 +20,8 @@ export class SyncMetadataStore {
     this.plugin = plugin;
     /** @type {{schemaVersion:number, repositories:Object<string,any>, legacyHints:Object<string,any>}} */
     this.data = { schemaVersion: SCHEMA_VERSION, repositories: {}, legacyHints: {} };
+    /** 元数据文件 schema 版本高于当前插件时为 true(诊断可见,拒绝按旧语义读取) */
+    this.versionMismatch = false;
   }
 
   static keyOf({ provider, owner, repo, branch }) {
@@ -30,6 +32,20 @@ export class SyncMetadataStore {
     try {
       const data = await this.plugin.loadData(METADATA_FILE);
       if (data && typeof data === "object") {
+        // 版本兼容性校验: 更新的 schema 版本意味着字段语义可能已变化,
+        // 原样当作当前结构使用会误读基准。拒绝加载并显式标记,交由诊断可见。
+        this.versionMismatch = Number(data.schemaVersion) > SCHEMA_VERSION;
+        if (this.versionMismatch) {
+          throw new SyncError({
+            category: SyncErrorCategory.LOCAL_FILE,
+            code: "METADATA_VERSION_TOO_NEW",
+            operation: "loadMetadata",
+            message: "同步元数据 schema 版本更新(文件 v" + data.schemaVersion + " > 插件 v" + SCHEMA_VERSION +
+              "),拒绝按旧语义读取。请升级插件后使用",
+            retryable: false,
+            recoverable: true,
+          });
+        }
         this.data = {
           schemaVersion: data.schemaVersion || SCHEMA_VERSION,
           repositories: data.repositories || {},
@@ -37,8 +53,12 @@ export class SyncMetadataStore {
         };
       }
     } catch (err) {
-      // 首次使用时文件不存在属正常;其余错误保持可见
-      if (err && !/not found|不存在/i.test(String(err.message || err))) {
+      if (err instanceof SyncError) throw err;
+      // 首次使用时文件不存在属正常;其余错误保持可见。
+      // 不存在判定优先用错误码,文案匹配仅作兜底(依赖文案在多语言环境下会误判)
+      const notFound = (err && err.code === "FILE_NOT_FOUND") ||
+        /not found|不存在/i.test(String((err && err.message) || err));
+      if (!notFound) {
         throw new SyncError({
           category: SyncErrorCategory.LOCAL_FILE,
           code: "METADATA_LOAD_FAILED",

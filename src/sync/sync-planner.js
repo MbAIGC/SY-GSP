@@ -49,6 +49,10 @@ export class SyncPlanner {
       mode = "auto",
       overrides = new Map(),
       enumErrorOccurred = false,
+      // new/new 时间裁决: 默认允许,阈值 30s(设备时钟偏差远大于 2s,2s 会系统性偏向一侧);
+      // 首同步双方均有内容时由引擎传入 false,禁止时间静默裁决
+      allowTimeArbitration = true,
+      newFileTimeThresholdMs = 30000,
     } = opts;
 
     const localSet = new Set(localFiles.map((f) => f.path));
@@ -76,6 +80,11 @@ export class SyncPlanner {
         remoteCommitDate: opts.remoteCommitDate || null,
         enumErrorOccurred,
         bootstrap: opts.bootstrap === true,
+        allowTimeArbitration,
+        newFileTimeThresholdMs,
+        // 超出下载上限的远端文件: Map<path, size>。本端读不到其内容,
+        // 自动上传等于"盲写覆盖远端",必须交人工决策(由引擎传入)
+        blockedDownloads: opts.blockedDownloads || null,
       };
       if (override) {
         this._applyOverride(plan, path, override, ctx);
@@ -109,9 +118,10 @@ export class SyncPlanner {
     const sha = localShas.get(path);
     const ref = baseEntry ? baseEntry.sha : remoteEntry ? remoteEntry.sha : null;
     if (sha === null || sha === undefined) {
-      // 无法计算 sha: 与 BASE 内容字节比较
-      const bytes = (await this.readLocal(path)) || { bytes: null };
-      if (!bytes) return "deleted";
+      // 无法计算 sha: 与 BASE 内容字节比较。文件在快照后消失按删除处理,
+      // 不得因读取失败误判为"已修改"(否则会尝试上传不存在的文件)
+      const bytes = await this.readLocal(path);
+      if (!bytes || !bytes.bytes) return "deleted";
       const refBytes = baseEntry
         ? await this.readRemoteBlobBySha(baseEntry.sha)
         : remoteEntry
@@ -132,6 +142,22 @@ export class SyncPlanner {
         : remoteEntry.sha === baseEntry.sha
           ? "unchanged"
           : "changed";
+
+    // 超大远端文件守卫: 本端从未成功读取该文件内容,任何自动上传(新建/更新/合并)
+    // 都会用本地未知新旧的内容盲写覆盖远端,一律进冲突中心人工处理。
+    // 例外: 本地未变远端未变(无事可做)、本地已删除(删除远端不需要读取内容)。
+    const blockedSize = ctx.blockedDownloads ? ctx.blockedDownloads.get(path) : null;
+    const deleteOnly = localState === "deleted" && remoteState === "unchanged";
+    if (blockedSize && localState !== "unchanged" && !deleteOnly) {
+      plan.conflicts.push({
+        path,
+        reason: "远端文件超出大小上限(" + blockedSize + " 字节),无法自动同步,需人工处理",
+        baseSha: baseEntry ? baseEntry.sha : null,
+        localSha: localShas.get(path) || null,
+        remoteSha: remoteEntry ? remoteEntry.sha : null,
+      });
+      return;
+    }
 
     // 双方均无变化 / 内容已一致
     if (localState === "deleted" && remoteState === "deleted") {
@@ -162,15 +188,29 @@ export class SyncPlanner {
         return;
       }
       // 无 BASE 时不能仅凭路径相同断定两端同时写入。优先使用有效时间选择
-      // 明显较新的一侧；时间不可用或接近时才保留人工冲突兜底。
+      // 明显较新的一侧;时间不可用或接近时保留人工冲突兜底。
+      // 首同步双方均有内容时(双方本就无共同基准),设备时钟偏差远大于内容
+      // 新旧差异,禁止用时间静默裁决——一律交冲突中心由用户批量决策,
+      // 避免一次首同步静默覆盖掉一整批修改。
+      if (!ctx.allowTimeArbitration) {
+        plan.conflicts.push({
+          path,
+          reason: "首同步双方均有同名文件且内容不同,需人工确认保留哪一方",
+          baseSha: null,
+          localSha,
+          remoteSha: remoteEntry.sha,
+        });
+        return;
+      }
       const localTime = Number(ctx.localUpdated) || 0;
       const remoteTime = Date.parse(ctx.remoteCommitDate || "") || 0;
       const delta = localTime && remoteTime ? localTime - remoteTime : 0;
-      if (delta > 2000) {
+      const threshold = Number(ctx.newFileTimeThresholdMs) || 30000;
+      if (delta > threshold) {
         plan.uploads.push({ path, op: "create" });
         return;
       }
-      if (delta < -2000) {
+      if (delta < -threshold) {
         plan.downloads.push({ path, op: "create" });
         return;
       }
@@ -226,6 +266,12 @@ export class SyncPlanner {
 
     // 远端删除
     if (localState === "unchanged" && remoteState === "deleted") {
+      // 与 delete_remote 对称的枚举完整性守卫: 远端树读取阶段出现过异常时,
+      // "远端已删除"本身可能是误判,禁止据此删除本地唯一副本(#delete-symmetry)
+      if (enumErrorOccurred) {
+        plan.skippedDeletes.push({ path, reasons: ["枚举异常,拒绝按远端删除移除本地文件"] });
+        return;
+      }
       plan.deletionsLocal.push({ path });
       return;
     }

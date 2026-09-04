@@ -164,15 +164,16 @@ test("暂停: 冲突集缺失时用上下文冲突补建，批量决策始终有
   assert.equal(c.conflictPaused.kind, "FILE_CONFLICTS");
 });
 
-test("冲突决策: Map 必须原样传入重新同步", async () => {
+test("冲突决策: Map 必须原样传入重新同步;成功后追加验证轮", async () => {
   const calls = [];
   const c = makeController({ data: {} });
   c.syncNow = async (opts) => { calls.push(opts); return { success: true }; };
   await c.resolveConflicts(new Map([["a.md", "keep_remote"], ["b.md", "keep_local"]]));
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2, "决策执行轮 + 决策验证轮");
   assert.equal(calls[0].overrides.size, 2);
   assert.equal(calls[0].overrides.get("a.md"), "keep_remote");
   assert.equal(calls[0].trigger, "conflict_resolution");
+  assert.equal(calls[1].trigger, "verify", "验证轮不得携带 overrides");
 });
 
 test("暂停门: 自动/手动触发被拦截必须留痕;手动触发 emit conflict:reopen", async () => {

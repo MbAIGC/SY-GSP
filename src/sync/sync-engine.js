@@ -7,7 +7,9 @@
  * - 写入失败,不伪造成功;
  * - 基准无法证明时,进入恢复向导,不自动选边;
  * - 远端读取 404 在已有确认基准时绝不折叠为空仓库(可能整批误删本地);
- * - 大文件/删除被安全拦截时,不宣称完整成功,不静默推进 BASE。
+ * - 大文件/删除被安全拦截时,不宣称完整成功,不静默推进 BASE;
+ * - markdown 导入后回读校验 canonical 表示,漂移在同一轮内补推修正(防假修改循环);
+ * - 合并内容推送确认后才写本地,推送失败不把合并产物留给下一轮误判。
  *
  * 当前远端仅支持 GitHub(Git Data API 原子树提交 + 引用 CAS);Gitee 暂不支持。
  */
@@ -147,6 +149,18 @@ export class SyncEngine {
       this._emit("engine:phase", { ctx, state: SyncState.PLANNING });
       ctx.expectedRemoteHead = remoteHead ? remoteHead.sha : null;
       const overrides = ctx.overrides || new Map();
+      // 首同步双方均有内容(无 BASE 且两侧都非空)时禁用 new/new 时间裁决:
+      // 设备时钟偏差远大于内容新旧差异,静默选边会覆盖用户数据,必须交冲突中心
+      const firstSyncBothSides =
+        !baseResolution.baseSha && baseEntries.size === 0 &&
+        scan.files.length > 0 && remoteEntries.size > 0;
+      // 超出下载上限的远端路径 → 规划器按"禁止盲写"处理(自动上传升级为人工冲突)
+      const downloadLimit = (this.commitBuilder && this.commitBuilder.requestLimit) || 0;
+      const blockedDownloads = new Map(
+        downloadLimit > 0
+          ? [...remoteEntries].filter(([, e]) => (e.size || 0) > downloadLimit).map(([p, e]) => [p, e.size || 0])
+          : []
+      );
       const plan = await this.planner.build({
         baseEntries,
         remoteEntries,
@@ -157,13 +171,15 @@ export class SyncEngine {
         enumErrorOccurred: scan.enumErrorOccurred,
         bootstrap: ctx.bootstrapDownload === true,
         remoteCommitDate: ctx.remoteCommitDate,
+        allowTimeArbitration: !firstSyncBothSides,
+        blockedDownloads,
       });
       ctx.plan = plan;
 
       // 6. 合并
       transition(ctx, SyncState.MERGING);
       this._emit("engine:phase", { ctx, state: SyncState.MERGING });
-      await this._runMerges(ctx, plan, baseEntries);
+      await this._runMerges(ctx, plan);
 
       // 7. 冲突 → 暂停
       if (plan.conflicts.length > 0) {
@@ -184,8 +200,9 @@ export class SyncEngine {
       // 8. 无远端写入 → 本地应用(下载/删本),推进基准,完成
       const remoteWrites = plan.uploads.length + plan.deletionsRemote.length;
       if (remoteWrites === 0) {
+        const drifts = [];
         try {
-          await this._applyLocalChanges(ctx, plan);
+          await this._applyLocalChanges(ctx, plan, { drifts, remoteEntries });
         } catch (err) {
           if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
             return this._pauseLocalChanged(ctx, err);
@@ -209,11 +226,16 @@ export class SyncEngine {
             paths: plan.deletionsLocal.map((item) => item.path),
           });
         }
-        if (remoteHead) {
-          await this.metadataStore.setConfirmedCommit(this.config.repoKey, remoteHead.sha, ctx.id);
+        // markdown 往返漂移修正: 本地导入后再导出与远端不一致时,同轮补传
+        // "回读到的 canonical 内容",下一轮即收敛,不把假修改留给用户
+        ctx.canonicalDrifts = drifts.length;
+        const driftSha = await this._applyCanonicalCorrections(ctx, drifts);
+        const confirmedSha = driftSha || (remoteHead ? remoteHead.sha : null);
+        if (confirmedSha) {
+          await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
         }
         transition(ctx, SyncState.SUCCESS, "无远端变更");
-        finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, remoteHead ? remoteHead.sha : null, plan) });
+        finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, confirmedSha, plan) });
         return ctx.result;
       }
 
@@ -254,14 +276,22 @@ export class SyncEngine {
           recoverable: false,
         });
       }
+      // 合并结果在推送确认后才写本地: 推送失败时本地仍是合并前内容,
+      // 重规划不会把"合并产物"误判为本地新修改(避免合并内容反复进冲突)
+      await this._writeMergedResults(ctx, plan);
+      const drifts = [];
       try {
-        await this._applyLocalChanges(ctx, plan);
+        await this._applyLocalChanges(ctx, plan, { drifts, remoteEntries });
       } catch (err) {
         if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
           return this._pauseLocalChanged(ctx, err);
         }
         throw err;
       }
+      // markdown 往返漂移修正(推我方修正提交),BASE 统一取最后确认的本方提交
+      ctx.canonicalDrifts = drifts.length;
+      const driftSha = await this._applyCanonicalCorrections(ctx, drifts);
+      const confirmedSha = driftSha || push.baseSha || push.finalSha;
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: plan.deletionsRemote.length > 0 });
       if (plan.skippedDeletes.length > 0) {
         this._emit("engine:operation", {
@@ -280,14 +310,11 @@ export class SyncEngine {
         });
       }
       if (skipped.length > 0) {
-        // 部分大文件被跳过: 已推送并经引用确认的内容以「我方提交」推进 BASE(已物化事实),
+        // 部分大文件被跳过: 已推送并经引用确认的内容(含 canonical 修正提交)推进 BASE,
         // 大文件仍保持待办并抛可见错误——每轮都会重新尝试直至用户处理,绝不静默宣称完整成功
-        if (push.baseSha) {
-          await this.metadataStore.setConfirmedCommit(this.config.repoKey, push.baseSha, ctx.id);
-        }
+        await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
         throw this._skippedError(skipped, plan, "部分大文件未上传,本轮不标记完整成功");
       }
-      const confirmedSha = push.baseSha || push.finalSha;
       if (confirmedSha) {
         await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
       }
@@ -454,6 +481,21 @@ export class SyncEngine {
    * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
    * 本地为准方向若本地枚举异常,禁止删远端(可能因漏扫而误删)。
    */
+  /**
+   * 内核已注册的笔记本 id 集合(重建"以本地为准"的本地全貌依据)。
+   * 不可用/失败/为空返回 null: 表示无法判定,禁止做残留清理(宁可漏删不可误删)。
+   */
+  async _registeredNotebookIds() {
+    if (!this.workspace || typeof this.workspace.getNotebooks !== "function") return null;
+    try {
+      const notebooks = await this.workspace.getNotebooks();
+      const ids = (notebooks || []).map((n) => n && n.id).filter(Boolean);
+      return ids.length > 0 ? new Set(ids) : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
   async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false } = {}) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {
@@ -489,8 +531,24 @@ export class SyncEngine {
 
     transition(ctx, SyncState.MERGING);
     this._emit("engine:phase", { ctx, state: SyncState.MERGING });
+    // 重建"以本地为准"的本地全貌以内核笔记本列表为准:
+    // 磁盘上可能残留不在笔记本列表里的 data/<id>/ 数据(同步只落盘、内核未注册,
+    // UI 不显示)。这类残留若按磁盘扫描参与比对,会被判"未变化"——既不删远端
+    // 也不清理本地,重建"成功"但远端多出的笔记本永远清不掉(用户实证场景)。
+    // getNotebooks 不可用/失败/为空时不做残留清理,回退磁盘语义(宁可漏删不可误删)。
+    const registeredIds = keepLocal && rebuildRemote ? await this._registeredNotebookIds() : null;
+    const isStray = (path) => {
+      if (!registeredIds) return false;
+      const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
+      return !!m && !registeredIds.has(m[1]);
+    };
     if (keepLocal) {
+      const strayLocal = [];
       for (const path of localPaths) {
+        if (isStray(path)) {
+          strayLocal.push(path);
+          continue;
+        }
         const remoteEntry = remoteEntries.get(path);
         if (remoteEntry && remoteEntry.sha === localShas.get(path)) {
           plan.unchanged += 1;
@@ -499,9 +557,14 @@ export class SyncEngine {
         plan.uploads.push({ path, op: remoteEntry ? "update" : "create" });
       }
       for (const path of remotePaths) {
-        if (!localPaths.has(path)) {
+        if (!localPaths.has(path) || isStray(path)) {
           plan.deletionsRemote.push({ path, remoteSha: remoteEntries.get(path).sha });
         }
+      }
+      // 残留文件本地一并清理(带备份),否则下一轮普通同步会按"远端缺失的新文件"复活上传
+      for (const path of strayLocal) {
+        plan.deletionsLocal.push({ path });
+        localShas.delete(path); // 回读校验按清理后的本地全貌比对
       }
     } else {
       for (const path of remotePaths) {
@@ -554,18 +617,33 @@ export class SyncEngine {
           throw this._skippedError(skipped, plan, "强制方向(以本地为准)部分大文件未上传,本轮不标记完整成功");
         }
         confirmedSha = push.baseSha || push.finalSha;
-        if (rebuildRemote) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localPaths);
       }
+      // 本地残留清理(重建"以本地为准"): 删除磁盘上不在内核笔记本列表里的文件
+      if (plan.deletionsLocal.length > 0) {
+        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: true });
+        this._emit("engine:operation", {
+          ctx,
+          operation: "本地残留(不在笔记本列表)已清理",
+          count: plan.deletionsLocal.length,
+          paths: plan.deletionsLocal.map((item) => item.path),
+        });
+      }
+      if (rebuildRemote && remoteWrites > 0) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localShas);
     } else {
       // 以远端为准: 仅本地侧变更,不产生远端写入
+      const drifts = [];
       try {
-        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote });
+        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote, drifts, remoteEntries });
       } catch (err) {
         if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
           return this._pauseLocalChanged(ctx, err);
         }
         throw err;
       }
+      // 强制下载方向同样做 canonical 漂移修正,保证重建后第二轮即收敛
+      ctx.canonicalDrifts = drifts.length;
+      const driftSha = await this._applyCanonicalCorrections(ctx, drifts);
+      if (driftSha) confirmedSha = driftSha;
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
     }
 
@@ -577,20 +655,33 @@ export class SyncEngine {
     return ctx.result;
   }
 
-  async _assertRemoteMatchesLocal(ctx, commitSha, localPaths) {
+  /**
+   * 以本地为准重建后的回读校验: 逐路径比对存在性**与内容 sha**,
+   * 任何残留/缺失/内容不一致都以可见错误结束且不推进 BASE。
+   */
+  async _assertRemoteMatchesLocal(ctx, commitSha, localShas) {
     const commit = await this.provider.getCommit(commitSha);
     const remoteEntries = this._withoutIgnoredEntries(await this._treeMap(await this.provider.getTree(commit.treeSha)));
     const remotePaths = new Set(remoteEntries.keys());
+    const localPaths = new Set(localShas.keys());
     const residual = [...remotePaths].filter((path) => !localPaths.has(path));
     const missing = [...localPaths].filter((path) => !remotePaths.has(path));
-    if (residual.length || missing.length) {
+    const mismatched = [...localPaths]
+      .filter((path) => remotePaths.has(path) && remoteEntries.get(path).sha !== localShas.get(path))
+      .map((path) => path + " (远端 " + String(remoteEntries.get(path).sha).slice(0, 8) + " vs 本地 " + String(localShas.get(path)).slice(0, 8) + ")");
+    if (residual.length || missing.length || mismatched.length) {
       throw new SyncError({
         category: SyncErrorCategory.GIT,
         code: "REBUILD_VERIFY_FAILED",
         operation: "verifyRebuild",
         phase: SyncState.VERIFYING_REMOTE_HEAD,
         message: "以本地为准重建后远端文件仍不一致",
-        detail: "远端残留: " + residual.slice(0, 20).join(", ") + "；远端缺失: " + missing.slice(0, 20).join(", ") + "，操作=" + ctx.id,
+        detail: [
+          residual.length ? "远端残留: " + residual.slice(0, 20).join(", ") : "",
+          missing.length ? "远端缺失: " + missing.slice(0, 20).join(", ") : "",
+          mismatched.length ? "内容不一致: " + mismatched.slice(0, 20).join("; ") : "",
+          "操作=" + ctx.id,
+        ].filter(Boolean).join("；"),
         retryable: false,
         recoverable: true,
       });
@@ -621,10 +712,11 @@ export class SyncEngine {
         remote: { bytes: remoteBytes },
       });
       if (result.merged) {
-        // 合并结果先落本地(经适配器导入/直写,与格式一致);
-        // 提交失败时下一轮会把本地合并内容视为本地变更重新上传
+        // 合并内容暂存,推送确认后才写本地(_writeMergedResults);
+        // 推送失败时本地保持合并前内容,重规划不会把合并产物当成"本地新修改"
         const format = this._docFormat(path);
-        await this.contentAdapter.writeFileBlob(path, new Blob([result.content]), format, "update");
+        plan.mergedWrites = plan.mergedWrites || [];
+        plan.mergedWrites.push({ path, bytes: result.content, format });
         plan.uploads.push({ path, bytes: result.content, op: "update", merged: true });
       } else {
         plan.conflicts.push({
@@ -637,6 +729,63 @@ export class SyncEngine {
       }
     }
     plan.merges.length = 0;
+  }
+
+  /** 推送确认后把合并结果写入本地(与 _runMerges 的暂存配对) */
+  async _writeMergedResults(ctx, plan) {
+    const writes = plan.mergedWrites || [];
+    for (const item of writes) {
+      await this.contentAdapter.writeFileBlob(item.path, new Blob([item.bytes]), item.format, "update");
+    }
+    if (writes.length > 0) {
+      this._emit("engine:operation", {
+        ctx,
+        operation: "合并结果已写入本地",
+        count: writes.length,
+        paths: writes.map((w) => w.path),
+      });
+    }
+    plan.mergedWrites = [];
+  }
+
+  /**
+   * markdown 往返漂移修正(canonical drift):
+   * 下载导入后再次导出的内容若与远端不一致(思源 md 导入/导出非恒等变换),
+   * 把"回读到的 canonical 内容"在同一轮内补推为修正提交。否则本地每轮都会
+   * 被判为"已修改"重新上传,两台设备互相制造假修改 → 冲突永不收敛。
+   * @returns {Promise<string|null>} 修正提交确认后的 BASE sha(无漂移时为 null)
+   */
+  async _applyCanonicalCorrections(ctx, drifts) {
+    const items = (drifts || []).filter((d) => d.bytes && d.bytes.length > 0);
+    if (items.length === 0) return null;
+    this._emit("engine:operation", {
+      ctx,
+      operation: "markdown 往返漂移已修正",
+      count: items.length,
+      paths: items.map((d) => d.path),
+    });
+    const { batches, skipped } = this.commitBuilder.build({
+      operationId: ctx.id + "-drift",
+      uploads: items.map((d) => ({ path: d.path, bytes: d.bytes, op: "update", canonicalDrift: true })),
+      deletionsRemote: [],
+    });
+    if (batches.length === 0) {
+      // 修正内容全部超限: 不推进含漂移的基准,下一轮按本地变更重试,保持可见
+      throw this._skippedError(skipped, { uploads: items, deletionsRemote: [] }, "canonical 修正写入全部被跳过");
+    }
+    if (ctx.state === SyncState.MERGING) transition(ctx, SyncState.COMMITTING);
+    const push = await this._pushAtomic(ctx, batches);
+    if (!push || !push.finalSha) {
+      throw new SyncError({
+        category: SyncErrorCategory.REMOTE_CHANGED,
+        code: "PUSH_UNCONFIRMED",
+        operation: "pushCorrections",
+        message: "canonical 修正推送后无法确认远端引用状态,本轮不标记成功",
+        retryable: true,
+        recoverable: false,
+      });
+    }
+    return push.baseSha || push.finalSha;
   }
 
   async _pauseLocalChanged(ctx, err) {
@@ -817,9 +966,21 @@ export class SyncEngine {
    * 远端确认后应用本地侧变更(下载/本地删除)。
    * M5: 破坏性写入前复查本地与快照是否一致,同步期间被用户修改/新建的文件一律
    * 中止覆盖,抛出可恢复错误,下一轮重新规划。
+   * canonical 漂移检测: markdown 文档写入后回读导出,与远端树 sha 不一致时记录
+   * 漂移(drifts),由 _applyCanonicalCorrections 同轮补推修正提交。
    */
-  async _applyLocalChanges(ctx, plan, { allowRebuildOverwrite = false } = {}) {
+  async _applyLocalChanges(ctx, plan, { allowRebuildOverwrite = false, drifts = null, remoteEntries = new Map() } = {}) {
+    // 下载预检: 目录树自带每个文件的 size,超限文件跳过下载并计入可见计数,
+    // 不让单个大资源文件阻塞本轮其余文件的同步(与上传侧 LARGE_FILE 对称)
+    const downloadLimit = (this.commitBuilder && this.commitBuilder.requestLimit) || 0;
     for (const item of plan.downloads) {
+      const entry = remoteEntries.get(item.path);
+      const remoteSize = (entry && entry.size) || 0;
+      if (downloadLimit > 0 && remoteSize > downloadLimit) {
+        plan.skippedLargeDownloads = plan.skippedLargeDownloads || [];
+        plan.skippedLargeDownloads.push({ path: item.path, size: remoteSize });
+        continue;
+      }
       if (item.op === "update") {
         if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
       } else if (!allowRebuildOverwrite) {
@@ -833,6 +994,14 @@ export class SyncEngine {
       const blob = new Blob([src.bytes]);
       const writeOp = item.op === "create" && !localExistsNow ? "create" : "update";
       await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), writeOp);
+      if (drifts && this._docFormat(item.path) === "markdown") {
+        const reBytes = await this._mergeLocalBytes(item.path);
+        const reSha = reBytes ? await this.provider.gitBlobSha(reBytes) : null;
+        const expectedSha = (remoteEntries.get(item.path) || {}).sha || null;
+        if (reSha !== expectedSha) {
+          drifts.push({ path: item.path, bytes: reBytes, expectedSha, actualSha: reSha });
+        }
+      }
     }
     for (const item of plan.deletionsLocal) {
       if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
@@ -841,15 +1010,35 @@ export class SyncEngine {
     if (plan.deletionsLocal.length > 0) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
+    if ((plan.skippedLargeDownloads || []).length > 0) {
+      this._emit("engine:operation", {
+        ctx,
+        operation: "超大远端文件已跳过下载",
+        count: plan.skippedLargeDownloads.length,
+        paths: plan.skippedLargeDownloads.map((item) => item.path),
+      });
+    }
     if (plan.downloads.length > 0 && !plan.downloads.some((item) => /\.sy$/i.test(item.path))) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
   }
 
-  /** 断言本地文件自快照以来未变化(sha 级复查);缺失即视为变化 */
+  /** 断言本地文件自快照以来未变化(sha 级复查);快照无记录或内容变化一律中止 */
   async _assertLocalUnchanged(ctx, path, message) {
     const snapshotSha = (ctx.snapshotRawShas || new Map()).get(path);
-    if (snapshotSha === undefined) return; // 快照无记录(理论上不可达),不拦截
+    if (snapshotSha === undefined) {
+      // 守卫缺口默认中止(M5): 无快照记录就无法证明未变化,宁可暂停交人工,
+      // 也不静默覆盖用户在同步窗口内的修改
+      throw new SyncError({
+        category: SyncErrorCategory.CONFLICT,
+        code: "LOCAL_CHANGED",
+        operation: "applyLocalChanges",
+        path,
+        message: "本地快照缺少该文件的复查记录,已中止覆盖: " + path,
+        retryable: false,
+        recoverable: true,
+      });
+    }
     await this._localShaOrThrow(path, snapshotSha, message);
   }
 
@@ -922,6 +1111,10 @@ export class SyncEngine {
       skippedDeletes: plan.skippedDeletes.length,
       skippedDeleteReasons: plan.skippedDeletes,
       skippedLarge: (ctx.skippedLarge || []).length,
+      skippedLargeDownloads: (plan.skippedLargeDownloads || []).length,
+      // canonical 漂移修正不在 uploads 计数内(内容以回读版本为准),单独可见:
+      // 修正提交会让远端 HEAD 前移,结果不体现会表现为"零操作却有新提交"
+      canonicalDrifts: ctx.canonicalDrifts || 0,
       unchanged: plan.unchanged,
       conflicts: 0,
     };
