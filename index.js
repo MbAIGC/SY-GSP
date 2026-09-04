@@ -145,8 +145,8 @@ var DEFAULT_IGNORES = Object.freeze([
   "data/plugins/*",
   "data/widgets/*",
   "data/storage/*",
-  // 笔记本设备侧配置/排序由内核自行生成，不作为用户文档跨设备合并。
-  "data/*/.siyuan/conf.json",
+  // sort.json 是设备侧排序状态，不作为用户文档跨设备合并。
+  // conf.json 包含笔记本名称等恢复所需配置，必须参与同步。
   "data/*/.siyuan/sort.json",
   ".lock",
   "temp/*"

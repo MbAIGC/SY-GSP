@@ -66,7 +66,7 @@ npm run smoke
 - 无 BASE 同路径远端较新；
 - 无法判断时间时进入冲突；
 - 首次同步双方各有不同文件时双向收敛；
-- `.siyuan/conf.json` 与 `sort.json` 精确忽略，`.sy` 不受影响。
+- `.siyuan/sort.json` 精确忽略；`.siyuan/conf.json` 保存笔记本名称等恢复配置，参与同步；`.sy` 不受影响。
 
 ## 设计限制
 
