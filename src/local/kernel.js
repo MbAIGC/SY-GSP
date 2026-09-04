@@ -46,10 +46,12 @@ export function createKernel(q) {
     form.append("file", blob);
     const resp = await fetch("/api/file/putFile", { method: "POST", body: form });
     if (!resp.ok) throw new Error("写入本地文件失败 " + path + ": HTTP " + resp.status);
-    // L2: putFile 的 200 响应也可能是业务错误信封,必须校验 code(仅检查 resp.ok 会吞掉失败)
+    // Android 某些版本的 putFile 成功响应为空体;非空响应仍校验业务错误。
+    const text = await resp.text();
+    if (!text.trim()) return null;
     let json;
     try {
-      json = await resp.json();
+      json = JSON.parse(text);
     } catch (e) {
       throw new Error("写入本地文件失败 " + path + ": 响应无法解析");
     }

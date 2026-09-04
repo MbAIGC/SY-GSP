@@ -77,9 +77,11 @@ function createKernel(q2) {
     form.append("file", blob);
     const resp = await fetch("/api/file/putFile", { method: "POST", body: form });
     if (!resp.ok) throw new Error("写入本地文件失败 " + path + ": HTTP " + resp.status);
+    const text = await resp.text();
+    if (!text.trim()) return null;
     let json;
     try {
-      json = await resp.json();
+      json = JSON.parse(text);
     } catch (e) {
       throw new Error("写入本地文件失败 " + path + ": 响应无法解析");
     }
