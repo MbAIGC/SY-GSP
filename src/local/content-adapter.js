@@ -90,6 +90,15 @@ export class ContentAdapter {
     return this.kernel.createDoc(notebookId, hpath, title, stripFirstHeading(mdText));
   }
 
+  /** 备份本地文件但保留原文件,用于同步重建覆盖前留存现场。 */
+  async backupFileWithBackup(path) {
+    const blob = await this.kernel.getFile(path);
+    if (!blob) return "";
+    const backupPath = this.backupDir + String(path).replace(/^\/+/, "");
+    await this.kernel.putFile(backupPath, blob, false);
+    return backupPath;
+  }
+
   /** 删除本地文件(先备份到隔离目录),返回备份路径 */
   async removeFileWithBackup(path) {
     const blob = await this.kernel.getFile(path);

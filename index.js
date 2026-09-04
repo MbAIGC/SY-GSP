@@ -418,6 +418,14 @@ var ContentAdapter = class {
     const title = extractFirstHeading(mdText) || basename(hpath);
     return this.kernel.createDoc(notebookId, hpath, title, stripFirstHeading(mdText));
   }
+  /** 备份本地文件但保留原文件,用于同步重建覆盖前留存现场。 */
+  async backupFileWithBackup(path) {
+    const blob = await this.kernel.getFile(path);
+    if (!blob) return "";
+    const backupPath = this.backupDir + String(path).replace(/^\/+/, "");
+    await this.kernel.putFile(backupPath, blob, false);
+    return backupPath;
+  }
   /** 删除本地文件(先备份到隔离目录),返回备份路径 */
   async removeFileWithBackup(path) {
     const blob = await this.kernel.getFile(path);
@@ -2400,6 +2408,7 @@ var SyncTrigger = Object.freeze({
   STARTUP: "startup",
   RETRY: "retry",
   CONFLICT_RESOLUTION: "conflict_resolution",
+  REBUILD: "rebuild",
   DIAGNOSIS: "diagnosis"
 });
 var SyncMode = Object.freeze({
@@ -2511,7 +2520,8 @@ var SyncEngine = class {
       transition(ctx, SyncState.FETCHING_REMOTE);
       this._emit("engine:phase", { ctx, state: SyncState.FETCHING_REMOTE });
       const confirmedBaseSha = this.metadataStore.getBaseCommit(this.config.repoKey);
-      const forcedByWizard = (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution") && (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
+      const forcedByWizard = (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution" || ctx.trigger === "rebuild" || ctx.originTrigger === "rebuild") && (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
+      const rebuildRemote = ctx.trigger === "rebuild" || ctx.originTrigger === "rebuild";
       let remoteHead = null;
       let remoteEntries = /* @__PURE__ */ new Map();
       let branchHeadMissing = false;
@@ -2548,7 +2558,7 @@ var SyncEngine = class {
       }
       remoteEntries = this._withoutIgnoredEntries(remoteEntries);
       if (forcedByWizard) {
-        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas);
+        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote });
       }
       transition(ctx, SyncState.RESOLVING_BASE);
       this._emit("engine:phase", { ctx, state: SyncState.RESOLVING_BASE });
@@ -2840,7 +2850,7 @@ var SyncEngine = class {
    * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
    * 本地为准方向若本地枚举异常,禁止删远端(可能因漏扫而误删)。
    */
-  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas) {
+  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false } = {}) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {
       throw new SyncError({
@@ -2944,7 +2954,7 @@ var SyncEngine = class {
       }
     } else {
       try {
-        await this._applyLocalChanges(ctx, plan);
+        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote });
       } catch (err) {
         if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
           return this._pauseLocalChanged(ctx, err);
@@ -3163,19 +3173,22 @@ var SyncEngine = class {
    * M5: 破坏性写入前复查本地与快照是否一致,同步期间被用户修改/新建的文件一律
    * 中止覆盖,抛出可恢复错误,下一轮重新规划。
    */
-  async _applyLocalChanges(ctx, plan) {
+  async _applyLocalChanges(ctx, plan, { allowRebuildOverwrite = false } = {}) {
     for (const item of plan.downloads) {
       if (item.op === "update") {
-        await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
-      } else {
+        if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
+      } else if (!allowRebuildOverwrite) {
         await this._assertLocalStillAbsent(ctx, item.path);
+      }
+      if (allowRebuildOverwrite && await this._readLocalBytes(item.path)) {
+        await this.contentAdapter.backupFileWithBackup(item.path);
       }
       const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
       const blob = new Blob([src.bytes]);
       await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), item.op === "create" ? "create" : "update");
     }
     for (const item of plan.deletionsLocal) {
-      await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
+      if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
       await this.contentAdapter.removeFileWithBackup(item.path);
     }
     if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0) {
@@ -6389,8 +6402,8 @@ var SyGspPlugin = class extends q.Plugin {
         dialog.destroy();
         this.logs.warn("同步重建: 用户选择" + text + ",开始执行镜像");
         this.controller.retryPolicy.enabled = false;
-        this.notification.syncStarted("manual");
-        this.controller.syncNow({ trigger: "manual", mode });
+        this.notification.syncStarted(SyncTrigger.REBUILD);
+        this.controller.syncNow({ trigger: SyncTrigger.REBUILD, mode });
       });
       bar.appendChild(button);
     }

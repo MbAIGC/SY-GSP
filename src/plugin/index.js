@@ -15,6 +15,7 @@ import { CommitBuilder } from "../sync/commit-builder.js";
 import { ConflictService } from "../sync/conflict-service.js";
 import { RebuildService } from "../sync/rebuild-service.js";
 import { SyncController, ENGINE_STATE_FILE } from "../sync/sync-controller.js";
+import { SyncTrigger } from "../sync/sync-context.js";
 import { SyncMetadataStore } from "../storage/sync-metadata-store.js";
 import { SyncHistoryStore } from "../storage/sync-history-store.js";
 import { LocalManifestStore } from "../storage/local-manifest-store.js";
@@ -736,8 +737,8 @@ export default class SyGspPlugin extends q.Plugin {
         dialog.destroy();
         this.logs.warn("同步重建: 用户选择" + text + ",开始执行镜像");
         this.controller.retryPolicy.enabled = false;
-        this.notification.syncStarted("manual");
-        this.controller.syncNow({ trigger: "manual", mode });
+        this.notification.syncStarted(SyncTrigger.REBUILD);
+        this.controller.syncNow({ trigger: SyncTrigger.REBUILD, mode });
       });
       bar.appendChild(button);
     }

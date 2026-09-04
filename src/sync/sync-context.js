@@ -110,6 +110,7 @@ export const SyncTrigger = Object.freeze({
   STARTUP: "startup",
   RETRY: "retry",
   CONFLICT_RESOLUTION: "conflict_resolution",
+  REBUILD: "rebuild",
   DIAGNOSIS: "diagnosis",
 });
 

@@ -182,6 +182,9 @@ async function makeHarness({ remoteFiles = {}, localFiles = {}, commitBuilder = 
     async writeFileBlob(path, blob) {
       await kernel.putFile(path, blob, false);
     },
+    async backupFileWithBackup(path) {
+      return "temp/SY-GSP/backup/" + path;
+    },
     async removeFileWithBackup(path) {
       await kernel.removeFile(path);
     },
@@ -678,6 +681,17 @@ test("M5: 同步期间本地新建远端文件 → FILE_CONFLICTS 暂停且保�
   assert.ok(set, "应保存可处理的冲突集");
   assert.equal(set.conflicts[0].path, path);
   assert.match(set.conflicts[0].reason, /本地新建了同名文件/);
+});
+
+test("同步重建以远端为准: 允许覆盖快照后出现的本地文件", async () => {
+  const path = "data/20240101120000-abc/rebuild.md";
+  const h = await makeHarness({ remoteFiles: { [path]: "remote" } });
+  const ctx = h.makeCtx({ trigger: "rebuild", mode: "remote_over_local" });
+  ctx.snapshotRawShas = new Map();
+  ctx.observedRemoteHead = h.repo.head;
+  await h.kernel.putFile(path, new Blob([enc("local created later")]), false);
+  await h.engine._applyLocalChanges(ctx, { downloads: [{ path, op: "create" }], deletionsLocal: [] }, { allowRebuildOverwrite: true });
+  assert.equal(await (await h.kernel.getFile(path)).text(), "remote");
 });
 
 test("M5: 下载/本地删除前复查——本地在快照后被修改 → LOCAL_CHANGED 中止,内容不被覆盖", async () => {

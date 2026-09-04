@@ -73,8 +73,9 @@ export class SyncEngine {
       this._emit("engine:phase", { ctx, state: SyncState.FETCHING_REMOTE });
       const confirmedBaseSha = this.metadataStore.getBaseCommit(this.config.repoKey);
       const forcedByWizard =
-        (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution") &&
+        (ctx.trigger === "conflict_resolution" || ctx.originTrigger === "conflict_resolution" || ctx.trigger === "rebuild" || ctx.originTrigger === "rebuild") &&
         (ctx.mode === SyncMode.LOCAL_OVER_REMOTE || ctx.mode === SyncMode.REMOTE_OVER_LOCAL);
+      const rebuildRemote = ctx.trigger === "rebuild" || ctx.originTrigger === "rebuild";
       let remoteHead = null;
       let remoteEntries = new Map();
       let branchHeadMissing = false;
@@ -122,7 +123,7 @@ export class SyncEngine {
       // 3.5 强制方向(首同步向导明确选边后的恢复路径): 跳过基准解析与三路合并,
       // 按用户选定方向镜像。RETRY 重规划需保留最初触发者(originTrigger)。
       if (forcedByWizard) {
-        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas);
+        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote });
       }
 
       // 4. BASE 解析
@@ -453,7 +454,7 @@ export class SyncEngine {
    * 不做三路合并,不存在冲突;远端确认成功后以对应提交为新基准。
    * 本地为准方向若本地枚举异常,禁止删远端(可能因漏扫而误删)。
    */
-  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas) {
+  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false } = {}) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {
       throw new SyncError({
@@ -557,7 +558,7 @@ export class SyncEngine {
     } else {
       // 以远端为准: 仅本地侧变更,不产生远端写入
       try {
-        await this._applyLocalChanges(ctx, plan);
+        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote });
       } catch (err) {
         if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
           return this._pauseLocalChanged(ctx, err);
@@ -796,19 +797,22 @@ export class SyncEngine {
    * M5: 破坏性写入前复查本地与快照是否一致,同步期间被用户修改/新建的文件一律
    * 中止覆盖,抛出可恢复错误,下一轮重新规划。
    */
-  async _applyLocalChanges(ctx, plan) {
+  async _applyLocalChanges(ctx, plan, { allowRebuildOverwrite = false } = {}) {
     for (const item of plan.downloads) {
       if (item.op === "update") {
-        await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
-      } else {
+        if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
+      } else if (!allowRebuildOverwrite) {
         await this._assertLocalStillAbsent(ctx, item.path);
+      }
+      if (allowRebuildOverwrite && (await this._readLocalBytes(item.path))) {
+        await this.contentAdapter.backupFileWithBackup(item.path);
       }
       const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
       const blob = new Blob([src.bytes]);
       await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), item.op === "create" ? "create" : "update");
     }
     for (const item of plan.deletionsLocal) {
-      await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
+      if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
       await this.contentAdapter.removeFileWithBackup(item.path);
     }
     if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0) {
