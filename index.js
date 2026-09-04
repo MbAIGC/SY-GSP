@@ -2981,6 +2981,7 @@ var SyncEngine = class {
           throw this._skippedError(skipped, plan, "强制方向(以本地为准)部分大文件未上传,本轮不标记完整成功");
         }
         confirmedSha = push.baseSha || push.finalSha;
+        if (rebuildRemote) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localPaths);
       }
     } else {
       try {
@@ -2999,6 +3000,25 @@ var SyncEngine = class {
     transition(ctx, SyncState.SUCCESS);
     finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, confirmedSha, plan) });
     return ctx.result;
+  }
+  async _assertRemoteMatchesLocal(ctx, commitSha, localPaths) {
+    const commit = await this.provider.getCommit(commitSha);
+    const remoteEntries = this._withoutIgnoredEntries(await this._treeMap(await this.provider.getTree(commit.treeSha)));
+    const remotePaths = new Set(remoteEntries.keys());
+    const residual = [...remotePaths].filter((path) => !localPaths.has(path));
+    const missing = [...localPaths].filter((path) => !remotePaths.has(path));
+    if (residual.length || missing.length) {
+      throw new SyncError({
+        category: SyncErrorCategory.GIT,
+        code: "REBUILD_VERIFY_FAILED",
+        operation: "verifyRebuild",
+        phase: SyncState.VERIFYING_REMOTE_HEAD,
+        message: "以本地为准重建后远端文件仍不一致",
+        detail: "远端残留: " + residual.slice(0, 20).join(", ") + "；远端缺失: " + missing.slice(0, 20).join(", ") + "，操作=" + ctx.id,
+        retryable: false,
+        recoverable: true
+      });
+    }
   }
   async _runMerges(ctx, plan) {
     for (const mergeItem of plan.merges) {
@@ -6431,13 +6451,42 @@ var SyGspPlugin = class extends q.Plugin {
       button.className = "b3-button b3-button--text";
       button.textContent = text;
       button.addEventListener("click", () => {
-        const confirmText = window.prompt("请输入“确认重建”以继续");
-        if (confirmText !== "确认重建") return;
-        dialog.destroy();
-        this.logs.warn("同步重建: 用户选择" + text + ",开始执行镜像");
-        this.controller.retryPolicy.enabled = false;
-        this.notification.syncStarted(SyncTrigger.REBUILD);
-        this.controller.syncNow({ trigger: SyncTrigger.REBUILD, mode });
+        const deletingCount = mode === "local_over_remote" ? report.onlyRemote.length : report.onlyLocal.length;
+        const deletingPaths = mode === "local_over_remote" ? report.onlyRemote : report.onlyLocal;
+        const confirmDialog = new q.Dialog({
+          title: "确认同步重建",
+          content: '<div id="sygspRebuildConfirm" style="padding:16px;white-space:pre-wrap"></div>',
+          width: "520px"
+        });
+        const confirmRoot = confirmDialog.element.querySelector("#sygspRebuildConfirm");
+        confirmRoot.textContent = [
+          "重建方向: " + text,
+          "将删除另一端文件: " + deletingCount + " 个",
+          deletingPaths.length ? "待删除路径:\n" + deletingPaths.slice(0, 20).join("\n") : "没有待删除文件",
+          deletingPaths.length > 20 ? "其余路径将在执行日志中记录" : "",
+          "\n此操作不可自动撤销,确定继续吗？"
+        ].filter(Boolean).join("\n");
+        const confirmBar = document.createElement("div");
+        confirmBar.className = "fn__flex";
+        confirmBar.style.cssText = "justify-content:flex-end;gap:8px;margin-top:16px";
+        const cancel = document.createElement("button");
+        cancel.className = "b3-button b3-button--cancel";
+        cancel.textContent = "取消";
+        cancel.addEventListener("click", () => confirmDialog.destroy());
+        const confirm = document.createElement("button");
+        confirm.className = "b3-button b3-button--warning";
+        confirm.textContent = "确认重建";
+        confirm.addEventListener("click", () => {
+          confirmDialog.destroy();
+          dialog.destroy();
+          this.logs.warn("同步重建: 用户选择" + text + ",开始执行镜像");
+          this.controller.retryPolicy.enabled = false;
+          this.notification.syncStarted(SyncTrigger.REBUILD);
+          this.controller.syncNow({ trigger: SyncTrigger.REBUILD, mode });
+        });
+        confirmBar.appendChild(cancel);
+        confirmBar.appendChild(confirm);
+        confirmRoot.appendChild(confirmBar);
       });
       bar.appendChild(button);
     }

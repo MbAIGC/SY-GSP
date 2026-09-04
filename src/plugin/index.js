@@ -732,13 +732,42 @@ export default class SyGspPlugin extends q.Plugin {
       button.className = "b3-button b3-button--text";
       button.textContent = text;
       button.addEventListener("click", () => {
-        const confirmText = window.prompt("请输入“确认重建”以继续");
-        if (confirmText !== "确认重建") return;
-        dialog.destroy();
-        this.logs.warn("同步重建: 用户选择" + text + ",开始执行镜像");
-        this.controller.retryPolicy.enabled = false;
-        this.notification.syncStarted(SyncTrigger.REBUILD);
-        this.controller.syncNow({ trigger: SyncTrigger.REBUILD, mode });
+        const deletingCount = mode === "local_over_remote" ? report.onlyRemote.length : report.onlyLocal.length;
+        const deletingPaths = mode === "local_over_remote" ? report.onlyRemote : report.onlyLocal;
+        const confirmDialog = new q.Dialog({
+          title: "确认同步重建",
+          content: '<div id="sygspRebuildConfirm" style="padding:16px;white-space:pre-wrap"></div>',
+          width: "520px",
+        });
+        const confirmRoot = confirmDialog.element.querySelector("#sygspRebuildConfirm");
+        confirmRoot.textContent = [
+          "重建方向: " + text,
+          "将删除另一端文件: " + deletingCount + " 个",
+          deletingPaths.length ? "待删除路径:\n" + deletingPaths.slice(0, 20).join("\n") : "没有待删除文件",
+          deletingPaths.length > 20 ? "其余路径将在执行日志中记录" : "",
+          "\n此操作不可自动撤销,确定继续吗？",
+        ].filter(Boolean).join("\n");
+        const confirmBar = document.createElement("div");
+        confirmBar.className = "fn__flex";
+        confirmBar.style.cssText = "justify-content:flex-end;gap:8px;margin-top:16px";
+        const cancel = document.createElement("button");
+        cancel.className = "b3-button b3-button--cancel";
+        cancel.textContent = "取消";
+        cancel.addEventListener("click", () => confirmDialog.destroy());
+        const confirm = document.createElement("button");
+        confirm.className = "b3-button b3-button--warning";
+        confirm.textContent = "确认重建";
+        confirm.addEventListener("click", () => {
+          confirmDialog.destroy();
+          dialog.destroy();
+          this.logs.warn("同步重建: 用户选择" + text + ",开始执行镜像");
+          this.controller.retryPolicy.enabled = false;
+          this.notification.syncStarted(SyncTrigger.REBUILD);
+          this.controller.syncNow({ trigger: SyncTrigger.REBUILD, mode });
+        });
+        confirmBar.appendChild(cancel);
+        confirmBar.appendChild(confirm);
+        confirmRoot.appendChild(confirmBar);
       });
       bar.appendChild(button);
     }

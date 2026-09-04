@@ -554,6 +554,7 @@ export class SyncEngine {
           throw this._skippedError(skipped, plan, "强制方向(以本地为准)部分大文件未上传,本轮不标记完整成功");
         }
         confirmedSha = push.baseSha || push.finalSha;
+        if (rebuildRemote) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localPaths);
       }
     } else {
       // 以远端为准: 仅本地侧变更,不产生远端写入
@@ -574,6 +575,26 @@ export class SyncEngine {
     transition(ctx, SyncState.SUCCESS);
     finish(ctx, { state: SyncState.SUCCESS, result: this._result(ctx, confirmedSha, plan) });
     return ctx.result;
+  }
+
+  async _assertRemoteMatchesLocal(ctx, commitSha, localPaths) {
+    const commit = await this.provider.getCommit(commitSha);
+    const remoteEntries = this._withoutIgnoredEntries(await this._treeMap(await this.provider.getTree(commit.treeSha)));
+    const remotePaths = new Set(remoteEntries.keys());
+    const residual = [...remotePaths].filter((path) => !localPaths.has(path));
+    const missing = [...localPaths].filter((path) => !remotePaths.has(path));
+    if (residual.length || missing.length) {
+      throw new SyncError({
+        category: SyncErrorCategory.GIT,
+        code: "REBUILD_VERIFY_FAILED",
+        operation: "verifyRebuild",
+        phase: SyncState.VERIFYING_REMOTE_HEAD,
+        message: "以本地为准重建后远端文件仍不一致",
+        detail: "远端残留: " + residual.slice(0, 20).join(", ") + "；远端缺失: " + missing.slice(0, 20).join(", ") + "，操作=" + ctx.id,
+        retryable: false,
+        recoverable: true,
+      });
+    }
   }
 
   async _runMerges(ctx, plan) {

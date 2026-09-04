@@ -427,7 +427,7 @@ test("强制方向(以本地为准): 无基准双方均有内容 → 镜像上�
     remoteFiles: { [a]: "remote a", [b]: "only remote" },
     localFiles: { [a]: "local a", [c]: "local only" },
   });
-  const ctx = h.makeCtx({ trigger: "conflict_resolution", mode: "local_over_remote" });
+  const ctx = h.makeCtx({ trigger: "rebuild", mode: "local_over_remote" });
   const result = await h.engine.run(ctx);
   assert.equal(result.paused, undefined, "不得再进入 BASE_UNRESOLVED 暂停");
   assert.equal(result.success, true);
@@ -441,6 +441,20 @@ test("强制方向(以本地为准): 无基准双方均有内容 → 镜像上�
   assert.deepEqual(paths, [a, c].sort(), "远端应与本地一致");
   const base = h.metadataStore.getBaseCommit("github:o/r:main");
   assert.equal(base, h.repo.head, "成功后基准推进到新远端头");
+});
+
+test("同步重建以本地为准: 远端多余笔记本文件全部删除", async () => {
+  const keep = "data/20240101120000-abc/20240101120001-def5678.sy";
+  const extra = "data/20240101120002-extraabc/20240101120003-exy5678.sy";
+  const extraConf = "data/20240101120002-extraabc/.siyuan/conf.json";
+  const h = await makeHarness({
+    remoteFiles: { [keep]: "keep", [extra]: "extra", [extraConf]: "{\"name\":\"多余\"}" },
+    localFiles: { [keep]: "keep" },
+  });
+  const result = await h.engine.run(h.makeCtx({ trigger: "rebuild", mode: "local_over_remote" }));
+  assert.equal(result.success, true);
+  const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
+  assert.deepEqual(tree.map((entry) => entry.path), [keep]);
 });
 
 test("强制方向(以远端为准): 镜像下载并删除本地多余,不产生远端提交", async () => {
