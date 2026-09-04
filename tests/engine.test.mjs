@@ -174,15 +174,19 @@ async function makeHarness({ remoteFiles = {}, localFiles = {}, commitBuilder = 
       return { files: out, enumErrorOccurred: false };
     },
   };
+  const backupPaths = [];
+  const writeOps = [];
   const contentAdapter = {
     kernel,
     async readFileBlob(path) {
       return kernel.getFile(path);
     },
-    async writeFileBlob(path, blob) {
+    async writeFileBlob(path, blob, format, op) {
+      writeOps.push({ path, format, op });
       await kernel.putFile(path, blob, false);
     },
     async backupFileWithBackup(path) {
+      backupPaths.push(path);
       return "temp/SY-GSP/backup/" + path;
     },
     async removeFileWithBackup(path) {
@@ -218,7 +222,7 @@ async function makeHarness({ remoteFiles = {}, localFiles = {}, commitBuilder = 
     if (overrides) ctx.overrides = overrides;
     return ctx;
   };
-  return { repo, kernel, engine, workspace, metadataStore, manifestStore, conflictService, makeCtx };
+  return { repo, kernel, engine, workspace, metadataStore, manifestStore, conflictService, backupPaths, writeOps, makeCtx };
 }
 
 test("引擎: 远端领先 → 下载覆盖本地,不产生远端写入,基准推进", async () => {
@@ -692,6 +696,8 @@ test("同步重建以远端为准: 允许覆盖快照后出现的本地文件", 
   await h.kernel.putFile(path, new Blob([enc("local created later")]), false);
   await h.engine._applyLocalChanges(ctx, { downloads: [{ path, op: "create" }], deletionsLocal: [] }, { allowRebuildOverwrite: true });
   assert.equal(await (await h.kernel.getFile(path)).text(), "remote");
+  assert.deepEqual(h.backupPaths, [path], "覆盖前应备份本地文件");
+  assert.equal(h.writeOps[0].op, "update", "落地时已存在的文件必须按更新处理");
 });
 
 test("M5: 下载/本地删除前复查——本地在快照后被修改 → LOCAL_CHANGED 中止,内容不被覆盖", async () => {

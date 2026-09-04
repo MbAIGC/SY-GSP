@@ -804,12 +804,14 @@ export class SyncEngine {
       } else if (!allowRebuildOverwrite) {
         await this._assertLocalStillAbsent(ctx, item.path);
       }
-      if (allowRebuildOverwrite && (await this._readLocalBytes(item.path))) {
+      const localExistsNow = allowRebuildOverwrite && (await this._readLocalBytes(item.path)) !== null;
+      if (localExistsNow) {
         await this.contentAdapter.backupFileWithBackup(item.path);
       }
       const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
       const blob = new Blob([src.bytes]);
-      await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), item.op === "create" ? "create" : "update");
+      const writeOp = item.op === "create" && !localExistsNow ? "create" : "update";
+      await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), writeOp);
     }
     for (const item of plan.deletionsLocal) {
       if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
