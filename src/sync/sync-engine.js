@@ -506,7 +506,7 @@ export class SyncEngine {
     } else {
       for (const path of remotePaths) {
         const remoteSha = remoteEntries.get(path).sha;
-        if (localPaths.has(path) && localShas.get(path) === remoteSha) {
+        if (!rebuildRemote && localPaths.has(path) && localShas.get(path) === remoteSha) {
           plan.unchanged += 1;
           continue;
         }

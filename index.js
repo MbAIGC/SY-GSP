@@ -395,9 +395,9 @@ var ContentAdapter = class {
     }
     if (isSiyuanDocPath(originalPath)) {
       const notebookId = notebookIdOf(originalPath);
-      await this.kernel.openNotebook(notebookId);
       const result = await this.kernel.putFile(originalPath, blob, false);
       await this.kernel.refreshFiletree();
+      await this.kernel.openNotebook(notebookId);
       return result;
     }
     return this.kernel.putFile(originalPath, blob, false);
@@ -2913,7 +2913,7 @@ var SyncEngine = class {
     } else {
       for (const path of remotePaths) {
         const remoteSha = remoteEntries.get(path).sha;
-        if (localPaths.has(path) && localShas.get(path) === remoteSha) {
+        if (!rebuildRemote && localPaths.has(path) && localShas.get(path) === remoteSha) {
           plan.unchanged += 1;
           continue;
         }

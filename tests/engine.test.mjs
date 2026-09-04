@@ -482,6 +482,15 @@ test("自动同步: 本地删除已同步到远端并清理清单", async () => 
   assert.equal(h.manifestStore.has(path), false, "删除成功后清单应移除路径");
 });
 
+test("同步重建以远端为准: 内容相同也重新落地,用于修复文档树登记", async () => {
+  const path = "data/20240101120000-abc/20240101120001-def5678.sy";
+  const h = await makeHarness({ remoteFiles: { [path]: "same" }, localFiles: { [path]: "same" } });
+  const result = await h.engine.run(h.makeCtx({ trigger: "rebuild", mode: "remote_over_local" }));
+  assert.equal(result.success, true);
+  assert.equal(result.downloads, 1, "重建不得因哈希相同而跳过重新落地");
+  assert.equal(h.writeOps[0].path, path);
+});
+
 test("强制方向(以远端为准): 空仓库显式报错,不清空本地", async () => {
   const c = "data/20240101120000-abc/c.md";
   const h = await makeHarness({ localFiles: { [c]: "local only" } });
