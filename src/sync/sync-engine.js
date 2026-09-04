@@ -192,6 +192,22 @@ export class SyncEngine {
           throw err;
         }
         await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
+        if (plan.skippedDeletes.length > 0) {
+          this._emit("engine:operation", {
+            ctx,
+            operation: "远端删除已跳过",
+            count: plan.skippedDeletes.length,
+            paths: plan.skippedDeletes.map((item) => item.path),
+          });
+        }
+        if (plan.deletionsLocal.length > 0) {
+          this._emit("engine:operation", {
+            ctx,
+            operation: "本地删除已执行",
+            count: plan.deletionsLocal.length,
+            paths: plan.deletionsLocal.map((item) => item.path),
+          });
+        }
         if (remoteHead) {
           await this.metadataStore.setConfirmedCommit(this.config.repoKey, remoteHead.sha, ctx.id);
         }
@@ -246,6 +262,22 @@ export class SyncEngine {
         throw err;
       }
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: plan.deletionsRemote.length > 0 });
+      if (plan.skippedDeletes.length > 0) {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "远端删除已跳过",
+          count: plan.skippedDeletes.length,
+          paths: plan.skippedDeletes.map((item) => item.path),
+        });
+      }
+      if (plan.deletionsRemote.length > 0) {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "远端删除已提交",
+          count: plan.deletionsRemote.length,
+          paths: plan.deletionsRemote.map((item) => item.path),
+        });
+      }
       if (skipped.length > 0) {
         // 部分大文件被跳过: 已推送并经引用确认的内容以「我方提交」推进 BASE(已物化事实),
         // 大文件仍保持待办并抛可见错误——每轮都会重新尝试直至用户处理,绝不静默宣称完整成功

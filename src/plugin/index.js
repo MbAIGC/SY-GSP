@@ -363,6 +363,9 @@ export default class SyGspPlugin extends q.Plugin {
     this.events.on("engine:phase", ({ ctx, state }) => {
       this.logs.info("同步阶段 #" + (ctx && ctx.id ? ctx.id : "?") + ": " + state);
     });
+    this.events.on("engine:operation", ({ operation, count, paths }) => {
+      this.logs.info(operation + " " + count + " 个文件" + (paths && paths.length ? ": " + paths.slice(0, 5).join(", ") : ""));
+    });
     this.events.on("state:changed", ({ state, conflictPaused }) => {
       this.logs.info("状态: " + state + (conflictPaused ? " (冲突暂停: " + conflictPaused.kind + ")" : ""));
       if (this.notification) {

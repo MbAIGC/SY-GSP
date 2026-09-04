@@ -459,6 +459,22 @@ test("强制方向(以远端为准): 镜像下载并删除本地多余,不产生
   assert.equal(base, headBefore, "基准推进到远端头");
 });
 
+test("自动同步: 本地删除已同步到远端并清理清单", async () => {
+  const path = "data/20240101120000-abc/deleted.md";
+  const h = await makeHarness({ remoteFiles: { [path]: "old" }, localFiles: { [path]: "old" } });
+  const baseSha = h.repo.head;
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseSha, "prep");
+  await h.manifestStore.replaceAll([path]);
+  await h.kernel.removeFile(path);
+  const result = await h.engine.run(h.makeCtx());
+  assert.equal(result.success, true);
+  assert.equal(result.uploads, 0);
+  assert.equal(result.deletionsRemote, 1);
+  const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
+  assert.equal(tree.some((entry) => entry.path === path), false, "远端文件应被删除");
+  assert.equal(h.manifestStore.has(path), false, "删除成功后清单应移除路径");
+});
+
 test("强制方向(以远端为准): 空仓库显式报错,不清空本地", async () => {
   const c = "data/20240101120000-abc/c.md";
   const h = await makeHarness({ localFiles: { [c]: "local only" } });

@@ -2608,6 +2608,22 @@ var SyncEngine = class {
           throw err;
         }
         await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
+        if (plan.skippedDeletes.length > 0) {
+          this._emit("engine:operation", {
+            ctx,
+            operation: "远端删除已跳过",
+            count: plan.skippedDeletes.length,
+            paths: plan.skippedDeletes.map((item) => item.path)
+          });
+        }
+        if (plan.deletionsLocal.length > 0) {
+          this._emit("engine:operation", {
+            ctx,
+            operation: "本地删除已执行",
+            count: plan.deletionsLocal.length,
+            paths: plan.deletionsLocal.map((item) => item.path)
+          });
+        }
         if (remoteHead) {
           await this.metadataStore.setConfirmedCommit(this.config.repoKey, remoteHead.sha, ctx.id);
         }
@@ -2655,6 +2671,22 @@ var SyncEngine = class {
         throw err;
       }
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: plan.deletionsRemote.length > 0 });
+      if (plan.skippedDeletes.length > 0) {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "远端删除已跳过",
+          count: plan.skippedDeletes.length,
+          paths: plan.skippedDeletes.map((item) => item.path)
+        });
+      }
+      if (plan.deletionsRemote.length > 0) {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "远端删除已提交",
+          count: plan.deletionsRemote.length,
+          paths: plan.deletionsRemote.map((item) => item.path)
+        });
+      }
       if (skipped.length > 0) {
         if (push.baseSha) {
           await this.metadataStore.setConfirmedCommit(this.config.repoKey, push.baseSha, ctx.id);
@@ -6014,6 +6046,9 @@ var SyGspPlugin = class extends q.Plugin {
     this._eventsBound = true;
     this.events.on("engine:phase", ({ ctx, state }) => {
       this.logs.info("同步阶段 #" + (ctx && ctx.id ? ctx.id : "?") + ": " + state);
+    });
+    this.events.on("engine:operation", ({ operation, count, paths }) => {
+      this.logs.info(operation + " " + count + " 个文件" + (paths && paths.length ? ": " + paths.slice(0, 5).join(", ") : ""));
     });
     this.events.on("state:changed", ({ state, conflictPaused }) => {
       this.logs.info("状态: " + state + (conflictPaused ? " (冲突暂停: " + conflictPaused.kind + ")" : ""));
