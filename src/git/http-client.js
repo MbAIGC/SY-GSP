@@ -21,12 +21,11 @@ export class HttpClient {
    */
   async request(opts) {
     const method = (opts.method || "GET").toUpperCase();
-    const url = this._buildUrl(opts);
+    const requestOpts = method === "GET" && opts.noCache
+      ? Object.assign({}, opts, { query: Object.assign({}, opts.query || {}, { _sgsp_ts: Date.now() }) })
+      : opts;
+    const url = this._buildUrl(requestOpts);
     const headers = Object.assign({ Accept: "application/json" }, opts.headers || {});
-    if (method === "GET" && opts.noCache) {
-      headers["Cache-Control"] = "no-cache";
-      headers.Pragma = "no-cache";
-    }
     if (this.token) headers.Authorization = "token " + this.token;
     let body;
     if (opts.body !== undefined && opts.body !== null) {

@@ -33,7 +33,7 @@ const jsonResponse = (body, status = 200) => ({
 const gh = () => new GitHubProvider({ owner: "o", repo: "r", branch: "main", token: "tk" });
 
 test("GitHub getBranchHead 返回 HEAD 指针", async () => {
-  const calls = mockFetch([{ match: (u) => /\/git\/ref\/heads\/main$/.test(u), respond: () => jsonResponse({ object: { sha: "abc" } }) }]);
+  const calls = mockFetch([{ match: (u) => /\/git\/ref\/heads\/main(?:\?|$)/.test(u), respond: () => jsonResponse({ object: { sha: "abc" } }) }]);
   const head = await gh().getBranchHead();
   assert.equal(head.sha, "abc");
   assert.ok(calls[0].url.startsWith("https://api.github.com/repos/o/r/"));
@@ -43,11 +43,11 @@ test("GitHub updateBranchRef: CAS 校验 + force:false + 回读确认", async ()
   let headReads = 0;
   const calls = mockFetch([
     // 第一次读 HEAD(前置校验)
-    { match: (u) => /\/git\/ref\/heads\/main$/.test(u) && headReads++ === 0, respond: () => jsonResponse({ object: { sha: "old" } }) },
+    { match: (u) => /\/git\/ref\/heads\/main(?:\?|$)/.test(u) && headReads++ === 0, respond: () => jsonResponse({ object: { sha: "old" } }) },
     // PATCH ref
     { match: (u, i) => u.endsWith("/git/refs/heads/main") && i.method === "PATCH", respond: () => jsonResponse({ object: { sha: "new" } }) },
     // 回读确认
-    { match: (u) => /\/git\/ref\/heads\/main$/.test(u), respond: () => jsonResponse({ object: { sha: "new" } }) },
+    { match: (u) => /\/git\/ref\/heads\/main(?:\?|$)/.test(u), respond: () => jsonResponse({ object: { sha: "new" } }) },
   ]);
   const confirmed = await gh().updateBranchRef("new", { expectedHead: "old" });
   assert.equal(confirmed.confirmedSha, "new");
@@ -58,7 +58,7 @@ test("GitHub updateBranchRef: CAS 校验 + force:false + 回读确认", async ()
 test("GitHub updateBranchRef: 推送期间远端前移 → REMOTE_CHANGED,绝不覆盖", async () => {
   let n = 0;
   mockFetch([
-    { match: (u) => /\/git\/ref\/heads\/main$/.test(u) && n++ === 0, respond: () => jsonResponse({ object: { sha: "moved-on" } }) },
+    { match: (u) => /\/git\/ref\/heads\/main(?:\?|$)/.test(u) && n++ === 0, respond: () => jsonResponse({ object: { sha: "moved-on" } }) },
   ]);
   await assert.rejects(
     () => gh().updateBranchRef("new", { expectedHead: "expected" }),
@@ -69,7 +69,7 @@ test("GitHub updateBranchRef: 推送期间远端前移 → REMOTE_CHANGED,绝不
 test("GitHub updateBranchRef: PATCH 409 → PUSH_REJECTED NON_FAST_FORWARD", async () => {
   let n = 0;
   mockFetch([
-    { match: (u) => /\/git\/ref\/heads\/main$/.test(u) && n++ === 0, respond: () => jsonResponse({ object: { sha: "old" } }) },
+    { match: (u) => /\/git\/ref\/heads\/main(?:\?|$)/.test(u) && n++ === 0, respond: () => jsonResponse({ object: { sha: "old" } }) },
     { match: (u, i) => u.endsWith("/git/refs/heads/main") && i.method === "PATCH", respond: () => jsonResponse({ message: "not fast forward" }, 409) },
   ]);
   await assert.rejects(
@@ -165,13 +165,14 @@ test("引用确认: 我方提交被并发写手推进 → 接受漂移并以远�
   assert.equal(r.drifted, true);
 });
 
-test("GitHub 引用读取: noCache 请求包含禁止缓存标头", async () => {
+test("GitHub 引用读取: noCache 通过查询参数避免缓存且不增加自定义请求头", async () => {
   const { GitHubProvider } = await import("../src/git/github-provider.js");
   const provider = new GitHubProvider({ token: "t", owner: "o", repo: "r", branch: "main" });
   let seen;
   provider.http = { request: async (opts) => { seen = opts; return { data: { object: { sha: "head" } } }; } };
   await provider.getBranchHead();
   assert.equal(seen.noCache, true);
+  assert.equal(seen.headers, undefined);
 });
 
 test("引用确认: 真分叉 → CONFIRM_FAILED 且可重试(重新规划)", async () => {
