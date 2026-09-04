@@ -5625,7 +5625,7 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
   });
   menu.addItem({
     label: t.sygspMenuRebuild || "同步重建",
-    icon: "iconRefresh",
+    icon: "iconWarning",
     click: actions.openRebuild
   });
   menu.addItem({
@@ -5700,7 +5700,8 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
     click: actions.openSettings
   });
   menu.addItem({
-    label: "SY-GSP v" + (actions.pluginVersion || "?")
+    label: "v " + (actions.pluginVersion || "?"),
+    icon: "iconInfo"
   });
   return menu;
 }
@@ -6296,8 +6297,8 @@ var SyGspPlugin = class extends q.Plugin {
     if (this.notification) this.notification.setTopBarElement(this.topBarElement);
   }
   async _openRebuildDialog() {
-    if (this.controller && (this.controller.queue.isBusy(this.controller.repoKey()) || this.controller.isConflictPaused())) {
-      this.notification.toast("同步正在运行或处于暂停状态,请先处理当前状态", "error");
+    if (this.controller && this.controller.queue.isBusy(this.controller.repoKey())) {
+      this.notification.toast("同步正在运行,请等待当前操作完成", "error");
       return;
     }
     const info = this._repoInfo();

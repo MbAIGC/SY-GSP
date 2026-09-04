@@ -326,7 +326,7 @@ plugin.data = {
     plugin._topBarCb();
     const items = (stubCalls.lastMenu && stubCalls.lastMenu.items) || [];
     const hit = items.map((it) => it && it.label).find(
-      (l) => typeof l === "string" && /^SY-GSP v/.test(l)
+      (l) => typeof l === "string" && /^v /.test(l)
     );
     if (!hit) throw new Error("菜单缺少版本号条目");
   });

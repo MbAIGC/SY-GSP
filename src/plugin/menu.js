@@ -24,7 +24,7 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
   });
   menu.addItem({
     label: t.sygspMenuRebuild || "同步重建",
-    icon: "iconRefresh",
+    icon: "iconWarning",
     click: actions.openRebuild,
   });
   menu.addItem({
@@ -101,7 +101,8 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
   });
   // 底部插件版本号(展示用,无点击行为)
   menu.addItem({
-    label: "SY-GSP v" + (actions.pluginVersion || "?"),
+    label: "v " + (actions.pluginVersion || "?"),
+    icon: "iconInfo",
   });
   return menu;
 }
