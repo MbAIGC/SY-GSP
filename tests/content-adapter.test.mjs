@@ -22,7 +22,7 @@ function makeKernel({ failRefresh = false } = {}) {
   };
 }
 
-test("原生思源文档落地: 先打开笔记本,写入文件,再刷新文件树", async () => {
+test("原生思源文档落地: 先写入,刷新文件树,再打开笔记本", async () => {
   const kernel = makeKernel();
   const adapter = new ContentAdapter(kernel);
   await adapter.writeFileBlob(
@@ -32,9 +32,9 @@ test("原生思源文档落地: 先打开笔记本,写入文件,再刷新文件�
     "create"
   );
   assert.deepEqual(kernel.calls, [
-    ["openNotebook", "20260903001348-uwng1aa"],
     ["putFile", "data/20260903001348-uwng1aa/20260903211217-uy02kmt.sy"],
     ["refreshFiletree"],
+    ["openNotebook", "20260903001348-uwng1aa"],
   ]);
 });
 
