@@ -817,8 +817,11 @@ export class SyncEngine {
       if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
       await this.contentAdapter.removeFileWithBackup(item.path);
     }
-    if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0) {
-      await this.contentAdapter.kernel.refreshFiletree().catch(() => {});
+    if (plan.deletionsLocal.length > 0) {
+      await this.contentAdapter.kernel.refreshFiletree();
+    }
+    if (plan.downloads.length > 0 && !plan.downloads.some((item) => /\.sy$/i.test(item.path))) {
+      await this.contentAdapter.kernel.refreshFiletree();
     }
   }
 

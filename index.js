@@ -112,6 +112,7 @@ function createKernel(q2) {
     sql: (stmt) => post("/api/query/sql", { stmt }),
     lsNotebooks: () => post("/api/notebook/lsNotebooks", {}),
     createNotebook: (name) => post("/api/notebook/createNotebook", { name }),
+    openNotebook: (notebook) => post("/api/notebook/openNotebook", { notebook }),
     getNotebookConf: (notebook) => post("/api/notebook/getNotebookConf", { notebook }),
     refreshFiletree: () => post("/api/filetree/refreshFiletree", {})
   };
@@ -391,6 +392,13 @@ var ContentAdapter = class {
   async writeFileBlob(originalPath, blob, format = "raw", op = "create") {
     if (format === "markdown") {
       return this._writeMarkdownDoc(originalPath, blob, op);
+    }
+    if (isSiyuanDocPath(originalPath)) {
+      const notebookId = notebookIdOf(originalPath);
+      await this.kernel.openNotebook(notebookId);
+      const result = await this.kernel.putFile(originalPath, blob, false);
+      await this.kernel.refreshFiletree();
+      return result;
     }
     return this.kernel.putFile(originalPath, blob, false);
   }
@@ -3193,9 +3201,11 @@ var SyncEngine = class {
       if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
       await this.contentAdapter.removeFileWithBackup(item.path);
     }
-    if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0) {
-      await this.contentAdapter.kernel.refreshFiletree().catch(() => {
-      });
+    if (plan.deletionsLocal.length > 0) {
+      await this.contentAdapter.kernel.refreshFiletree();
+    }
+    if (plan.downloads.length > 0 && !plan.downloads.some((item) => /\.sy$/i.test(item.path))) {
+      await this.contentAdapter.kernel.refreshFiletree();
     }
   }
   /** 断言本地文件自快照以来未变化(sha 级复查);缺失即视为变化 */

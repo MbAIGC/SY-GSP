@@ -86,6 +86,7 @@ export function createKernel(q) {
     sql: (stmt) => post("/api/query/sql", { stmt }),
     lsNotebooks: () => post("/api/notebook/lsNotebooks", {}),
     createNotebook: (name) => post("/api/notebook/createNotebook", { name }),
+    openNotebook: (notebook) => post("/api/notebook/openNotebook", { notebook }),
     getNotebookConf: (notebook) => post("/api/notebook/getNotebookConf", { notebook }),
     refreshFiletree: () => post("/api/filetree/refreshFiletree", {}),
   };
