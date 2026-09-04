@@ -269,6 +269,24 @@ test("重建校验: 内容不一致也会被抓出(REBUILD_VERIFY_FAILED)", asyn
   await h.engine._assertRemoteMatchesLocal(ctx, h.repo.head, new Map([[path, sameSha]]));
 });
 
+test("重建校验: 本地 sha 为 null(crypto 不可用等)时不误报内容不一致", async () => {
+  const path = D + "nullsha.md";
+  const h = await makeHarness({ remoteFiles: { [path]: "local truth" }, localFiles: { [path]: "local truth" } });
+  const ctx = h.makeCtx({ trigger: "rebuild", mode: "local_over_remote" });
+  // 部分环境 crypto.subtle 不可用 → 本地 sha 恒为 null;存在性一致即通过
+  await h.engine._assertRemoteMatchesLocal(ctx, h.repo.head, new Map([[path, null]]));
+  // 存在性缺失仍要抓出
+  const differentSha = await sha("DIFFERENT");
+  await assert.rejects(
+    () => h.engine._assertRemoteMatchesLocal(ctx, h.repo.head, new Map([["data/20240101120000-abc/other.md", differentSha]])),
+    (err) => {
+      assert.equal(err.code, "REBUILD_VERIFY_FAILED");
+      assert.match(err.detail, /远端残留/);
+      return true;
+    }
+  );
+});
+
 test("T1(markdown 全链路): 两台设备交替同步三轮,第三轮起零操作", async () => {
   const p = D + "roundtrip.sy";
   const exportedOf = (text) => text + "\n<!-- exported-view -->";

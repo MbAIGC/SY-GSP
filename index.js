@@ -3209,7 +3209,11 @@ var SyncEngine = class {
     const localPaths = new Set(localShas.keys());
     const residual = [...remotePaths].filter((path) => !localPaths.has(path));
     const missing = [...localPaths].filter((path) => !remotePaths.has(path));
-    const mismatched = [...localPaths].filter((path) => remotePaths.has(path) && remoteEntries.get(path).sha !== localShas.get(path)).map((path) => path + " (远端 " + String(remoteEntries.get(path).sha).slice(0, 8) + " vs 本地 " + String(localShas.get(path)).slice(0, 8) + ")");
+    const mismatched = [...localPaths].filter((path) => {
+      if (!remotePaths.has(path)) return false;
+      const localSha = localShas.get(path);
+      return !!localSha && localSha !== remoteEntries.get(path).sha;
+    }).map((path) => path + " (远端 " + String(remoteEntries.get(path).sha).slice(0, 8) + " vs 本地 " + String(localShas.get(path)).slice(0, 8) + ")");
     if (residual.length || missing.length || mismatched.length) {
       throw new SyncError({
         category: SyncErrorCategory.GIT,

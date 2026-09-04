@@ -666,8 +666,15 @@ export class SyncEngine {
     const localPaths = new Set(localShas.keys());
     const residual = [...remotePaths].filter((path) => !localPaths.has(path));
     const missing = [...localPaths].filter((path) => !remotePaths.has(path));
+    // 内容比对仅在本地 sha 可用时进行: 部分环境 crypto.subtle 不可用,本地 sha
+    // 恒为 null(此时全局退化字节比较)。提交树本就由本地内容构建,内容一致性
+    // 是构造保证的,sha 缺失时只做存在性校验,不得误报"内容不一致"。
     const mismatched = [...localPaths]
-      .filter((path) => remotePaths.has(path) && remoteEntries.get(path).sha !== localShas.get(path))
+      .filter((path) => {
+        if (!remotePaths.has(path)) return false;
+        const localSha = localShas.get(path);
+        return !!localSha && localSha !== remoteEntries.get(path).sha;
+      })
       .map((path) => path + " (远端 " + String(remoteEntries.get(path).sha).slice(0, 8) + " vs 本地 " + String(localShas.get(path)).slice(0, 8) + ")");
     if (residual.length || missing.length || mismatched.length) {
       throw new SyncError({
