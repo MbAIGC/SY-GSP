@@ -45,6 +45,23 @@ test("putFile: 非空业务错误继续上抛", async () => {
   });
 });
 
+test("openNotebook 和 refreshFiletree: HTTP 200 空响应视为成功", async () => {
+  await withFetch(response(""), async () => {
+    const kernel = createKernel();
+    assert.equal(await kernel.openNotebook("20260903001348-uwng1aa"), null);
+    assert.equal(await kernel.refreshFiletree(), null);
+  });
+});
+
+test("openNotebook: 非空业务错误继续上抛", async () => {
+  await withFetch(response('{"code":1,"msg":"笔记本不存在"}'), async () => {
+    await assert.rejects(
+      () => createKernel().openNotebook("20260903001348-uwng1aa"),
+      /内核请求失败 \/api\/notebook\/openNotebook: 笔记本不存在/
+    );
+  });
+});
+
 test("putFile: HTTP 错误继续上抛", async () => {
   await withFetch(response("", false, 500), async () => {
     await assert.rejects(

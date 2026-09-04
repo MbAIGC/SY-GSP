@@ -62,6 +62,26 @@ function createKernel(q2) {
       throw e;
     }
   }
+  async function postAllowEmpty(path, data) {
+    const resp = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data || {})
+    });
+    if (!resp.ok) throw new Error("内核请求失败 " + path + ": HTTP " + resp.status);
+    const text = await resp.text();
+    if (!text.trim()) return null;
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      throw new Error("内核请求失败 " + path + ": 响应无法解析");
+    }
+    if (json && typeof json.code === "number" && json.code !== 0) {
+      throw new Error("内核请求失败 " + path + ": " + (json.msg || json.code));
+    }
+    return json && json.data !== void 0 ? json.data : json;
+  }
   async function getFile(path) {
     const resp = await fetch("/api/file/getFile", {
       method: "POST",
@@ -114,9 +134,9 @@ function createKernel(q2) {
     sql: (stmt) => post("/api/query/sql", { stmt }),
     lsNotebooks: () => post("/api/notebook/lsNotebooks", {}),
     createNotebook: (name) => post("/api/notebook/createNotebook", { name }),
-    openNotebook: (notebook) => post("/api/notebook/openNotebook", { notebook }),
+    openNotebook: (notebook) => postAllowEmpty("/api/notebook/openNotebook", { notebook }),
     getNotebookConf: (notebook) => post("/api/notebook/getNotebookConf", { notebook }),
-    refreshFiletree: () => post("/api/filetree/refreshFiletree", {})
+    refreshFiletree: () => postAllowEmpty("/api/filetree/refreshFiletree", {})
   };
 }
 
