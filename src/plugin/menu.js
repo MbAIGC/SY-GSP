@@ -23,6 +23,11 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
     click: actions.startSync,
   });
   menu.addItem({
+    label: t.sygspMenuRebuild || "同步重建",
+    icon: "iconRefresh",
+    click: actions.openRebuild,
+  });
+  menu.addItem({
     label: t.refreshOrRecover,
     icon: "iconRefresh",
     type: "submenu",

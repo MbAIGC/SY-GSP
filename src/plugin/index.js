@@ -13,6 +13,7 @@ import { SyncPlanner } from "../sync/sync-planner.js";
 import { ThreeWayMerger } from "../sync/three-way-merger.js";
 import { CommitBuilder } from "../sync/commit-builder.js";
 import { ConflictService } from "../sync/conflict-service.js";
+import { RebuildService } from "../sync/rebuild-service.js";
 import { SyncController, ENGINE_STATE_FILE } from "../sync/sync-controller.js";
 import { SyncMetadataStore } from "../storage/sync-metadata-store.js";
 import { SyncHistoryStore } from "../storage/sync-history-store.js";
@@ -674,9 +675,76 @@ export default class SyGspPlugin extends q.Plugin {
     if (this.notification) this.notification.setTopBarElement(this.topBarElement);
   }
 
+  async _openRebuildDialog() {
+    if (this.controller && (this.controller.queue.isBusy(this.controller.repoKey()) || this.controller.isConflictPaused())) {
+      this.notification.toast("同步正在运行或处于暂停状态,请先处理当前状态", "error");
+      return;
+    }
+    const info = this._repoInfo();
+    if (!info.owner || !info.repo || !info.branch) {
+      this.notification.toast("仓库配置不完整,无法执行同步重建", "error");
+      return;
+    }
+    this._stopAutoSyncTimer();
+    this.logs.info("同步重建: 开始只读校验");
+    let report;
+    try {
+      const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
+      const workspace = new WorkspaceAdapter(this.kernel, {
+        getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
+        getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
+        getNotebooks: async () => ((await this.kernel.lsNotebooks()) || {}).notebooks || [],
+      });
+      const adapter = new ContentAdapter(this.kernel, { backupDir: "temp/SY-GSP/backup/", i18n: this.i18n });
+      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { syncRange: Number(this.settingUtils.get("sync_range")) || 0, syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
+      report = await service.inspect();
+      this.logs.info("同步重建: 校验完成,本地 " + report.localCount + " 个,远端 " + report.remoteCount + " 个,差异 " + (report.onlyLocal.length + report.onlyRemote.length + report.different.length) + " 个");
+    } catch (err) {
+      this.logs.error("同步重建: 校验失败 " + String((err && err.message) || err));
+      this.notification.toast("同步重建校验失败: " + String((err && err.message) || err), "error");
+      this._restartAutoSyncIfConfigured();
+      return;
+    }
+    const lines = [
+      "本地文件: " + report.localCount,
+      "远端文件: " + report.remoteCount,
+      "仅本地: " + report.onlyLocal.length,
+      "仅远端: " + report.onlyRemote.length,
+      "内容不同: " + report.different.length,
+      "内容相同: " + report.same.length,
+      "清单残留: " + report.manifestResidual.length,
+      "冲突残留: " + report.conflictResidual,
+      "当前 BASE: " + (report.baseCommit ? report.baseCommit.slice(0, 8) : "无"),
+      "\n请选择重建基准。此操作会清空另一端的同步范围内容。",
+    ];
+    const dialog = new q.Dialog({ title: "同步重建", content: '<div id="sygspRebuild" style="padding:16px;white-space:pre-wrap"></div>', width: "560px" });
+    const root = dialog.element.querySelector("#sygspRebuild");
+    root.textContent = lines.join("\n");
+    const bar = document.createElement("div");
+    bar.className = "fn__flex";
+    bar.style.cssText = "justify-content:flex-end;gap:8px;margin-top:16px";
+    for (const [mode, text] of [["remote_over_local", "以远端为准"], ["local_over_remote", "以本地为准"]]) {
+      const button = document.createElement("button");
+      button.className = "b3-button b3-button--text";
+      button.textContent = text;
+      button.addEventListener("click", () => {
+        const confirmText = window.prompt("请输入“确认重建”以继续");
+        if (confirmText !== "确认重建") return;
+        dialog.destroy();
+        this.logs.warn("同步重建: 用户选择" + text + ",开始执行镜像");
+        this.controller.retryPolicy.enabled = false;
+        this.notification.syncStarted("manual");
+        this.controller.syncNow({ trigger: "manual", mode });
+      });
+      bar.appendChild(button);
+    }
+    root.appendChild(bar);
+  }
+
   _openMenu() {
     const actions = {
       startSync: () => this.syncNow({ trigger: "manual" }),
+      openRebuild: () => this._openRebuildDialog(),
       refreshWorkspaceTree: () => this.kernel.refreshFiletree(),
       recoverAssets: () => this._recoverAssets(),
       openHistory: () => this.openSyncHistoryPanel(),

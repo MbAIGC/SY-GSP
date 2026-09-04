@@ -2084,6 +2084,76 @@ var ConflictService = class {
   }
 };
 
+// src/sync/rebuild-service.js
+var RebuildService = class {
+  constructor(deps) {
+    this.provider = deps.provider;
+    this.workspace = deps.workspace;
+    this.contentAdapter = deps.contentAdapter;
+    this.metadataStore = deps.metadataStore;
+    this.manifestStore = deps.manifestStore;
+    this.conflictService = deps.conflictService;
+    this.config = deps.config;
+  }
+  async inspect() {
+    const scan = await this.workspace.scan({ range: this.config.syncRange });
+    if (scan.enumErrorOccurred) {
+      throw new SyncError({
+        category: SyncErrorCategory.LOCAL_FILE,
+        code: "REBUILD_LOCAL_SCAN_INCOMPLETE",
+        operation: "inspectRebuild",
+        message: "本地目录扫描不完整，拒绝生成同步重建方案",
+        recoverable: true
+      });
+    }
+    const local = /* @__PURE__ */ new Map();
+    for (const file of scan.files) {
+      const format = this._format(file.path);
+      const blob = await this.contentAdapter.readFileBlob(file.path, format);
+      const bytes = blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
+      local.set(file.path, await this.provider.gitBlobSha(bytes));
+    }
+    const head = await this.provider.getBranchHead();
+    const commit = await this.provider.getCommit(head.sha);
+    const ignored = this.workspace.ignoreMatcher();
+    const tree = await this.provider.getTree(commit.treeSha);
+    const remote = new Map((tree || []).filter((entry) => entry && entry.type === "blob" && !ignored.isIgnored(entry.path)).map((entry) => [entry.path, entry.sha]));
+    const onlyLocal = [];
+    const onlyRemote = [];
+    const different = [];
+    const same = [];
+    for (const [path, sha] of local) {
+      if (!remote.has(path)) onlyLocal.push(path);
+      else if (remote.get(path) === sha) same.push(path);
+      else different.push(path);
+    }
+    for (const path of remote.keys()) {
+      if (!local.has(path)) onlyRemote.push(path);
+    }
+    const repoKey = this.config.repoKey;
+    const openSet = this.conflictService && this.conflictService.openSet(repoKey);
+    const manifestPaths = this.manifestStore ? [...this.manifestStore.paths] : [];
+    const actualPaths = /* @__PURE__ */ new Set([...local.keys(), ...remote.keys()]);
+    const manifestResidual = manifestPaths.filter((path) => !actualPaths.has(path));
+    return {
+      inspectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      remoteHead: head.sha,
+      localCount: local.size,
+      remoteCount: remote.size,
+      same,
+      different,
+      onlyLocal,
+      onlyRemote,
+      manifestResidual,
+      baseCommit: this.metadataStore.getBaseCommit(repoKey),
+      conflictResidual: openSet ? (openSet.conflicts || []).filter((item) => item.status === "open").length : 0
+    };
+  }
+  _format(path) {
+    return this.config.syncFileType === "markdown" && /\.sy$/i.test(path) ? "markdown" : "raw";
+  }
+};
+
 // src/sync/sync-queue.js
 var SyncQueue = class {
   constructor() {
@@ -5554,6 +5624,11 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
     click: actions.startSync
   });
   menu.addItem({
+    label: t.sygspMenuRebuild || "同步重建",
+    icon: "iconRefresh",
+    click: actions.openRebuild
+  });
+  menu.addItem({
     label: t.refreshOrRecover,
     icon: "iconRefresh",
     type: "submenu",
@@ -6220,9 +6295,75 @@ var SyGspPlugin = class extends q.Plugin {
     }
     if (this.notification) this.notification.setTopBarElement(this.topBarElement);
   }
+  async _openRebuildDialog() {
+    if (this.controller && (this.controller.queue.isBusy(this.controller.repoKey()) || this.controller.isConflictPaused())) {
+      this.notification.toast("同步正在运行或处于暂停状态,请先处理当前状态", "error");
+      return;
+    }
+    const info = this._repoInfo();
+    if (!info.owner || !info.repo || !info.branch) {
+      this.notification.toast("仓库配置不完整,无法执行同步重建", "error");
+      return;
+    }
+    this._stopAutoSyncTimer();
+    this.logs.info("同步重建: 开始只读校验");
+    let report;
+    try {
+      const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
+      const workspace = new WorkspaceAdapter(this.kernel, {
+        getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
+        getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
+        getNotebooks: async () => (await this.kernel.lsNotebooks() || {}).notebooks || []
+      });
+      const adapter = new ContentAdapter(this.kernel, { backupDir: "temp/SY-GSP/backup/", i18n: this.i18n });
+      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { syncRange: Number(this.settingUtils.get("sync_range")) || 0, syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
+      report = await service.inspect();
+      this.logs.info("同步重建: 校验完成,本地 " + report.localCount + " 个,远端 " + report.remoteCount + " 个,差异 " + (report.onlyLocal.length + report.onlyRemote.length + report.different.length) + " 个");
+    } catch (err) {
+      this.logs.error("同步重建: 校验失败 " + String(err && err.message || err));
+      this.notification.toast("同步重建校验失败: " + String(err && err.message || err), "error");
+      this._restartAutoSyncIfConfigured();
+      return;
+    }
+    const lines = [
+      "本地文件: " + report.localCount,
+      "远端文件: " + report.remoteCount,
+      "仅本地: " + report.onlyLocal.length,
+      "仅远端: " + report.onlyRemote.length,
+      "内容不同: " + report.different.length,
+      "内容相同: " + report.same.length,
+      "清单残留: " + report.manifestResidual.length,
+      "冲突残留: " + report.conflictResidual,
+      "当前 BASE: " + (report.baseCommit ? report.baseCommit.slice(0, 8) : "无"),
+      "\n请选择重建基准。此操作会清空另一端的同步范围内容。"
+    ];
+    const dialog = new q.Dialog({ title: "同步重建", content: '<div id="sygspRebuild" style="padding:16px;white-space:pre-wrap"></div>', width: "560px" });
+    const root = dialog.element.querySelector("#sygspRebuild");
+    root.textContent = lines.join("\n");
+    const bar = document.createElement("div");
+    bar.className = "fn__flex";
+    bar.style.cssText = "justify-content:flex-end;gap:8px;margin-top:16px";
+    for (const [mode, text] of [["remote_over_local", "以远端为准"], ["local_over_remote", "以本地为准"]]) {
+      const button = document.createElement("button");
+      button.className = "b3-button b3-button--text";
+      button.textContent = text;
+      button.addEventListener("click", () => {
+        const confirmText = window.prompt("请输入“确认重建”以继续");
+        if (confirmText !== "确认重建") return;
+        dialog.destroy();
+        this.logs.warn("同步重建: 用户选择" + text + ",开始执行镜像");
+        this.controller.retryPolicy.enabled = false;
+        this.notification.syncStarted("manual");
+        this.controller.syncNow({ trigger: "manual", mode });
+      });
+      bar.appendChild(button);
+    }
+    root.appendChild(bar);
+  }
   _openMenu() {
     const actions = {
       startSync: () => this.syncNow({ trigger: "manual" }),
+      openRebuild: () => this._openRebuildDialog(),
       refreshWorkspaceTree: () => this.kernel.refreshFiletree(),
       recoverAssets: () => this._recoverAssets(),
       openHistory: () => this.openSyncHistoryPanel(),
