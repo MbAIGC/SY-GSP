@@ -24,7 +24,7 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
   });
   menu.addItem({
     label: t.sygspMenuRebuild || "同步重建",
-    icon: "iconWarning",
+    icon: "iconRebuild",
     click: actions.openRebuild,
   });
   menu.addItem({

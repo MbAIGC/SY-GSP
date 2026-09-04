@@ -6184,7 +6184,7 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
   });
   menu.addItem({
     label: t.sygspMenuRebuild || "同步重建",
-    icon: "iconWarning",
+    icon: "iconRebuild",
     click: actions.openRebuild
   });
   menu.addItem({
@@ -6280,6 +6280,7 @@ function buildRadioItems(_title, options, settingKey, actions) {
 var PLUGIN_VERSION = "0.1.0";
 var ICONS_MAIN = '<symbol id="iconGmailSync" viewBox="0 0 1024 1024"><path d="M998.4 627.2c-51.2 230.4-256 396.8-499.2 396.8-224 0-409.6-140.8-480-339.2h121.6c64 134.4 198.4 230.4 358.4 230.4 179.2 0 332.8-121.6 384-281.6l115.2-6.4zM499.2 0c224 0 409.6 140.8 480 339.2h-121.6c-64-134.4-198.4-230.4-358.4-230.4-179.2 0-332.8 121.6-384 281.6L0 396.8C51.2 172.8 256 0 499.2 0z" fill="#646A73"></path><path d="M998.4 332.8c0 32-25.6 57.6-57.6 64h-140.8c-19.2 0-32-12.8-32-32v-51.2c0-19.2 12.8-32 32-32h83.2V32c0-12.8 12.8-25.6 25.6-32h57.6c19.2 0 32 12.8 32 32v300.8zM0 659.2c0-32 25.6-57.6 57.6-64h140.8c19.2 0 32 12.8 32 32v51.2c0 19.2-12.8 32-32 32H115.2V960c0 12.8-12.8 25.6-25.6 32H32c-19.2 0-32-12.8-32-32v-300.8z" fill="#646A73"></path><path d="M665.6 569.6H512V473.6h249.6c12.8 0 12.8 0 12.8 6.4 6.4 70.4 0 134.4-38.4 192-38.4 57.6-96 96-160 108.8-83.2 19.2-166.4 0-236.8-51.2-57.6-44.8-89.6-102.4-96-172.8-19.2-147.2 64-275.2 204.8-313.6 89.6-19.2 172.8 0 243.2 57.6l6.4 6.4L620.8 384l-6.4-6.4c-25.6-25.6-64-38.4-108.8-38.4-83.2 0-153.6 64-160 147.2-12.8 89.6 44.8 172.8 134.4 192 51.2 12.8 96 6.4 140.8-25.6 19.2-19.2 38.4-44.8 44.8-76.8v-6.4z" fill="#646A73"></path></symbol>';
 var ICONS_SYNC = '<symbol id="iconModeSync" viewBox="0 0 1024 1024"><path d="M512 128c-212.064 0-384 171.936-384 384h-64l106.624 149.312L277.312 512H213.344c0-164.928 133.728-298.656 298.656-298.656 61.6 0 118.848 18.624 166.4 50.56l46.912-51.904A380.544 380.544 0 0 0 512 128z m331.328 234.688L746.688 512h64c0 164.928-133.728 298.656-298.656 298.656a297.216 297.216 0 0 1-166.4-50.56l-46.912 51.904A380.544 380.544 0 0 0 512 896c212.064 0 384-171.936 384-384h64l-106.624-149.312z" fill="currentColor"></path></symbol>';
+var ICONS_REBUILD = '<symbol id="iconRebuild" viewBox="0 0 1024 1024"><path d="M192 384 H832 M704 256 L832 384 L704 512 M832 640 H192 M320 512 L192 640 L320 768" fill="none" stroke="currentColor" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/></symbol>';
 var SyGspPlugin = class extends q.Plugin {
   constructor(...args) {
     super(...args);
@@ -6410,6 +6411,7 @@ var SyGspPlugin = class extends q.Plugin {
   createIcons() {
     this.addIcons(ICONS_MAIN);
     this.addIcons(ICONS_SYNC);
+    this.addIcons(ICONS_REBUILD);
   }
   // ---------- 装配 ----------
   async _initStores() {
@@ -6888,25 +6890,63 @@ var SyGspPlugin = class extends q.Plugin {
       this._restartAutoSyncIfConfigured();
       return;
     }
-    const lines = [
-      "本地文件: " + report.localCount,
-      "远端文件: " + report.remoteCount,
-      "仅本地: " + report.onlyLocal.length,
-      "仅远端: " + report.onlyRemote.length,
-      "内容不同: " + report.different.length,
-      "内容相同: " + report.same.length,
-      "清单残留: " + report.manifestResidual.length,
-      "冲突残留: " + report.conflictResidual,
-      "当前 BASE: " + (report.baseCommit ? report.baseCommit.slice(0, 8) : "无"),
-      report.strayNotebookPaths && report.strayNotebookPaths.length ? "⚠️ 本地残留(不在笔记本列表,重建时将一并清理): " + report.strayNotebookPaths.length + " 个文件\n  " + report.strayNotebookPaths.slice(0, 10).join("\n  ") + (report.strayNotebookPaths.length > 10 ? "\n  …等共 " + report.strayNotebookPaths.length + " 个" : "") : "",
-      "\n请选择重建基准。此操作会清空另一端的同步范围内容。"
-    ].filter(Boolean);
-    const dialog = new q.Dialog({ title: "同步重建", content: '<div id="sygspRebuild" style="padding:16px;white-space:pre-wrap"></div>', width: "560px" });
+    const stats = [
+      ["本地文件", report.localCount],
+      ["远端文件", report.remoteCount],
+      ["仅本地", report.onlyLocal.length],
+      ["仅远端", report.onlyRemote.length],
+      ["内容不同", report.different.length],
+      ["内容相同", report.same.length],
+      ["清单残留", report.manifestResidual.length],
+      ["冲突残留", report.conflictResidual]
+    ];
+    const dialog = new q.Dialog({
+      title: "同步重建",
+      content: '<div id="sygspRebuild" class="fn__flex-column" style="padding:16px;gap:12px;"></div>',
+      width: "640px"
+    });
     const root = dialog.element.querySelector("#sygspRebuild");
-    root.textContent = lines.join("\n");
+    const grid = document.createElement("div");
+    grid.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;";
+    for (const [label, value] of stats) {
+      const cell = document.createElement("div");
+      cell.className = "fn__flex";
+      cell.style.cssText = "justify-content:space-between;align-items:center;padding:8px 12px;border:1px solid var(--b3-border-color);border-radius:6px;";
+      const labelEl = document.createElement("span");
+      labelEl.className = "ft__on-surface";
+      labelEl.textContent = label;
+      const valueEl = document.createElement("span");
+      valueEl.style.fontWeight = "600";
+      valueEl.textContent = String(value);
+      cell.append(labelEl, valueEl);
+      grid.appendChild(cell);
+    }
+    root.appendChild(grid);
+    const baseLine = document.createElement("div");
+    baseLine.className = "ft__on-surface";
+    baseLine.style.fontSize = "12px";
+    baseLine.textContent = "当前 BASE: " + (report.baseCommit ? report.baseCommit.slice(0, 8) : "无");
+    root.appendChild(baseLine);
+    if (report.strayNotebookPaths && report.strayNotebookPaths.length) {
+      const warn = document.createElement("div");
+      warn.style.cssText = "padding:10px 12px;border:1px solid rgba(217,119,6,.45);background:rgba(217,119,6,.10);border-radius:6px;";
+      const warnTitle = document.createElement("div");
+      warnTitle.style.fontWeight = "600";
+      warnTitle.textContent = "⚠️ 本地残留(不在笔记本列表): " + report.strayNotebookPaths.length + " 个文件,重建时将一并清理";
+      warn.appendChild(warnTitle);
+      const warnList = document.createElement("div");
+      warnList.style.cssText = "margin-top:4px;font-size:12px;max-height:96px;overflow:auto;word-break:break-all;";
+      warnList.textContent = report.strayNotebookPaths.slice(0, 20).join("\n") + (report.strayNotebookPaths.length > 20 ? "\n…等共 " + report.strayNotebookPaths.length + " 个" : "");
+      warn.appendChild(warnList);
+      root.appendChild(warn);
+    }
+    const hint = document.createElement("div");
+    hint.className = "b3-label__text";
+    hint.textContent = "请选择重建基准。此操作会将另一端与此端对齐,多余的文件将被删除。";
+    root.appendChild(hint);
     const bar = document.createElement("div");
-    bar.className = "fn__flex";
-    bar.style.cssText = "justify-content:flex-end;gap:8px;margin-top:16px";
+    bar.className = "fn__flex fn__flex-wrap";
+    bar.style.cssText = "justify-content:flex-end;gap:8px;border-top:1px solid var(--b3-border-color);padding-top:12px";
     for (const [mode, text] of [["remote_over_local", "以远端为准"], ["local_over_remote", "以本地为准"]]) {
       const button = document.createElement("button");
       button.className = "b3-button b3-button--text";
