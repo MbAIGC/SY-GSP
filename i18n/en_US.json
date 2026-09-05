@@ -193,7 +193,7 @@
   "gSyncDeletedLabel": "deleted",
   "gSyncFilesDetailLabel": "Files synced",
   "gSyncNoChangeMsg": "No file changes detected; sync stopped",
-  "sygspMenuResolveConflict": "🔴 Resolve conflicts / resume sync",
+  "sygspMenuResolveConflict": "Resolve conflicts (auto sync paused)",
   "sygspMenuLogs": "Runtime logs",
   "sygspMenuDiagnosis": "Read-only diagnosis",
   "sygspRetrying": "Sync failed, retrying",
@@ -258,5 +258,7 @@
   "sygspConflictSetMissing": "Conflict details not found; diagnosis panel opened, resync to rebuild the conflict set",
   "sygspLogsRefresh": "Refresh",
   "sygspDeviceName": "Device name",
-  "sygspDeviceNameDesc": "Tags GitHub commit messages with the source device, e.g. pad; leave empty for no prefix"
+  "sygspDeviceNameDesc": "Tags GitHub commit messages with the source device, e.g. pad; leave empty for no prefix",
+  "sygspMenuPauseAutoSync": "Pause sync",
+  "sygspMenuResumeAutoSync": "Resume sync (currently paused)"
 }

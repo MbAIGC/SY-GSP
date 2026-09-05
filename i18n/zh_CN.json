@@ -193,7 +193,7 @@
   "gSyncDeletedLabel": "删除",
   "gSyncFilesDetailLabel": "本次同步文件",
   "gSyncNoChangeMsg": "未检测到文件变更,已停止同步",
-  "sygspMenuResolveConflict": "🔴 处理冲突/恢复同步",
+  "sygspMenuResolveConflict": "处理冲突(自动同步已暂停)",
   "sygspMenuLogs": "运行日志",
   "sygspMenuDiagnosis": "只读诊断",
   "sygspRetrying": "同步失败,准备重试",
@@ -258,5 +258,7 @@
   "sygspConflictSetMissing": "未找到冲突明细,已打开诊断面板,可重新同步以重建冲突集",
   "sygspLogsRefresh": "刷新",
   "sygspDeviceName": "设备名称",
-  "sygspDeviceNameDesc": "用于 GitHub 提交信息标识来源,如 pad;留空则不加前缀"
+  "sygspDeviceNameDesc": "用于 GitHub 提交信息标识来源,如 pad;留空则不加前缀",
+  "sygspMenuPauseAutoSync": "暂停同步",
+  "sygspMenuResumeAutoSync": "恢复同步(当前已暂停)"
 }

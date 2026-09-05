@@ -7190,6 +7190,7 @@ var SyGspPlugin = class extends q.Plugin {
   // ---------- 自动同步 ----------
   _restartAutoSyncIfConfigured() {
     this._stopAutoSyncTimer();
+    if (this._autoSyncPaused === true) return;
     if (!this.settingUtils) return;
     if (Number(this.settingUtils.take("sync_mode")) !== 0) return;
     if (this.settingUtils.take("enabled_sync") === false) return;

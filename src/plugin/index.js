@@ -639,6 +639,9 @@ export default class SyGspPlugin extends q.Plugin {
 
   _restartAutoSyncIfConfigured() {
     this._stopAutoSyncTimer();
+    // 手动暂停是权威状态: 冲突恢复/同步完成等任何路径都不得绕过它重启定时器,
+    // 否则菜单标签(依据该标志)与实际行为会各说各话(实证)
+    if (this._autoSyncPaused === true) return;
     if (!this.settingUtils) return;
     if (Number(this.settingUtils.take("sync_mode")) !== 0) return;
     if (this.settingUtils.take("enabled_sync") === false) return;
