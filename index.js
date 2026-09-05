@@ -3892,7 +3892,17 @@ var SyncEngine = class {
   async _readLocalBytes(path) {
     const blob = await this.contentAdapter.kernel.getFile(path);
     if (!blob) return null;
-    return new Uint8Array(await blob.arrayBuffer());
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    if (buf.length > 0) {
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(buf));
+        if (parsed && typeof parsed === "object" && Number.isFinite(Number(parsed.code)) && Number(parsed.code) !== 0 && parsed.msg !== void 0) {
+          return null;
+        }
+      } catch (e) {
+      }
+    }
+    return buf;
   }
 };
 

@@ -695,6 +695,28 @@ test("conf.json: 新笔记本落地后内核抢先生成 conf.json → 不再触
   assert.equal(r2.uploads + r2.downloads, 0, "合并后应收敛: " + JSON.stringify(r2));
 });
 
+test("_readLocalBytes: 内核对缺失文件返回 200+错误信封时按'不存在'处理(实证: 假冲突根因)", async () => {
+  const a = D + "a.md";
+  const doc = D + "20260905231200-amz7kgv.sy";
+  const h = await makeHarness({ remoteFiles: { [a]: "a", [doc]: "remote doc" }, localFiles: { [a]: "a" } });
+  // 模拟该端内核: 对"不存在"的文件返回 200 + {"code":404,"msg":...} 错误信封
+  // (已存在的文件正常返回内容);信封样本取自真实设备实测
+  const origGetFile = h.kernel.getFile.bind(h.kernel);
+  h.kernel.getFile = async (path) => {
+    if (path === doc && !h.kernel.__files.has(path)) {
+      return new Blob([JSON.stringify({ code: 404, msg: "file does not exist", data: null, name: "GLM-5.3-Flash" })]);
+    }
+    return origGetFile(path);
+  };
+  const bytes = await h.engine._readLocalBytes(doc);
+  assert.equal(bytes, null, "错误信封必须按文件不存在处理");
+  // 下载不再被 M5 误判为"本地新建"
+  const result = await runQuiet(h);
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(result.downloads, 1);
+  assert.equal(await (await h.kernel.getFile(doc)).text(), "remote doc");
+});
+
 test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => {
   const kernel = makeFakeKernel({ "data/x/a.md": "hello" });
   const plugin = makeFakePlugin();

@@ -1337,6 +1337,21 @@ export class SyncEngine {
   async _readLocalBytes(path) {
     const blob = await this.contentAdapter.kernel.getFile(path);
     if (!blob) return null;
-    return new Uint8Array(await blob.arrayBuffer());
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    // 部分思源端对不存在的文件返回 200 + JSON 错误信封({code:非0, msg:...}),
+    // 而非失败响应——若当作内容处理,会被误判为"本地新建了同名文件",
+    // 新笔记本首次同步必然冲突(实证)。识别信封并按缺失处理。
+    if (buf.length > 0) {
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(buf));
+        if (parsed && typeof parsed === "object" && Number.isFinite(Number(parsed.code)) &&
+            Number(parsed.code) !== 0 && parsed.msg !== undefined) {
+          return null;
+        }
+      } catch (e) {
+        // 非 JSON: 正常文件内容
+      }
+    }
+    return buf;
   }
 }
