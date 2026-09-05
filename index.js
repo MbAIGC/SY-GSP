@@ -4036,6 +4036,9 @@ var SyncController = class {
           this._casChurnWarned = true;
           this.logger.warn("⚠️ 本轮同步连续两次无法确认远端引用状态: 远端 HEAD 在本轮规划与推送期间发生变化。该现象不等同于已确认存在其他设备写入，请结合远端提交指纹继续判断。");
         }
+        if (casChurn && attempt >= 2 && syncErr.detail && String(syncErr.detail).indexOf("sync: ") === 0) {
+          this.logger.error("⚠️ 检测到另一设备正在高频同步(竞争提交指纹: " + String(syncErr.detail).slice(0, 120) + ")。多为旧版本插件的表示漂移乒乓,本端不会参与覆盖。请先暂停或更新另一端设备,再恢复本端同步。");
+        }
         if (!decision.retry || ctx.state === SyncState.CONFLICT_PAUSED) {
           await this._onFailed(ctx, syncErr);
           throw syncErr;
