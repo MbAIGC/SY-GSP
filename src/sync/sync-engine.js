@@ -1241,40 +1241,40 @@ export class SyncEngine {
         paths: plan.skippedLargeDownloads.map((item) => item.path),
       });
     }
-    // conf.json 应用(整批下载完成后): 先写盘保证磁盘为合并后内容,再经内核
-    // setNotebookConf 应用到运行内核(内存+UI),并回读验证——内核返回成功但
-    // 实际未生效的情况(实证)必须可见
+    // conf.json 应用(整批下载完成后): 先经内核 setNotebookConf 应用(名称等支持的字段),
+    // 再写盘保证磁盘为合并后内容(内核不支持 icon 设置时,磁盘仍是权威);
+    // 回读内核状态 + 磁盘状态,全部打进日志用于诊断
     for (const app of confApplications) {
-      await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
-      let readback = null;
+      const confObj = JSON.parse(new TextDecoder().decode(app.mergedBytes));
+      let kernelMsg = "未调用";
       try {
-        const confObj = JSON.parse(new TextDecoder().decode(app.mergedBytes));
         await this.contentAdapter.kernel.setNotebookConf(app.notebookId, confObj);
-        try {
-          const check = await this.contentAdapter.kernel.getNotebookConf(app.notebookId);
-          const conf = check && typeof check === "object" ? (check.data || check) : null;
-          readback = conf
-            ? "name=" + (conf.name !== undefined ? conf.name : "?") +
-              ", icon=" + (typeof conf.icon === "string" && conf.icon ? conf.icon : "(空)") +
-              ", closed=" + (conf.closed !== undefined ? conf.closed : "?")
-            : "回读为空";
-        } catch (err) {
-          readback = "回读失败: " + String((err && err.message) || err);
-        }
-        this._emit("engine:operation", {
-          ctx,
-          operation: "笔记本配置已应用到内核(setNotebookConf)",
-          count: 1,
-          paths: [app.notebookId + " | 回读: " + readback],
-        });
+        kernelMsg = "已调用";
       } catch (err) {
-        this._emit("engine:operation", {
-          ctx,
-          operation: "setNotebookConf 失败,已回退写盘(重启思源后生效)",
-          count: 1,
-          paths: [app.notebookId + " | " + String((err && err.message) || err)],
-        });
+        kernelMsg = "不可用(" + String((err && err.message) || err).slice(0, 80) + ")";
       }
+      await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
+      let kernelState = "回读失败";
+      try {
+        const check = await this.contentAdapter.kernel.getNotebookConf(app.notebookId);
+        const conf = check && typeof check === "object" ? (check.data !== undefined ? check.data : check) : null;
+        kernelState = conf ? JSON.stringify(conf).slice(0, 300) : "空";
+      } catch (err) {
+        kernelState = "失败: " + String((err && err.message) || err).slice(0, 80);
+      }
+      let diskState = "读取失败";
+      try {
+        const diskBytes = await this._readLocalBytes(app.path);
+        diskState = diskBytes ? new TextDecoder().decode(diskBytes).slice(0, 200) : "(空)";
+      } catch (err) {
+        diskState = "失败: " + String((err && err.message) || err).slice(0, 80);
+      }
+      this._emit("engine:operation", {
+        ctx,
+        operation: "笔记本配置同步诊断 [" + app.notebookId + "] setNotebookConf: " + kernelMsg,
+        count: 1,
+        paths: ["内核: " + kernelState, "磁盘: " + diskState],
+      });
     }
     // 统一刷新一次: 有任何本地落地/删除后让内核重索引(替代散落的条件式刷新)
     if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0 || confApplications.length > 0) {

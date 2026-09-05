@@ -3863,32 +3863,36 @@ var SyncEngine = class {
       });
     }
     for (const app of confApplications) {
-      await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
-      let readback = null;
+      const confObj = JSON.parse(new TextDecoder().decode(app.mergedBytes));
+      let kernelMsg = "未调用";
       try {
-        const confObj = JSON.parse(new TextDecoder().decode(app.mergedBytes));
         await this.contentAdapter.kernel.setNotebookConf(app.notebookId, confObj);
-        try {
-          const check = await this.contentAdapter.kernel.getNotebookConf(app.notebookId);
-          const conf = check && typeof check === "object" ? check.data || check : null;
-          readback = conf ? "name=" + (conf.name !== void 0 ? conf.name : "?") + ", icon=" + (typeof conf.icon === "string" && conf.icon ? conf.icon : "(空)") + ", closed=" + (conf.closed !== void 0 ? conf.closed : "?") : "回读为空";
-        } catch (err) {
-          readback = "回读失败: " + String(err && err.message || err);
-        }
-        this._emit("engine:operation", {
-          ctx,
-          operation: "笔记本配置已应用到内核(setNotebookConf)",
-          count: 1,
-          paths: [app.notebookId + " | 回读: " + readback]
-        });
+        kernelMsg = "已调用";
       } catch (err) {
-        this._emit("engine:operation", {
-          ctx,
-          operation: "setNotebookConf 失败,已回退写盘(重启思源后生效)",
-          count: 1,
-          paths: [app.notebookId + " | " + String(err && err.message || err)]
-        });
+        kernelMsg = "不可用(" + String(err && err.message || err).slice(0, 80) + ")";
       }
+      await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
+      let kernelState = "回读失败";
+      try {
+        const check = await this.contentAdapter.kernel.getNotebookConf(app.notebookId);
+        const conf = check && typeof check === "object" ? check.data !== void 0 ? check.data : check : null;
+        kernelState = conf ? JSON.stringify(conf).slice(0, 300) : "空";
+      } catch (err) {
+        kernelState = "失败: " + String(err && err.message || err).slice(0, 80);
+      }
+      let diskState = "读取失败";
+      try {
+        const diskBytes = await this._readLocalBytes(app.path);
+        diskState = diskBytes ? new TextDecoder().decode(diskBytes).slice(0, 200) : "(空)";
+      } catch (err) {
+        diskState = "失败: " + String(err && err.message || err).slice(0, 80);
+      }
+      this._emit("engine:operation", {
+        ctx,
+        operation: "笔记本配置同步诊断 [" + app.notebookId + "] setNotebookConf: " + kernelMsg,
+        count: 1,
+        paths: ["内核: " + kernelState, "磁盘: " + diskState]
+      });
     }
     if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0 || confApplications.length > 0) {
       await this.contentAdapter.kernel.refreshFiletree();
