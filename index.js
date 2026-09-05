@@ -6567,12 +6567,12 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
     ]
   });
   menu.addItem({
-    label: t.syncRange,
+    label: t.syncRange || "同步范围",
     icon: "iconFilter",
     type: "submenu",
     submenu: buildRadioItems(t.syncRange, [
-      ["1", t.dataFile],
-      ["2", t.noteFile]
+      ["1", t.dataFile || "数据目录（data目录）"],
+      ["2", t.noteFile || "笔记文件"]
     ], "sync_range", actions)
   });
   menu.addItem({
@@ -7430,7 +7430,8 @@ var SyGspPlugin = class extends q.Plugin {
       startSync: () => this.syncNow({ trigger: "manual" }),
       openRebuild: () => this._openRebuildDialog(),
       toggleAutoSyncPause: () => this._toggleAutoSyncPause(),
-      isAutoSyncPaused: () => this._autoSyncPaused === true,
+      // 布尔值(非函数): 菜单构建时求值——此前误传函数,恒为真导致标签不随状态变化
+      isAutoSyncPaused: this._autoSyncPaused === true,
       refreshWorkspaceTree: () => this.kernel.refreshFiletree(),
       recoverAssets: () => this._recoverAssets(),
       openHistory: () => this.openSyncHistoryPanel(),

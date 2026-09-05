@@ -1,4 +1,4 @@
-/**
+﻿/**
  * MenuBuilder: 顶栏菜单(条目与旧版 SGSP 一致)。
  * 注意思源 Menu.addItem 的返回值是 menuItem.element(HTMLElement),
  * 子菜单必须以 submenu 数组内联传入,不能在返回值上继续 addItem。
@@ -28,8 +28,7 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
       : (t.sygspMenuPauseAutoSync || "暂停同步"),
     icon: "iconSyncPause",
     click: actions.toggleAutoSyncPause,
-  });
-  menu.addItem({
+  });  menu.addItem({
     label: t.sygspMenuRebuild || "同步重建",
     icon: "iconRebuild",
     click: actions.openRebuild,
@@ -44,12 +43,12 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
     ],
   });
   menu.addItem({
-    label: t.syncRange,
+    label: t.syncRange || "同步范围",
     icon: "iconFilter",
     type: "submenu",
     submenu: buildRadioItems(t.syncRange, [
-      ["1", t.dataFile],
-      ["2", t.noteFile],
+      ["1", t.dataFile || "数据目录（data目录）"],
+      ["2", t.noteFile || "笔记文件"],
     ], "sync_range", actions),
   });
   menu.addItem({
