@@ -2303,7 +2303,8 @@ var RebuildService = class {
     const commit = await this.provider.getCommit(head.sha);
     const ignored = this.workspace.ignoreMatcher();
     const tree = await this.provider.getTree(commit.treeSha);
-    const remote = new Map((tree || []).filter((entry) => entry && entry.type === "blob" && !ignored.isIgnored(entry.path)).map((entry) => [entry.path, entry.sha]));
+    const remoteRaw = new Map((tree || []).filter((entry) => entry && entry.type === "blob").map((entry) => [entry.path, entry.sha]));
+    const remote = new Map([...remoteRaw].filter(([path]) => !ignored.isIgnored(path)));
     const onlyLocal = [];
     const onlyRemote = [];
     const different = [];
@@ -2327,7 +2328,7 @@ var RebuildService = class {
     const manifestPaths = this.manifestStore ? [...this.manifestStore.paths] : [];
     const actualPaths = /* @__PURE__ */ new Set([...local.keys(), ...remote.keys()]);
     const manifestResidual = manifestPaths.filter((path) => !actualPaths.has(path));
-    const strayNotebookPaths = await this._strayNotebookPaths([...local.keys(), ...remote.keys()]);
+    const strayNotebookPaths = await this._strayNotebookPaths([...local.keys(), ...remoteRaw.keys()]);
     return {
       inspectedAt: (/* @__PURE__ */ new Date()).toISOString(),
       remoteHead: head.sha,
@@ -2388,9 +2389,12 @@ var RebuildService = class {
     }
     if (closedOrMissing.size === 0) return [];
     return paths.filter((path) => {
-      const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
-      if (!m) return false;
-      return !closedOrMissing.has(m[1]) || closedOrMissing.get(m[1]) === true;
+      const segments = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
+      let notebookId = null;
+      if (segments[0] === "data" && segments[1]) notebookId = segments[1];
+      else if (segments[0] && /^\d{14}-[a-z0-9]+$/i.test(segments[0])) notebookId = segments[0];
+      if (!notebookId) return false;
+      return !closedOrMissing.has(notebookId) || closedOrMissing.get(notebookId) === true;
     });
   }
   _format(path) {
@@ -2810,9 +2814,10 @@ var SyncEngine = class {
         remoteHead = null;
         remoteEntries = /* @__PURE__ */ new Map();
       }
+      const rawRemoteEntries = remoteEntries;
       remoteEntries = this._withoutIgnoredEntries(remoteEntries);
       if (forcedByWizard) {
-        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote });
+        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote, rawRemoteEntries });
       }
       transition(ctx, SyncState.RESOLVING_BASE);
       this._emit("engine:phase", { ctx, state: SyncState.RESOLVING_BASE });
@@ -3152,7 +3157,27 @@ var SyncEngine = class {
       return null;
     }
   }
-  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false } = {}) {
+  /** 枚举本地目录下全部文件(不做忽略过滤)——残留目录整体清理用 */
+  async _collectLocalFilesUnder(root) {
+    const files = [];
+    const queue = [root];
+    while (queue.length > 0) {
+      const dir = queue.pop();
+      let entries;
+      try {
+        entries = await this.contentAdapter.kernel.readDir(dir);
+      } catch (err) {
+        continue;
+      }
+      for (const entry of entries || []) {
+        const p = dir === "" ? entry.name : dir + "/" + entry.name;
+        if (entry.isDir) queue.push(p);
+        else files.push(p);
+      }
+    }
+    return files;
+  }
+  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false, rawRemoteEntries = /* @__PURE__ */ new Map() } = {}) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {
       throw new SyncError({
@@ -3202,17 +3227,29 @@ var SyncEngine = class {
     }
     const isStray = (path) => {
       if (!registeredIds) return false;
-      const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
-      if (!m) return false;
-      return !registeredIds.has(m[1]) || registeredIds.get(m[1]) === true;
+      const segments = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
+      let notebookId = null;
+      if (segments[0] === "data" && segments[1]) notebookId = segments[1];
+      else if (segments[0] && /^\d{14}-[a-z0-9]+$/i.test(segments[0])) notebookId = segments[0];
+      if (!notebookId) return false;
+      return !registeredIds.has(notebookId) || registeredIds.get(notebookId) === true;
     };
     if (keepLocal) {
-      const strayLocal = [];
-      for (const path of localPaths) {
-        if (isStray(path)) {
-          strayLocal.push(path);
-          continue;
+      const strayRoots = /* @__PURE__ */ new Set();
+      if (registeredIds) {
+        const rootOf = (path) => {
+          const segs = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
+          return segs[0] === "data" ? segs.slice(0, 2).join("/") : segs[0];
+        };
+        for (const path of rawRemoteEntries.keys()) {
+          if (isStray(path)) strayRoots.add(rootOf(path));
         }
+        for (const path of localPaths) {
+          if (isStray(path)) strayRoots.add(rootOf(path));
+        }
+      }
+      for (const path of localPaths) {
+        if (strayRoots.size > 0 && isStray(path)) continue;
         const remoteEntry = remoteEntries.get(path);
         if (remoteEntry && remoteEntry.sha === localShas.get(path)) {
           plan.unchanged += 1;
@@ -3221,13 +3258,36 @@ var SyncEngine = class {
         plan.uploads.push({ path, op: remoteEntry ? "update" : "create" });
       }
       for (const path of remotePaths) {
-        if (!localPaths.has(path) || isStray(path)) {
+        if (!localPaths.has(path)) {
           plan.deletionsRemote.push({ path, remoteSha: remoteEntries.get(path).sha });
         }
       }
-      for (const path of strayLocal) {
-        plan.deletionsLocal.push({ path });
-        localShas.delete(path);
+      if (strayRoots.size > 0) {
+        const planned = new Set(plan.deletionsRemote.map((d) => d.path));
+        for (const [path, entry] of rawRemoteEntries) {
+          if (planned.has(path)) continue;
+          const segs = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
+          const root = segs[0] === "data" ? segs.slice(0, 2).join("/") : segs[0];
+          if (strayRoots.has(root)) {
+            plan.deletionsRemote.push({ path, remoteSha: entry.sha });
+            planned.add(path);
+          }
+        }
+        for (const root of strayRoots) {
+          const localFiles = await this._collectLocalFilesUnder(root);
+          for (const p of localFiles) {
+            plan.deletionsLocal.push({ path: p });
+            localShas.delete(p);
+          }
+        }
+        if (plan.deletionsRemote.length > 0 || plan.deletionsLocal.length > 0) {
+          this._emit("engine:operation", {
+            ctx,
+            operation: "残留笔记本目录将整体清理(含被忽略文件)",
+            count: plan.deletionsRemote.length + plan.deletionsLocal.length,
+            paths: [...strayRoots]
+          });
+        }
       }
     } else {
       for (const path of remotePaths) {

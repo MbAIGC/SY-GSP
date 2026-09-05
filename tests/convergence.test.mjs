@@ -554,6 +554,46 @@ test("重建'以本地为准': 已关闭的笔记本按残留清理(内核列表
   assert.deepEqual(tree.map((e) => e.path), [a]);
 });
 
+test("重建'以本地为准': 仓库根布局(无 data/ 前缀)的残留笔记本同样清理", async () => {
+  const a = "20240101120000-abc/a.md";
+  const zombie = "20240101120003-zomb99/.siyuan/conf.json";
+  const h = await makeHarness({
+    remoteFiles: { [a]: "a", [zombie]: JSON.stringify({ name: "僵尸" }) },
+    localFiles: { [a]: "a", [zombie]: JSON.stringify({ name: "僵尸" }) },
+  });
+  h.workspace.getNotebooks = async () => [{ id: "20240101120000-abc", closed: false }];
+  h.workspace.ignoreMatcher = () => ({ isIgnored: () => false });
+  // 根布局扫描: 默认扫描正则只认 data/ 前缀,这里改为枚举全部内核文件
+  h.workspace.scan = async () => ({
+    files: [...h.kernel.__files.keys()].filter((k) => !k.startsWith("temp/")).map((k) => ({ path: k, name: k.split("/").pop(), updated: 1 })),
+    enumErrorOccurred: false,
+  });
+  const result = await runQuiet(h, { trigger: "rebuild", mode: "local_over_remote" });
+  assert.equal(result.success, true);
+  assert.equal(result.deletionsRemote, 1, "根布局残留必须删除: " + JSON.stringify(result));
+  assert.equal(result.deletionsLocal, 1);
+  const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
+  assert.deepEqual(tree.map((e) => e.path), [a]);
+});
+
+test("重建'以本地为准': 仅含被忽略文件(.siyuan/sort.json)的残留目录也从两端清理", async () => {
+  const a = D + "a.md";
+  // 僵尸目录只有 sort.json——被忽略规则隐身,规划器不可见,普通路径级删除永远清不掉
+  const zombieSort = "data/20240101120005-zmb0777/.siyuan/sort.json";
+  const h = await makeHarness({
+    remoteFiles: { [a]: "a", [zombieSort]: "{}" },
+    localFiles: { [a]: "a", [zombieSort]: "{}" },
+  });
+  h.workspace.getNotebooks = async () => [{ id: "20240101120000-abc", closed: false }];
+  const result = await runQuiet(h, { trigger: "rebuild", mode: "local_over_remote" });
+  assert.equal(result.success, true);
+  assert.equal(result.deletionsRemote, 1, "被忽略的残留文件也必须从远端删除: " + JSON.stringify(result));
+  assert.equal(result.deletionsLocal, 1, "本地被忽略的残留文件也一并清理");
+  const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
+  assert.deepEqual(tree.map((e) => e.path), [a]);
+  assert.equal(await h.kernel.getFile(zombieSort), null, "本地 sort.json 已清理");
+});
+
 test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => {
   const kernel = makeFakeKernel({ "data/x/a.md": "hello" });
   const plugin = makeFakePlugin();

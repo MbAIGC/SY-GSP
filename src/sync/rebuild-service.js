@@ -52,9 +52,12 @@ export class RebuildService {
     const commit = await this.provider.getCommit(head.sha);
     const ignored = this.workspace.ignoreMatcher();
     const tree = await this.provider.getTree(commit.treeSha);
-    const remote = new Map((tree || [])
-      .filter((entry) => entry && entry.type === "blob" && !ignored.isIgnored(entry.path))
+    // 原始树用于残留检测(被忽略文件也算残留目录的一部分,预览要如实列出);
+    // 规划比对仍用过滤后的树(与同步语义一致)
+    const remoteRaw = new Map((tree || [])
+      .filter((entry) => entry && entry.type === "blob")
       .map((entry) => [entry.path, entry.sha]));
+    const remote = new Map([...remoteRaw].filter(([path]) => !ignored.isIgnored(path)));
 
     const onlyLocal = [];
     const onlyRemote = [];
@@ -80,9 +83,9 @@ export class RebuildService {
     const manifestPaths = this.manifestStore ? [...this.manifestStore.paths] : [];
     const actualPaths = new Set([...local.keys(), ...remote.keys()]);
     const manifestResidual = manifestPaths.filter((path) => !actualPaths.has(path));
-    // 残留笔记本: 数据文件存在于磁盘/远端,但不在内核笔记本列表(UI 不显示)。
-    // 重建"以本地为准"会把这类残留按清理处理,预览中显式列出数量与路径。
-    const strayNotebookPaths = await this._strayNotebookPaths([...local.keys(), ...remote.keys()]);
+    // 残留笔记本: 数据文件存在于磁盘/远端,但不在内核笔记本列表(UI 不显示)
+    // 或已关闭。按原始树检测——被忽略文件(如 .siyuan/sort.json)也算残留的一部分。
+    const strayNotebookPaths = await this._strayNotebookPaths([...local.keys(), ...remoteRaw.keys()]);
     return {
       inspectedAt: new Date().toISOString(),
       remoteHead: head.sha,
@@ -145,10 +148,14 @@ export class RebuildService {
       if (n && n.id) closedOrMissing.set(n.id, n.closed === true);
     }
     if (closedOrMissing.size === 0) return [];
+    // 按路径段识别笔记本 id(兼容仓库根布局与 data/ 前缀布局两种形态)
     return paths.filter((path) => {
-      const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
-      if (!m) return false;
-      return !closedOrMissing.has(m[1]) || closedOrMissing.get(m[1]) === true;
+      const segments = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
+      let notebookId = null;
+      if (segments[0] === "data" && segments[1]) notebookId = segments[1];
+      else if (segments[0] && /^\d{14}-[a-z0-9]+$/i.test(segments[0])) notebookId = segments[0];
+      if (!notebookId) return false;
+      return !closedOrMissing.has(notebookId) || closedOrMissing.get(notebookId) === true;
     });
   }
 
