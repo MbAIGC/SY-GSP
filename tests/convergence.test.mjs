@@ -721,6 +721,58 @@ test("_readLocalBytes: 内核对缺失文件返回 200+错误信封时按'不存
   assert.equal(await (await h.kernel.getFile(doc)).text(), "remote doc");
 });
 
+test("icon 同步: 下载合并后经内核 setNotebookConf 应用,第二轮收敛", async () => {
+  const conf = D + ".siyuan/conf.json";
+  // BASE: name+icon 已同步;本端内核内存丢 icon → 磁盘被改写为空 icon(实证形态)
+  const baseConf = JSON.stringify({ name: "我的笔记", icon: "1f5cf" });
+  const h = await makeHarness({ remoteFiles: { [conf]: baseConf }, localFiles: { [conf]: baseConf } });
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  await h.kernel.putFile(conf, new Blob([enc(JSON.stringify({ name: "我的笔记", icon: "", sort: {} }))]), false);
+  // 本地 icon 被内核抹掉 → 防抹除守卫: 从远端恢复而非上传空 icon
+  const r1 = await runQuiet(h);
+  assert.equal(r1.success, true, JSON.stringify(r1));
+  assert.equal(r1.uploads, 0, "不得把抹掉 icon 的版本推上远端");
+  assert.equal(r1.downloads, 1, "从远端恢复");
+  assert.ok(h.kernel.__appliedConfs.some((c) => c.notebook === "20240101120000-abc" && c.data.icon === "1f5cf"), "icon 必须经 setNotebookConf 应用到内核");
+  // 第二轮收敛
+  const r2 = await runQuiet(h);
+  assert.equal(r2.uploads + r2.downloads, 0, "恢复后应收敛: " + JSON.stringify(r2));
+});
+
+test("icon 同步: 一端改图标 → 推送 → 另一端 setNotebookConf 应用", async () => {
+  const conf = D + ".siyuan/conf.json";
+  // 设备 A: 改图标并推送
+  const hA = await makeHarness({ remoteFiles: { [conf]: JSON.stringify({ name: "我的笔记" }) }, localFiles: { [conf]: JSON.stringify({ name: "我的笔记" }) } });
+  const baseA = await hA.repo.snapshot("base");
+  await hA.metadataStore.setConfirmedCommit("github:o/r:main", baseA.sha, "prep");
+  await hA.kernel.putFile(conf, new Blob([enc(JSON.stringify({ name: "我的笔记", icon: "2b50" }))]), false);
+  const rA = await runQuiet(hA);
+  assert.equal(rA.success, true);
+  assert.equal(rA.uploads, 1, "icon 变化应产生上传");
+
+  // 设备 B: 下载 → setNotebookConf 应用(icon 落内存+磁盘)→ 第二轮收敛
+  const hB = await makeHarness({ remoteFiles: { [conf]: JSON.stringify({ name: "我的笔记", icon: "2b50" }) }, localFiles: { [conf]: JSON.stringify({ name: "我的笔记" }) } });
+  const baseB = await hB.repo.snapshot("base");
+  await hB.metadataStore.setConfirmedCommit("github:o/r:main", baseB.sha, "prep");
+  const rB1 = await runQuiet(hB);
+  assert.equal(rB1.success, true);
+  assert.ok(hB.kernel.__appliedConfs.some((c) => c.data.icon === "2b50"), "B 端 icon 应经 setNotebookConf 应用");
+  const localConf = JSON.parse(await (await hB.kernel.getFile(conf)).text());
+  assert.equal(localConf.icon, "2b50", "本地图标已更新");
+  const rB2 = await runQuiet(hB);
+  assert.equal(rB2.uploads + rB2.downloads, 0, "B 第二轮收敛: " + JSON.stringify(rB2));
+});
+
+test("conf.json 回退: 内核不支持 setNotebookConf 时写盘并提示", async () => {
+  const conf = D + ".siyuan/conf.json";
+  const h = await makeHarness({ remoteFiles: { [conf]: JSON.stringify({ name: "远端名" }) }, localFiles: {} });
+  delete h.kernel.setNotebookConf; // 模拟旧内核无此 API
+  const result = await runQuiet(h);
+  assert.equal(result.success, true);
+  assert.equal(await (await h.kernel.getFile(conf)).text(), JSON.stringify({ name: "远端名" }), "回退写盘落地");
+});
+
 test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => {
   const kernel = makeFakeKernel({ "data/x/a.md": "hello" });
   const plugin = makeFakePlugin();

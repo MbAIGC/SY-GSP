@@ -16,7 +16,7 @@
 
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
 import { SyncState, SyncMode, transition, finish } from "./sync-context.js";
-import { isNotebookConfPath, canonicalConfBytes, mergeConfBytes } from "../local/notebook-conf.js";
+import { isNotebookConfPath, canonicalConfBytes, mergeConfBytes, confNotebookId } from "../local/notebook-conf.js";
 
 /** 思源笔记本目录 id 形态: 14 位数字-字母数字 */
 const NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
@@ -1161,6 +1161,9 @@ export class SyncEngine {
     // 下载预检: 目录树自带每个文件的 size,超限文件跳过下载并计入可见计数,
     // 不让单个大资源文件阻塞本轮其余文件的同步(与上传侧 LARGE_FILE 对称)
     const downloadLimit = (this.commitBuilder && this.commitBuilder.requestLimit) || 0;
+    /** conf.json 应用队列: {path, notebookId, mergedBytes} — 整批下载完成后统一
+     * 经内核 setNotebookConf 应用(内核写内存+磁盘+UI),避免先落 .sy 再应用 conf 的时序问题 */
+    const confApplications = [];
     for (const item of plan.downloads) {
       const entry = remoteEntries.get(item.path);
       const remoteSize = (entry && entry.size) || 0;
@@ -1186,15 +1189,20 @@ export class SyncEngine {
       }
       const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
       const writeOp = item.op === "create" && !localExistsNow ? "create" : "update";
-      // conf.json 字段级合并: 名称取远端,排序/开关等设备本地状态保留本地;
-      // 落地的是合并结果(名称=远端),不是远端原文
+      // conf.json 不直接写盘: 字段级合并(名称/图标取远端,设备状态保留本地)后,
+      // 延后到整批下载完成,经内核 setNotebookConf 应用——否则运行中的内核会用
+      // 内存里的旧状态(如空 icon)把磁盘文件改写回去,icon 同步永远失败(实证)
       if (isNotebookConfPath(item.path)) {
+        const notebookId = confNotebookId(item.path);
         const localNow = await this._readLocalBytes(item.path);
-        const merged = mergeConfBytes(localNow, src.bytes || null);
-        if (merged) {
-          await this.contentAdapter.writeFileBlob(item.path, new Blob([merged]), "raw", writeOp);
+        const mergedBytes = mergeConfBytes(localNow, src.bytes || null);
+        if (notebookId && mergedBytes) {
+          confApplications.push({ path: item.path, notebookId, mergedBytes });
           continue;
         }
+        const blob = new Blob([src.bytes]);
+        await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), writeOp);
+        continue;
       }
       const blob = new Blob([src.bytes]);
       await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), writeOp);
@@ -1219,8 +1227,36 @@ export class SyncEngine {
         paths: plan.skippedLargeDownloads.map((item) => item.path),
       });
     }
+    // conf.json 应用(整批下载完成后): 经内核 setNotebookConf 同时更新内存/磁盘/UI;
+    // 内核不支持或失败时回退 putFile 写盘并提示重启生效(兼容,不丢数据)
+    for (const app of confApplications) {
+      let applied = false;
+      try {
+        const confObj = JSON.parse(new TextDecoder().decode(app.mergedBytes));
+        await this.contentAdapter.kernel.setNotebookConf(app.notebookId, confObj);
+        applied = true;
+        this._emit("engine:operation", {
+          ctx,
+          operation: "笔记本配置已应用到内核(setNotebookConf)",
+          count: 1,
+          paths: [app.notebookId],
+        });
+      } catch (err) {
+        if (err instanceof SyncError) throw err; // 网络/远端类错误照常上抛重试
+        // 内核不支持该 API: 回退写盘
+      }
+      if (!applied) {
+        await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
+        this._emit("engine:operation", {
+          ctx,
+          operation: "笔记本配置已写盘(该端内核不支持 setNotebookConf,重启思源后生效)",
+          count: 1,
+          paths: [app.path],
+        });
+      }
+    }
     // 统一刷新一次: 有任何本地落地/删除后让内核重索引(替代散落的条件式刷新)
-    if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0) {
+    if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0 || confApplications.length > 0) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
   }

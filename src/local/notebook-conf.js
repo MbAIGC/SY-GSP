@@ -15,6 +15,14 @@ export function isNotebookConfPath(path) {
   return /^data\/[^/]+\/\.siyuan\/conf\.json$/i.test(String(path || "").replace(/\\/g, "/"));
 }
 
+/** 从 conf.json 路径提取笔记本 id(兼容 data/ 前缀与仓库根两种布局);无法识别返回 null */
+export function confNotebookId(path) {
+  const segments = String(path || "").replace(/\\/g, "/").split("/").filter(Boolean);
+  if (segments[0] === "data" && segments[1]) return segments[1];
+  if (segments[0] && /^\d{14}-[a-z0-9]+$/i.test(segments[0])) return segments[0];
+  return null;
+}
+
 /**
  * 字节 → 规范化字节(仅保留跨设备同步的字段: name + icon)。
  * sort/closed 为设备本地状态,不参与比较——它们不同视为文件一致。

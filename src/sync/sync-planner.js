@@ -14,7 +14,7 @@
  */
 
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
-import { isNotebookConfPath } from "../local/notebook-conf.js";
+import { isNotebookConfPath, canonicalConfBytes, confNotebookId } from "../local/notebook-conf.js";
 
 export const PlanAction = Object.freeze({
   UPLOAD_CREATE: "upload_create",
@@ -133,6 +133,29 @@ export class SyncPlanner {
     return this._stateOf({ exists: true, sha, refSha: ref });
   }
 
+  /**
+   * conf.json 上传裁决: 本地 canonical 与 BASE canonical 逐字段比对。
+   * - 本地丢失了 BASE 有的 icon 且名称未变 → 内核抹除痕迹,返回 "restore"(从远端恢复);
+   * - 名称有变化(用户真实改名)→ 返回 "upload";
+   * - 内容不可得 → 返回 "upload"(保守: 上传会触发对端合并,不会静默丢对端数据)。
+   */
+  async _judgeConfUpload(path, baseSha) {
+    try {
+      const localBytes = await this.readLocal(path);
+      const localCanon = canonicalConfBytes(localBytes ? localBytes.bytes : null);
+      const baseBlob = await this.readRemoteBlobBySha(baseSha);
+      const baseCanon = canonicalConfBytes(baseBlob ? baseBlob.bytes : null);
+      if (!localCanon || !baseCanon) return "upload";
+      const local = JSON.parse(new TextDecoder().decode(localCanon));
+      const base = JSON.parse(new TextDecoder().decode(baseCanon));
+      if (local.name !== base.name) return "upload";
+      if (base.icon && !local.icon) return "restore";
+      return "upload";
+    } catch (err) {
+      return "upload";
+    }
+  }
+
   async _decideAuto(plan, path, ctx) {
     const { baseEntry, remoteEntry, localExists, localShas, enumErrorOccurred, bootstrap } = ctx;
     const localState = await this._localState(path, ctx);
@@ -225,6 +248,16 @@ export class SyncPlanner {
       return;
     }
     if (localState === "changed" && remoteState === "unchanged") {
+      // conf.json 专用守卫: 本地丢失了 BASE 中存在的 icon 且名称未变,
+      // 是内核用内存状态改写磁盘的痕迹(而非用户意图)——从远端恢复,
+      // 绝不把抹掉 icon 的版本推上去(否则远程图标被清除并形成乒乓)
+      if (isNotebookConfPath(path) && baseEntry) {
+        const verdict = await this._judgeConfUpload(path, baseEntry.sha);
+        if (verdict === "restore") {
+          plan.downloads.push({ path, op: "update" });
+          return;
+        }
+      }
       plan.uploads.push({ path, op: "update" });
       return;
     }

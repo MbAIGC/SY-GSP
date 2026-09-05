@@ -137,6 +137,7 @@ function createKernel(q2) {
     removeNotebook: (notebook) => post("/api/notebook/removeNotebook", { notebook }),
     openNotebook: (notebook) => postAllowEmpty("/api/notebook/openNotebook", { notebook }),
     getNotebookConf: (notebook) => post("/api/notebook/getNotebookConf", { notebook }),
+    setNotebookConf: (notebook, data) => post("/api/notebook/setNotebookConf", { notebook, data }),
     refreshFiletree: () => postAllowEmpty("/api/filetree/refreshFiletree", {})
   };
 }
@@ -1426,6 +1427,12 @@ function encodePath(path) {
 function isNotebookConfPath(path) {
   return /^data\/[^/]+\/\.siyuan\/conf\.json$/i.test(String(path || "").replace(/\\/g, "/"));
 }
+function confNotebookId(path) {
+  const segments = String(path || "").replace(/\\/g, "/").split("/").filter(Boolean);
+  if (segments[0] === "data" && segments[1]) return segments[1];
+  if (segments[0] && /^\d{14}-[a-z0-9]+$/i.test(segments[0])) return segments[0];
+  return null;
+}
 function canonicalConfBytes(bytes) {
   if (!bytes || bytes.length === 0) return null;
   try {
@@ -1564,6 +1571,28 @@ var SyncPlanner = class {
     }
     return this._stateOf({ exists: true, sha, refSha: ref });
   }
+  /**
+   * conf.json 上传裁决: 本地 canonical 与 BASE canonical 逐字段比对。
+   * - 本地丢失了 BASE 有的 icon 且名称未变 → 内核抹除痕迹,返回 "restore"(从远端恢复);
+   * - 名称有变化(用户真实改名)→ 返回 "upload";
+   * - 内容不可得 → 返回 "upload"(保守: 上传会触发对端合并,不会静默丢对端数据)。
+   */
+  async _judgeConfUpload(path, baseSha) {
+    try {
+      const localBytes = await this.readLocal(path);
+      const localCanon = canonicalConfBytes(localBytes ? localBytes.bytes : null);
+      const baseBlob = await this.readRemoteBlobBySha(baseSha);
+      const baseCanon = canonicalConfBytes(baseBlob ? baseBlob.bytes : null);
+      if (!localCanon || !baseCanon) return "upload";
+      const local = JSON.parse(new TextDecoder().decode(localCanon));
+      const base = JSON.parse(new TextDecoder().decode(baseCanon));
+      if (local.name !== base.name) return "upload";
+      if (base.icon && !local.icon) return "restore";
+      return "upload";
+    } catch (err) {
+      return "upload";
+    }
+  }
   async _decideAuto(plan, path, ctx) {
     const { baseEntry, remoteEntry, localExists, localShas, enumErrorOccurred, bootstrap } = ctx;
     const localState = await this._localState(path, ctx);
@@ -1636,6 +1665,13 @@ var SyncPlanner = class {
       return;
     }
     if (localState === "changed" && remoteState === "unchanged") {
+      if (isNotebookConfPath(path) && baseEntry) {
+        const verdict = await this._judgeConfUpload(path, baseEntry.sha);
+        if (verdict === "restore") {
+          plan.downloads.push({ path, op: "update" });
+          return;
+        }
+      }
       plan.uploads.push({ path, op: "update" });
       return;
     }
@@ -3745,6 +3781,7 @@ var SyncEngine = class {
    */
   async _applyLocalChanges(ctx, plan, { allowRebuildOverwrite = false, drifts = null, remoteEntries = /* @__PURE__ */ new Map() } = {}) {
     const downloadLimit = this.commitBuilder && this.commitBuilder.requestLimit || 0;
+    const confApplications = [];
     for (const item of plan.downloads) {
       const entry = remoteEntries.get(item.path);
       const remoteSize = entry && entry.size || 0;
@@ -3768,12 +3805,16 @@ var SyncEngine = class {
       const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
       const writeOp = item.op === "create" && !localExistsNow ? "create" : "update";
       if (isNotebookConfPath(item.path)) {
+        const notebookId = confNotebookId(item.path);
         const localNow = await this._readLocalBytes(item.path);
-        const merged = mergeConfBytes(localNow, src.bytes || null);
-        if (merged) {
-          await this.contentAdapter.writeFileBlob(item.path, new Blob([merged]), "raw", writeOp);
+        const mergedBytes = mergeConfBytes(localNow, src.bytes || null);
+        if (notebookId && mergedBytes) {
+          confApplications.push({ path: item.path, notebookId, mergedBytes });
           continue;
         }
+        const blob2 = new Blob([src.bytes]);
+        await this.contentAdapter.writeFileBlob(item.path, blob2, this._docFormat(item.path), writeOp);
+        continue;
       }
       const blob = new Blob([src.bytes]);
       await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), writeOp);
@@ -3798,7 +3839,32 @@ var SyncEngine = class {
         paths: plan.skippedLargeDownloads.map((item) => item.path)
       });
     }
-    if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0) {
+    for (const app of confApplications) {
+      let applied = false;
+      try {
+        const confObj = JSON.parse(new TextDecoder().decode(app.mergedBytes));
+        await this.contentAdapter.kernel.setNotebookConf(app.notebookId, confObj);
+        applied = true;
+        this._emit("engine:operation", {
+          ctx,
+          operation: "笔记本配置已应用到内核(setNotebookConf)",
+          count: 1,
+          paths: [app.notebookId]
+        });
+      } catch (err) {
+        if (err instanceof SyncError) throw err;
+      }
+      if (!applied) {
+        await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
+        this._emit("engine:operation", {
+          ctx,
+          operation: "笔记本配置已写盘(该端内核不支持 setNotebookConf,重启思源后生效)",
+          count: 1,
+          paths: [app.path]
+        });
+      }
+    }
+    if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0 || confApplications.length > 0) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
   }

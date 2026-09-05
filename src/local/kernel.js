@@ -112,6 +112,7 @@ export function createKernel(q) {
     removeNotebook: (notebook) => post("/api/notebook/removeNotebook", { notebook }),
     openNotebook: (notebook) => postAllowEmpty("/api/notebook/openNotebook", { notebook }),
     getNotebookConf: (notebook) => post("/api/notebook/getNotebookConf", { notebook }),
+    setNotebookConf: (notebook, data) => post("/api/notebook/setNotebookConf", { notebook, data }),
     refreshFiletree: () => postAllowEmpty("/api/filetree/refreshFiletree", {}),
   };
 }

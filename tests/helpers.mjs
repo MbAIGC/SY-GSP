@@ -22,6 +22,7 @@ export function makeFakeKernel(initial = {}) {
   const files = new Map(Object.entries(initial));
   const dirs = new Set();
   const removedNotebooks = [];
+  const appliedConfs = [];
 
   function ensureDir(path) {
     const parts = path.split("/");
@@ -110,10 +111,17 @@ export function makeFakeKernel(initial = {}) {
       }
       return { code: 0 };
     },
+    async setNotebookConf(notebook, data) {
+      appliedConfs.push({ notebook, data: JSON.parse(JSON.stringify(data)) });
+      // 模拟内核行为: 应用配置的同时把 conf.json 持久化到磁盘
+      files.set("data/" + notebook + "/.siyuan/conf.json", new TextEncoder().encode(JSON.stringify(data)));
+      return { code: 0 };
+    },
     async refreshFiletree() {
       return { code: 0 };
     },
     __files: files,
     __removedNotebooks: removedNotebooks,
+    __appliedConfs: appliedConfs,
   };
 }
