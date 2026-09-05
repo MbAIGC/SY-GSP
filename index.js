@@ -2642,6 +2642,34 @@ function finish(ctx, { state, result, error }) {
   return ctx;
 }
 
+// src/local/notebook-conf.js
+function isNotebookConfPath(path) {
+  return /^data\/[^/]+\/\.siyuan\/conf\.json$/i.test(String(path || "").replace(/\\/g, "/"));
+}
+function canonicalConfBytes(bytes) {
+  if (!bytes || bytes.length === 0) return null;
+  try {
+    const conf = JSON.parse(new TextDecoder().decode(bytes));
+    if (!conf || typeof conf.name !== "string" || !conf.name) return null;
+    return new TextEncoder().encode(JSON.stringify({ name: conf.name }));
+  } catch (err) {
+    return null;
+  }
+}
+function mergeConfBytes(localBytes, remoteBytes) {
+  const remoteCanonical = canonicalConfBytes(remoteBytes);
+  if (!remoteCanonical) return remoteBytes || null;
+  const remoteName = JSON.parse(new TextDecoder().decode(remoteCanonical)).name;
+  if (!localBytes || localBytes.length === 0) return remoteCanonical;
+  try {
+    const local = JSON.parse(new TextDecoder().decode(localBytes));
+    const merged = Object.assign({}, local, { name: remoteName });
+    return new TextEncoder().encode(JSON.stringify(merged));
+  } catch (err) {
+    return remoteCanonical;
+  }
+}
+
 // src/sync/sync-engine.js
 var SyncEngine = class {
   /**
@@ -2684,7 +2712,11 @@ var SyncEngine = class {
         const bytes = await this._readLocalBytes(file.path);
         const rawSha = bytes ? await this.provider.gitBlobSha(bytes) : null;
         rawShas.set(file.path, rawSha);
-        localShas.set(file.path, await this._planSha(file.path, rawSha));
+        if (rawSha !== null && isNotebookConfPath(file.path)) {
+          localShas.set(file.path, await this._confCanonicalSha(file.path));
+        } else {
+          localShas.set(file.path, await this._planSha(file.path, rawSha));
+        }
       }
       ctx.localShas = localShas;
       ctx.snapshotRawShas = rawShas;
@@ -2960,6 +2992,22 @@ var SyncEngine = class {
       const blob = await this.contentAdapter.readFileBlob(path, "markdown");
       if (!blob) return null;
       return await this.provider.gitBlobSha(new Uint8Array(await blob.arrayBuffer()));
+    } catch (err) {
+      return null;
+    }
+  }
+  /**
+   * 笔记本 conf.json 的规范化 sha(仅 name 字段)。
+   * 内核高频 touch conf.json(排序/开关),按整文件比较会在同步窗口内产生
+   * 假修改与 M5 冲突;同步语义收窄为"只同步笔记本名称"。
+   * 解析失败返回 null,由调用方回退 raw sha。
+   */
+  async _confCanonicalSha(path) {
+    try {
+      const bytes = await this._readLocalBytes(path);
+      if (!bytes) return null;
+      const canonical = canonicalConfBytes(bytes);
+      return canonical ? await this.provider.gitBlobSha(canonical) : null;
     } catch (err) {
       return null;
     }
@@ -3404,7 +3452,8 @@ var SyncEngine = class {
           recoverable: true
         });
       }
-      uploads.push(Object.assign({}, item, { bytes, format }));
+      const uploadBytes = isNotebookConfPath(item.path) ? canonicalConfBytes(bytes) || bytes : bytes;
+      uploads.push(Object.assign({}, item, { bytes: uploadBytes, format }));
     }
     return uploads;
   }
@@ -3512,8 +3561,16 @@ var SyncEngine = class {
         await this.contentAdapter.backupFileWithBackup(item.path);
       }
       const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
-      const blob = new Blob([src.bytes]);
       const writeOp = item.op === "create" && !localExistsNow ? "create" : "update";
+      if (isNotebookConfPath(item.path)) {
+        const localNow = await this._readLocalBytes(item.path);
+        const merged = mergeConfBytes(localNow, src.bytes || null);
+        if (merged) {
+          await this.contentAdapter.writeFileBlob(item.path, new Blob([merged]), "raw", writeOp);
+          continue;
+        }
+      }
+      const blob = new Blob([src.bytes]);
       await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), writeOp);
       if (drifts && this._docFormat(item.path) === "markdown") {
         const reBytes = await this._mergeLocalBytes(item.path);
@@ -3545,7 +3602,7 @@ var SyncEngine = class {
   }
   /** 断言本地文件自快照以来未变化(sha 级复查);快照无记录或内容变化一律中止 */
   async _assertLocalUnchanged(ctx, path, message) {
-    const snapshotSha = (ctx.snapshotRawShas || /* @__PURE__ */ new Map()).get(path);
+    const snapshotSha = isNotebookConfPath(path) ? ctx.localShas.get(path) : (ctx.snapshotRawShas || /* @__PURE__ */ new Map()).get(path);
     if (snapshotSha === void 0) {
       throw new SyncError({
         category: SyncErrorCategory.CONFLICT,
@@ -3577,7 +3634,7 @@ var SyncEngine = class {
   }
   async _localShaOrThrow(path, snapshotSha, message) {
     const bytes = await this._readLocalBytes(path);
-    const nowSha = bytes ? await this.provider.gitBlobSha(bytes) : null;
+    const nowSha = bytes ? isNotebookConfPath(path) ? await this._confCanonicalSha(path) : await this.provider.gitBlobSha(bytes) : null;
     if (nowSha === snapshotSha) return;
     throw new SyncError({
       category: SyncErrorCategory.CONFLICT,
@@ -5034,15 +5091,27 @@ var ConflictDialog = class {
       this.dialog = null;
     }
   }
-  /** 解析笔记本名与文档标题,完成后用友好名重渲染(失败静默保持原始路径) */
+  /**
+   * 解析笔记本名与文档标题。两个查询独立完成、各自刷新渲染:
+   * 笔记本列表先到先刷(列表查询快),文档表较慢不应拖累整体。
+   * 任一失败仅跳过对应映射,不阻塞弹窗。
+   */
   async _resolveNames(set) {
     if (!this._kernel) return;
-    const index = { notebooks: /* @__PURE__ */ new Map(), docs: /* @__PURE__ */ new Map() };
+    const index = this._nameIndex || { notebooks: /* @__PURE__ */ new Map(), docs: /* @__PURE__ */ new Map() };
+    const refreshIfCurrent = () => {
+      if (this.dialog && this.set && this.set.operationId === set.operationId) {
+        this._nameIndex = index;
+        const root = this.dialog.element.querySelector("#sygspConflictDialog");
+        if (root) this._render(root, this.set);
+      }
+    };
     try {
       const res = await this._kernel.lsNotebooks();
       for (const n of res && res.notebooks || []) {
         if (n && n.id) index.notebooks.set(n.id, n.name || n.id);
       }
+      refreshIfCurrent();
     } catch (err) {
       this.logger.warn("冲突中心: 笔记本名解析失败 " + String(err && err.message || err));
     }
@@ -5051,13 +5120,9 @@ var ConflictDialog = class {
       for (const row of res || []) {
         if (row && row.id) index.docs.set(row.id, row.content || row.hpath || row.id);
       }
+      refreshIfCurrent();
     } catch (err) {
       this.logger.warn("冲突中心: 文档名解析失败 " + String(err && err.message || err));
-    }
-    if (this.dialog && this.set && this.set.operationId === set.operationId) {
-      this._nameIndex = index;
-      const root = this.dialog.element.querySelector("#sygspConflictDialog");
-      if (root) this._render(root, this.set);
     }
   }
   /**
@@ -5077,7 +5142,8 @@ var ConflictDialog = class {
     const fileName = segments[segments.length - 1] || sub;
     if (/\.siyuan\//.test(sub)) {
       const isConf = fileName === "conf.json";
-      return { title: (isConf ? "笔记本配置" : "笔记本系统文件") + (notebookName ? "(" + notebookName + ")" : ""), sub };
+      const kind = isConf ? "笔记本配置" : "笔记本系统文件";
+      return { title: notebookName ? kind + "(" + notebookName + ")" : kind, sub };
     }
     if (/\.sy$/i.test(fileName)) {
       const docId = fileName.replace(/\.sy$/i, "");

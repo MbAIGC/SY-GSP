@@ -16,6 +16,7 @@
 
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
 import { SyncState, SyncMode, transition, finish } from "./sync-context.js";
+import { isNotebookConfPath, canonicalConfBytes, mergeConfBytes } from "../local/notebook-conf.js";
 
 export class SyncEngine {
   /**
@@ -64,7 +65,12 @@ export class SyncEngine {
         const bytes = await this._readLocalBytes(file.path);
         const rawSha = bytes ? await this.provider.gitBlobSha(bytes) : null;
         rawShas.set(file.path, rawSha);
-        localShas.set(file.path, await this._planSha(file.path, rawSha));
+        // conf.json 用规范化 sha(仅 name): 内核 touch 不再产生修改信号
+        if (rawSha !== null && isNotebookConfPath(file.path)) {
+          localShas.set(file.path, await this._confCanonicalSha(file.path));
+        } else {
+          localShas.set(file.path, await this._planSha(file.path, rawSha));
+        }
       }
       ctx.localShas = localShas;
       ctx.snapshotRawShas = rawShas;
@@ -393,6 +399,23 @@ export class SyncEngine {
       const blob = await this.contentAdapter.readFileBlob(path, "markdown");
       if (!blob) return null;
       return await this.provider.gitBlobSha(new Uint8Array(await blob.arrayBuffer()));
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
+   * 笔记本 conf.json 的规范化 sha(仅 name 字段)。
+   * 内核高频 touch conf.json(排序/开关),按整文件比较会在同步窗口内产生
+   * 假修改与 M5 冲突;同步语义收窄为"只同步笔记本名称"。
+   * 解析失败返回 null,由调用方回退 raw sha。
+   */
+  async _confCanonicalSha(path) {
+    try {
+      const bytes = await this._readLocalBytes(path);
+      if (!bytes) return null;
+      const canonical = canonicalConfBytes(bytes);
+      return canonical ? await this.provider.gitBlobSha(canonical) : null;
     } catch (err) {
       return null;
     }
@@ -876,7 +899,9 @@ export class SyncEngine {
           recoverable: true,
         });
       }
-      uploads.push(Object.assign({}, item, { bytes, format }));
+      // conf.json 只上传规范化内容(仅 name): 其余字段是设备本地状态,不跨设备
+      const uploadBytes = isNotebookConfPath(item.path) ? (canonicalConfBytes(bytes) || bytes) : bytes;
+      uploads.push(Object.assign({}, item, { bytes: uploadBytes, format }));
     }
     return uploads;
   }
@@ -998,8 +1023,18 @@ export class SyncEngine {
         await this.contentAdapter.backupFileWithBackup(item.path);
       }
       const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
-      const blob = new Blob([src.bytes]);
       const writeOp = item.op === "create" && !localExistsNow ? "create" : "update";
+      // conf.json 字段级合并: 名称取远端,排序/开关等设备本地状态保留本地;
+      // 落地的是合并结果(名称=远端),不是远端原文
+      if (isNotebookConfPath(item.path)) {
+        const localNow = await this._readLocalBytes(item.path);
+        const merged = mergeConfBytes(localNow, src.bytes || null);
+        if (merged) {
+          await this.contentAdapter.writeFileBlob(item.path, new Blob([merged]), "raw", writeOp);
+          continue;
+        }
+      }
+      const blob = new Blob([src.bytes]);
       await this.contentAdapter.writeFileBlob(item.path, blob, this._docFormat(item.path), writeOp);
       if (drifts && this._docFormat(item.path) === "markdown") {
         const reBytes = await this._mergeLocalBytes(item.path);
@@ -1032,7 +1067,11 @@ export class SyncEngine {
 
   /** 断言本地文件自快照以来未变化(sha 级复查);快照无记录或内容变化一律中止 */
   async _assertLocalUnchanged(ctx, path, message) {
-    const snapshotSha = (ctx.snapshotRawShas || new Map()).get(path);
+    // conf.json 的复查基准是规范化 sha(ctx.localShas,仅 name):
+    // raw 快照含排序等设备本地字段,内核 touch 后必然不等,会误报"本地被修改"
+    const snapshotSha = isNotebookConfPath(path)
+      ? ctx.localShas.get(path)
+      : (ctx.snapshotRawShas || new Map()).get(path);
     if (snapshotSha === undefined) {
       // 守卫缺口默认中止(M5): 无快照记录就无法证明未变化,宁可暂停交人工,
       // 也不静默覆盖用户在同步窗口内的修改
@@ -1068,7 +1107,13 @@ export class SyncEngine {
 
   async _localShaOrThrow(path, snapshotSha, message) {
     const bytes = await this._readLocalBytes(path);
-    const nowSha = bytes ? await this.provider.gitBlobSha(bytes) : null;
+    // conf.json 的 M5 复查同样用规范化 sha: 内核在同步窗口内 touch(排序/开关变化)
+    // 不改变笔记本名称,不算"本地被修改",不再拦截成冲突
+    const nowSha = bytes
+      ? (isNotebookConfPath(path)
+          ? await this._confCanonicalSha(path)
+          : await this.provider.gitBlobSha(bytes))
+      : null;
     if (nowSha === snapshotSha) return;
     throw new SyncError({
       category: SyncErrorCategory.CONFLICT,

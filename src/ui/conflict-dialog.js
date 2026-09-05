@@ -56,15 +56,28 @@ export class ConflictDialog {
     }
   }
 
-  /** 解析笔记本名与文档标题,完成后用友好名重渲染(失败静默保持原始路径) */
+  /**
+   * 解析笔记本名与文档标题。两个查询独立完成、各自刷新渲染:
+   * 笔记本列表先到先刷(列表查询快),文档表较慢不应拖累整体。
+   * 任一失败仅跳过对应映射,不阻塞弹窗。
+   */
   async _resolveNames(set) {
     if (!this._kernel) return;
-    const index = { notebooks: new Map(), docs: new Map() };
+    const index = this._nameIndex || { notebooks: new Map(), docs: new Map() };
+    const refreshIfCurrent = () => {
+      // 弹窗期间冲突集可能已被新一轮替换,仅当仍是同一集时刷新
+      if (this.dialog && this.set && this.set.operationId === set.operationId) {
+        this._nameIndex = index;
+        const root = this.dialog.element.querySelector("#sygspConflictDialog");
+        if (root) this._render(root, this.set);
+      }
+    };
     try {
       const res = await this._kernel.lsNotebooks();
       for (const n of (res && res.notebooks) || []) {
         if (n && n.id) index.notebooks.set(n.id, n.name || n.id);
       }
+      refreshIfCurrent();
     } catch (err) {
       this.logger.warn("冲突中心: 笔记本名解析失败 " + String((err && err.message) || err));
     }
@@ -73,14 +86,9 @@ export class ConflictDialog {
       for (const row of res || []) {
         if (row && row.id) index.docs.set(row.id, row.content || row.hpath || row.id);
       }
+      refreshIfCurrent();
     } catch (err) {
       this.logger.warn("冲突中心: 文档名解析失败 " + String((err && err.message) || err));
-    }
-    // 弹窗期间冲突集可能已被新一轮替换,仅当仍是同一集时刷新
-    if (this.dialog && this.set && this.set.operationId === set.operationId) {
-      this._nameIndex = index;
-      const root = this.dialog.element.querySelector("#sygspConflictDialog");
-      if (root) this._render(root, this.set);
     }
   }
 
@@ -102,8 +110,10 @@ export class ConflictDialog {
     const fileName = segments[segments.length - 1] || sub;
 
     if (/\.siyuan\//.test(sub)) {
+      // conf.json 等笔记本系统文件: 名称已知时展示,未知时不带无信息量的 id
       const isConf = fileName === "conf.json";
-      return { title: (isConf ? "笔记本配置" : "笔记本系统文件") + (notebookName ? "(" + notebookName + ")" : ""), sub };
+      const kind = isConf ? "笔记本配置" : "笔记本系统文件";
+      return { title: notebookName ? kind + "(" + notebookName + ")" : kind, sub };
     }
     if (/\.sy$/i.test(fileName)) {
       const docId = fileName.replace(/\.sy$/i, "");
