@@ -109,6 +109,7 @@ export function createKernel(q) {
     sql: (stmt) => post("/api/query/sql", { stmt }),
     lsNotebooks: () => post("/api/notebook/lsNotebooks", {}),
     createNotebook: (name) => post("/api/notebook/createNotebook", { name }),
+    removeNotebook: (notebook) => post("/api/notebook/removeNotebook", { notebook }),
     openNotebook: (notebook) => postAllowEmpty("/api/notebook/openNotebook", { notebook }),
     getNotebookConf: (notebook) => post("/api/notebook/getNotebookConf", { notebook }),
     refreshFiletree: () => postAllowEmpty("/api/filetree/refreshFiletree", {}),

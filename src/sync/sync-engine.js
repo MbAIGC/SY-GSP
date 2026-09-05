@@ -545,6 +545,50 @@ export class SyncEngine {
     return roots;
   }
 
+  /** 残留笔记本整体注销: 先逐文件备份,再走内核 removeNotebook(注册/索引/数据一并删除);
+   *  内核不支持/失败时回退为逐文件删除(尽力;被忽略文件亦尝试) */
+  async _removeLocalNotebooks(ctx, roots) {
+    for (const root of roots) {
+      const notebookId = root.split("/").pop();
+      const files = await this._collectLocalFilesUnder(root);
+      for (const p of files) {
+        try {
+          await this.contentAdapter.backupFileWithBackup(p);
+        } catch (err) {
+          // 备份失败不阻断注销
+        }
+      }
+      try {
+        await this.contentAdapter.kernel.removeNotebook(notebookId);
+        this._emit("engine:operation", {
+          ctx,
+          operation: "已注销本地笔记本(内核 removeNotebook)",
+          count: 1,
+          paths: [root],
+        });
+      } catch (err) {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "removeNotebook 不可用,回退逐文件删除(被忽略文件尽力清理)",
+          count: 1,
+          paths: [root],
+        });
+        for (const p of files) {
+          try {
+            await this.contentAdapter.removeFileWithBackup(p);
+          } catch (err2) {
+            this._emit("engine:operation", { ctx, operation: "删除失败", count: 1, paths: [p] });
+          }
+        }
+      }
+    }
+    try {
+      await this.contentAdapter.kernel.refreshFiletree();
+    } catch (err) {
+      // 刷新失败不影响注销结果
+    }
+  }
+
   /** 枚举本地目录下全部文件(不做忽略过滤)——残留目录整体清理用 */
   async _collectLocalFilesUnder(root) {
     const files = [];
@@ -630,24 +674,45 @@ export class SyncEngine {
       if (!notebookId) return false;
       return !registeredIds.has(notebookId) || registeredIds.get(notebookId) === true;
     };
-    if (keepLocal) {
-      // 残留根目录: 不在内核列表/已关闭的笔记本目录(按路径段识别,
-      // 兼容仓库根布局与 data/ 前缀布局)
-      const strayRoots = new Set();
-      if (registeredIds) {
-        const rootOf = (path) => {
+    // 需要整体注销的本地笔记本(内核 removeNotebook): 其数据在远端不存在,
+    // 仅靠文件级删除在安卓等端会被内核按内存状态重建(实证"删除失败")。
+    // 两个方向都适用: 以本地为准的残留目录、以远程为准时远端不存在的本地笔记本。
+    const removedNotebookRoots = new Set();
+    if (rebuildRemote && registeredIds) {
+      const localNotebookRoots = await this._collectLocalNotebookRoots();
+      for (const root of localNotebookRoots) {
+        const notebookId = root.split("/").pop();
+        const isOpenRegistered = registeredIds.has(notebookId) && registeredIds.get(notebookId) !== true;
+        const hasRemoteFiles = [...remotePaths].some((p) => p === root || p.startsWith(root + "/"));
+        if (isOpenRegistered && hasRemoteFiles) continue; // 正常同步中的笔记本: 按路径镜像
+        const keepLocalStray = keepLocal && isStray(root);
+        if (keepLocal && !keepLocalStray) continue; // 以本地为准: 只清残留,保留本地全部真实笔记本
+        removedNotebookRoots.add(root);
+      }
+      for (const path of rawRemoteEntries.keys()) {
+        if (keepLocal && isStray(path)) {
           const segs = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
-          return segs[0] === "data" ? segs.slice(0, 2).join("/") : segs[0];
-        };
-        for (const path of rawRemoteEntries.keys()) {
-          if (isStray(path)) strayRoots.add(rootOf(path));
-        }
-        for (const path of localPaths) {
-          if (isStray(path)) strayRoots.add(rootOf(path));
+          removedNotebookRoots.add(segs[0] === "data" ? segs.slice(0, 2).join("/") : segs[0]);
         }
       }
+      if (removedNotebookRoots.size > 0) {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "残留笔记本将整体注销(removeNotebook, 含注册/索引/数据)",
+          count: removedNotebookRoots.size,
+          paths: [...removedNotebookRoots],
+        });
+      }
+    }
+    const underRemoved = (path) => {
+      for (const root of removedNotebookRoots) {
+        if (path === root || String(path).startsWith(root + "/")) return true;
+      }
+      return false;
+    };
+    if (keepLocal) {
       for (const path of localPaths) {
-        if (strayRoots.size > 0 && isStray(path)) continue; // 残留文件不上传,由目录清理处理
+        if (underRemoved(path)) continue; // 整体注销的笔记本: 不上传
         const remoteEntry = remoteEntries.get(path);
         if (remoteEntry && remoteEntry.sha === localShas.get(path)) {
           plan.unchanged += 1;
@@ -660,35 +725,26 @@ export class SyncEngine {
           plan.deletionsRemote.push({ path, remoteSha: remoteEntries.get(path).sha });
         }
       }
-      if (strayRoots.size > 0) {
+      if (removedNotebookRoots.size > 0) {
         // 残留目录整体清理,基于原始目录树: 被忽略规则隐身的文件(.siyuan/sort.json 等)
         // 对规划器不可见,路径级删除永远清不掉,必须绕过忽略规则
         const planned = new Set(plan.deletionsRemote.map((d) => d.path));
         for (const [path, entry] of rawRemoteEntries) {
           if (planned.has(path)) continue;
-          const segs = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
-          const root = segs[0] === "data" ? segs.slice(0, 2).join("/") : segs[0];
-          if (strayRoots.has(root)) {
+          if (underRemoved(path)) {
             plan.deletionsRemote.push({ path, remoteSha: entry.sha });
             planned.add(path);
           }
         }
-        // 本地侧: 残留目录内的全部文件(含被忽略的)一并清理,否则普通同步会复活上传
-        for (const root of strayRoots) {
-          const localFiles = await this._collectLocalFilesUnder(root);
-          for (const p of localFiles) {
-            plan.deletionsLocal.push({ path: p });
-            localShas.delete(p); // 回读校验按清理后的本地全貌比对
-          }
+        for (const path of localPaths) {
+          if (underRemoved(path)) localShas.delete(path); // 回读校验按清理后的本地全貌比对
         }
-        if (plan.deletionsRemote.length > 0 || plan.deletionsLocal.length > 0) {
-          this._emit("engine:operation", {
-            ctx,
-            operation: "残留笔记本目录将整体清理(含被忽略文件)",
-            count: plan.deletionsRemote.length + plan.deletionsLocal.length,
-            paths: [...strayRoots],
-          });
-        }
+        this._emit("engine:operation", {
+          ctx,
+          operation: "残留笔记本目录将整体清理(含被忽略文件)",
+          count: plan.deletionsRemote.length,
+          paths: [...removedNotebookRoots],
+        });
       }
     } else {
       for (const path of remotePaths) {
@@ -700,7 +756,7 @@ export class SyncEngine {
         plan.downloads.push({ path, op: localPaths.has(path) ? "update" : "create" });
       }
       for (const path of localPaths) {
-        if (!remotePaths.has(path)) plan.deletionsLocal.push({ path });
+        if (!remotePaths.has(path) && !underRemoved(path)) plan.deletionsLocal.push({ path });
       }
     }
     ctx.plan = plan;
@@ -742,36 +798,14 @@ export class SyncEngine {
         }
         confirmedSha = push.baseSha || push.finalSha;
       }
-      // 本地残留清理(重建"以本地为准"): 删除磁盘上不在内核笔记本列表里的文件
-      if (plan.deletionsLocal.length > 0) {
-        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: true });
-        this._emit("engine:operation", {
-          ctx,
-          operation: "本地残留(不在笔记本列表)已清理",
-          count: plan.deletionsLocal.length,
-          paths: plan.deletionsLocal.map((item) => item.path),
-        });
+      // 本地残留笔记本整体注销(备份 → 内核 removeNotebook;安卓等端文件级删除
+      // 会被内核按内存状态重建,实证"删除失败",必须走内核注销)
+      if (removedNotebookRoots.size > 0) {
+        await this._removeLocalNotebooks(ctx, removedNotebookRoots);
       }
       if (rebuildRemote && remoteWrites > 0) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localShas);
     } else {
       // 以远端为准: 仅本地侧变更,不产生远端写入
-      // 本地残留目录(不在内核列表/已关闭)一并清理,含被忽略文件(.siyuan/sort.json 等)
-      // ——扫描看不见它们,必须按内核枚举;与下载目标重叠的路径跳过(避免先写后删)
-      if (rebuildRemote && registeredIds) {
-        const localNotebookRoots = await this._collectLocalNotebookRoots();
-        const downloadPaths = new Set(plan.downloads.map((d) => d.path));
-        const strayPending = new Set(plan.deletionsLocal.map((d) => d.path));
-        for (const root of localNotebookRoots) {
-          const notebookId = root.split("/").pop();
-          if (registeredIds.has(notebookId) && registeredIds.get(notebookId) !== true) continue;
-          const strayFiles = (await this._collectLocalFilesUnder(root)).filter((p) => !downloadPaths.has(p) && !strayPending.has(p));
-          for (const p of strayFiles) {
-            plan.deletionsLocal.push({ path: p });
-            localShas.delete(p);
-            strayPending.add(p);
-          }
-        }
-      }
       const drifts = [];
       try {
         await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote, drifts, remoteEntries });
@@ -780,6 +814,10 @@ export class SyncEngine {
           return this._pauseLocalChanged(ctx, err);
         }
         throw err;
+      }
+      // 远端不存在的本地笔记本: 内核级注销(注册/索引/数据一并删除)
+      if (removedNotebookRoots.size > 0) {
+        await this._removeLocalNotebooks(ctx, removedNotebookRoots);
       }
       // 强制下载方向同样做 canonical 漂移修正,保证重建后第二轮即收敛
       ctx.canonicalDrifts = drifts.length;

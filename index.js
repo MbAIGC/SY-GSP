@@ -134,6 +134,7 @@ function createKernel(q2) {
     sql: (stmt) => post("/api/query/sql", { stmt }),
     lsNotebooks: () => post("/api/notebook/lsNotebooks", {}),
     createNotebook: (name) => post("/api/notebook/createNotebook", { name }),
+    removeNotebook: (notebook) => post("/api/notebook/removeNotebook", { notebook }),
     openNotebook: (notebook) => postAllowEmpty("/api/notebook/openNotebook", { notebook }),
     getNotebookConf: (notebook) => post("/api/notebook/getNotebookConf", { notebook }),
     refreshFiletree: () => postAllowEmpty("/api/filetree/refreshFiletree", {})
@@ -3181,6 +3182,47 @@ var SyncEngine = class {
     }
     return roots;
   }
+  /** 残留笔记本整体注销: 先逐文件备份,再走内核 removeNotebook(注册/索引/数据一并删除);
+   *  内核不支持/失败时回退为逐文件删除(尽力;被忽略文件亦尝试) */
+  async _removeLocalNotebooks(ctx, roots) {
+    for (const root of roots) {
+      const notebookId = root.split("/").pop();
+      const files = await this._collectLocalFilesUnder(root);
+      for (const p of files) {
+        try {
+          await this.contentAdapter.backupFileWithBackup(p);
+        } catch (err) {
+        }
+      }
+      try {
+        await this.contentAdapter.kernel.removeNotebook(notebookId);
+        this._emit("engine:operation", {
+          ctx,
+          operation: "已注销本地笔记本(内核 removeNotebook)",
+          count: 1,
+          paths: [root]
+        });
+      } catch (err) {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "removeNotebook 不可用,回退逐文件删除(被忽略文件尽力清理)",
+          count: 1,
+          paths: [root]
+        });
+        for (const p of files) {
+          try {
+            await this.contentAdapter.removeFileWithBackup(p);
+          } catch (err2) {
+            this._emit("engine:operation", { ctx, operation: "删除失败", count: 1, paths: [p] });
+          }
+        }
+      }
+    }
+    try {
+      await this.contentAdapter.kernel.refreshFiletree();
+    } catch (err) {
+    }
+  }
   /** 枚举本地目录下全部文件(不做忽略过滤)——残留目录整体清理用 */
   async _collectLocalFilesUnder(root) {
     const files = [];
@@ -3258,22 +3300,42 @@ var SyncEngine = class {
       if (!notebookId) return false;
       return !registeredIds.has(notebookId) || registeredIds.get(notebookId) === true;
     };
-    if (keepLocal) {
-      const strayRoots = /* @__PURE__ */ new Set();
-      if (registeredIds) {
-        const rootOf = (path) => {
+    const removedNotebookRoots = /* @__PURE__ */ new Set();
+    if (rebuildRemote && registeredIds) {
+      const localNotebookRoots = await this._collectLocalNotebookRoots();
+      for (const root of localNotebookRoots) {
+        const notebookId = root.split("/").pop();
+        const isOpenRegistered = registeredIds.has(notebookId) && registeredIds.get(notebookId) !== true;
+        const hasRemoteFiles = [...remotePaths].some((p) => p === root || p.startsWith(root + "/"));
+        if (isOpenRegistered && hasRemoteFiles) continue;
+        const keepLocalStray = keepLocal && isStray(root);
+        if (keepLocal && !keepLocalStray) continue;
+        removedNotebookRoots.add(root);
+      }
+      for (const path of rawRemoteEntries.keys()) {
+        if (keepLocal && isStray(path)) {
           const segs = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
-          return segs[0] === "data" ? segs.slice(0, 2).join("/") : segs[0];
-        };
-        for (const path of rawRemoteEntries.keys()) {
-          if (isStray(path)) strayRoots.add(rootOf(path));
-        }
-        for (const path of localPaths) {
-          if (isStray(path)) strayRoots.add(rootOf(path));
+          removedNotebookRoots.add(segs[0] === "data" ? segs.slice(0, 2).join("/") : segs[0]);
         }
       }
+      if (removedNotebookRoots.size > 0) {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "残留笔记本将整体注销(removeNotebook, 含注册/索引/数据)",
+          count: removedNotebookRoots.size,
+          paths: [...removedNotebookRoots]
+        });
+      }
+    }
+    const underRemoved = (path) => {
+      for (const root of removedNotebookRoots) {
+        if (path === root || String(path).startsWith(root + "/")) return true;
+      }
+      return false;
+    };
+    if (keepLocal) {
       for (const path of localPaths) {
-        if (strayRoots.size > 0 && isStray(path)) continue;
+        if (underRemoved(path)) continue;
         const remoteEntry = remoteEntries.get(path);
         if (remoteEntry && remoteEntry.sha === localShas.get(path)) {
           plan.unchanged += 1;
@@ -3286,32 +3348,24 @@ var SyncEngine = class {
           plan.deletionsRemote.push({ path, remoteSha: remoteEntries.get(path).sha });
         }
       }
-      if (strayRoots.size > 0) {
+      if (removedNotebookRoots.size > 0) {
         const planned = new Set(plan.deletionsRemote.map((d) => d.path));
         for (const [path, entry] of rawRemoteEntries) {
           if (planned.has(path)) continue;
-          const segs = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
-          const root = segs[0] === "data" ? segs.slice(0, 2).join("/") : segs[0];
-          if (strayRoots.has(root)) {
+          if (underRemoved(path)) {
             plan.deletionsRemote.push({ path, remoteSha: entry.sha });
             planned.add(path);
           }
         }
-        for (const root of strayRoots) {
-          const localFiles = await this._collectLocalFilesUnder(root);
-          for (const p of localFiles) {
-            plan.deletionsLocal.push({ path: p });
-            localShas.delete(p);
-          }
+        for (const path of localPaths) {
+          if (underRemoved(path)) localShas.delete(path);
         }
-        if (plan.deletionsRemote.length > 0 || plan.deletionsLocal.length > 0) {
-          this._emit("engine:operation", {
-            ctx,
-            operation: "残留笔记本目录将整体清理(含被忽略文件)",
-            count: plan.deletionsRemote.length + plan.deletionsLocal.length,
-            paths: [...strayRoots]
-          });
-        }
+        this._emit("engine:operation", {
+          ctx,
+          operation: "残留笔记本目录将整体清理(含被忽略文件)",
+          count: plan.deletionsRemote.length,
+          paths: [...removedNotebookRoots]
+        });
       }
     } else {
       for (const path of remotePaths) {
@@ -3323,7 +3377,7 @@ var SyncEngine = class {
         plan.downloads.push({ path, op: localPaths.has(path) ? "update" : "create" });
       }
       for (const path of localPaths) {
-        if (!remotePaths.has(path)) plan.deletionsLocal.push({ path });
+        if (!remotePaths.has(path) && !underRemoved(path)) plan.deletionsLocal.push({ path });
       }
     }
     ctx.plan = plan;
@@ -3363,32 +3417,11 @@ var SyncEngine = class {
         }
         confirmedSha = push.baseSha || push.finalSha;
       }
-      if (plan.deletionsLocal.length > 0) {
-        await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: true });
-        this._emit("engine:operation", {
-          ctx,
-          operation: "本地残留(不在笔记本列表)已清理",
-          count: plan.deletionsLocal.length,
-          paths: plan.deletionsLocal.map((item) => item.path)
-        });
+      if (removedNotebookRoots.size > 0) {
+        await this._removeLocalNotebooks(ctx, removedNotebookRoots);
       }
       if (rebuildRemote && remoteWrites > 0) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localShas);
     } else {
-      if (rebuildRemote && registeredIds) {
-        const localNotebookRoots = await this._collectLocalNotebookRoots();
-        const downloadPaths = new Set(plan.downloads.map((d) => d.path));
-        const strayPending = new Set(plan.deletionsLocal.map((d) => d.path));
-        for (const root of localNotebookRoots) {
-          const notebookId = root.split("/").pop();
-          if (registeredIds.has(notebookId) && registeredIds.get(notebookId) !== true) continue;
-          const strayFiles = (await this._collectLocalFilesUnder(root)).filter((p) => !downloadPaths.has(p) && !strayPending.has(p));
-          for (const p of strayFiles) {
-            plan.deletionsLocal.push({ path: p });
-            localShas.delete(p);
-            strayPending.add(p);
-          }
-        }
-      }
       const drifts = [];
       try {
         await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote, drifts, remoteEntries });
@@ -3397,6 +3430,9 @@ var SyncEngine = class {
           return this._pauseLocalChanged(ctx, err);
         }
         throw err;
+      }
+      if (removedNotebookRoots.size > 0) {
+        await this._removeLocalNotebooks(ctx, removedNotebookRoots);
       }
       ctx.canonicalDrifts = drifts.length;
       const driftSha = await this._applyCanonicalCorrections(ctx, drifts);

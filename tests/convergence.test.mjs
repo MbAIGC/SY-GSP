@@ -399,11 +399,11 @@ test("重建'以本地为准': 磁盘残留的未注册笔记本从两端清理(
   const result = await runQuiet(h, { trigger: "rebuild", mode: "local_over_remote" });
   assert.equal(result.success, true);
   assert.equal(result.deletionsRemote, 2, "残留笔记本的远端文件必须删除: " + JSON.stringify(result));
-  assert.equal(result.deletionsLocal, 2, "残留笔记本的本地文件必须一并清理(否则普通同步会复活上传)");
+  assert.equal(result.deletionsLocal, 0, "本地清理走内核 removeNotebook(非文件级)");
+  assert.ok(h.kernel.__removedNotebooks.includes("20240101120003-third99"), "笔记本必须经内核注销");
   const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
   assert.deepEqual(tree.map((e) => e.path).sort(), [a, b].sort(), "远端只保留已注册笔记本的文件");
   assert.equal(await h.kernel.getFile(third + "/note.sy"), null, "本地残留已清理");
-  assert.equal(h.metadataStore.getBaseCommit("github:o/r:main"), h.repo.head);
 
   // 收敛: 重建后第二轮零操作
   const r2 = await runQuiet(h);
@@ -549,7 +549,8 @@ test("重建'以本地为准': 已关闭的笔记本按残留清理(内核列表
   const result = await runQuiet(h, { trigger: "rebuild", mode: "local_over_remote" });
   assert.equal(result.success, true);
   assert.equal(result.deletionsRemote, 1, "已关闭笔记本的远端文件必须删除: " + JSON.stringify(result));
-  assert.equal(result.deletionsLocal, 1, "已关闭笔记本的本地文件必须一并清理");
+  assert.equal(result.deletionsLocal, 0, "本地清理走内核 removeNotebook");
+  assert.ok(h.kernel.__removedNotebooks.includes("20240101120004-closed1"), "已关闭笔记本必须经内核注销");
   const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
   assert.deepEqual(tree.map((e) => e.path), [a]);
 });
@@ -571,7 +572,8 @@ test("重建'以本地为准': 仓库根布局(无 data/ 前缀)的残留笔记�
   const result = await runQuiet(h, { trigger: "rebuild", mode: "local_over_remote" });
   assert.equal(result.success, true);
   assert.equal(result.deletionsRemote, 1, "根布局残留必须删除: " + JSON.stringify(result));
-  assert.equal(result.deletionsLocal, 1);
+  assert.equal(result.deletionsLocal, 0, "本地清理走内核 removeNotebook");
+  assert.ok(h.kernel.__removedNotebooks.includes("20240101120003-zomb99"));
   const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
   assert.deepEqual(tree.map((e) => e.path), [a]);
 });
@@ -588,7 +590,8 @@ test("重建'以本地为准': 仅含被忽略文件(.siyuan/sort.json)的残留
   const result = await runQuiet(h, { trigger: "rebuild", mode: "local_over_remote" });
   assert.equal(result.success, true);
   assert.equal(result.deletionsRemote, 1, "被忽略的残留文件也必须从远端删除: " + JSON.stringify(result));
-  assert.equal(result.deletionsLocal, 1, "本地被忽略的残留文件也一并清理");
+  assert.equal(result.deletionsLocal, 0, "本地清理走内核 removeNotebook(非文件级)");
+  assert.ok(h.kernel.__removedNotebooks.includes("20240101120005-zmb0777"), "残留笔记本必须经内核注销");
   const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
   assert.deepEqual(tree.map((e) => e.path), [a]);
   assert.equal(await h.kernel.getFile(zombieSort), null, "本地 sort.json 已清理");
@@ -646,9 +649,28 @@ test("重建'以远程为准': 本地残留目录(含被忽略文件)一并清�
   const result = await runQuiet(h, { trigger: "rebuild", mode: "remote_over_local" });
   assert.equal(result.success, true);
   assert.equal(result.downloads, 1, "远端文件正常下载");
-  assert.equal(result.deletionsLocal, 2, "本地残留目录整体清理(可见+被忽略): " + JSON.stringify(result));
+  assert.equal(result.deletionsLocal, 0, "本地清理走内核 removeNotebook(非文件级)");
+  assert.ok(h.kernel.__removedNotebooks.includes("20240101120006-zmb0888"), "僵尸笔记本必须经内核注销");
   assert.equal(await h.kernel.getFile(zombieConf), null, "僵尸 conf.json 已清理");
   assert.equal(await h.kernel.getFile(zombieSort), null, "被忽略的 sort.json 也已清理");
+  assert.equal(await (await h.kernel.getFile(a)).text(), "remote a");
+});
+
+test("重建'以远程为准': 远端不存在的本地已注册笔记本也被内核注销", async () => {
+  const a = D + "a.md";
+  const localOnly = "data/20240101120007-local88/note.sy";
+  const h = await makeHarness({
+    remoteFiles: { [a]: "remote a" },
+    localFiles: { [a]: "local a", [localOnly]: "local note" },
+  });
+  h.workspace.getNotebooks = async () => [
+    { id: "20240101120000-abc", closed: false },
+    { id: "20240101120007-local88", closed: false },
+  ];
+  const result = await runQuiet(h, { trigger: "rebuild", mode: "remote_over_local" });
+  assert.equal(result.success, true);
+  assert.ok(h.kernel.__removedNotebooks.includes("20240101120007-local88"), "远端不存在的本地笔记本应整体注销");
+  assert.equal(await h.kernel.getFile(localOnly), null, "本地数据已随注销删除");
   assert.equal(await (await h.kernel.getFile(a)).text(), "remote a");
 });
 

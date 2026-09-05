@@ -21,6 +21,7 @@ export function makeFakePlugin(opts = {}) {
 export function makeFakeKernel(initial = {}) {
   const files = new Map(Object.entries(initial));
   const dirs = new Set();
+  const removedNotebooks = [];
 
   function ensureDir(path) {
     const parts = path.split("/");
@@ -102,9 +103,17 @@ export function makeFakeKernel(initial = {}) {
     async createNotebook(name) {
       return { notebook: { id: name, name } };
     },
+    async removeNotebook(notebook) {
+      removedNotebooks.push(notebook);
+      for (const key of [...files.keys()]) {
+        if (key === "data/" + notebook || key.startsWith("data/" + notebook + "/")) files.delete(key);
+      }
+      return { code: 0 };
+    },
     async refreshFiletree() {
       return { code: 0 };
     },
     __files: files,
+    __removedNotebooks: removedNotebooks,
   };
 }
