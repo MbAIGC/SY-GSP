@@ -17,9 +17,12 @@ export const DEFAULT_REQUEST_LIMIT = 32 * 1024 * 1024;
 export const DELETE_ENTRY_BUDGET = 256;
 
 export class CommitBuilder {
-  constructor({ requestLimit = DEFAULT_REQUEST_LIMIT, batchByteLimit = BATCH_BYTE_LIMIT } = {}) {
+  constructor({ requestLimit = DEFAULT_REQUEST_LIMIT, batchByteLimit = BATCH_BYTE_LIMIT, deviceName = "" } = {}) {
     this.requestLimit = requestLimit;
     this.batchByteLimit = batchByteLimit;
+    // 设备名称: 提交信息前缀 "<设备>-推送: ...",用于在 GitHub 上辨识提交来源;
+    // 清理换行/控制字符并限长,防止破坏提交信息格式
+    this.deviceName = String(deviceName || "").replace(/[\r\n\t]+/g, " ").trim().slice(0, 32);
   }
 
   /**
@@ -88,13 +91,14 @@ export class CommitBuilder {
   }
 
   _message(operationId, chunk, part, total) {
-    // 固定三段计数,便于脚本与人工比对
+    // 固定三段计数,便于脚本与人工比对;设备名称前缀标识提交来源
     const creates = chunk.uploads.filter((u) => u.op === "create").length;
     const updates = chunk.uploads.filter((u) => u.op !== "create").length;
     const deletes = chunk.deletions.length;
     const summary = "create " + creates + ", update " + updates + ", delete " + deletes;
     const partTag = " part " + part + "/" + total;
-    return "sync: " + summary + " [" + operationId + partTag + "]";
+    const prefix = this.deviceName ? this.deviceName + "-推送: " : "";
+    return prefix + "sync: " + summary + " [" + operationId + partTag + "]";
   }
 
   _encodedSize(bytes) {

@@ -233,6 +233,15 @@ export class SyncController {
           " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) +
           " 拦删" + (result.skippedDeletes || 0) + " 超大" + (result.skippedLarge || 0) +
           " 大跳下" + (result.skippedLargeDownloads || 0) + " 漂移修" + (result.canonicalDrifts || 0));
+        // 具体路径: 上传/下载/删除涉及哪些文件一目了然(定位"没更新也在推送"类问题)
+        const plan = ctx.plan;
+        if (plan) {
+          const brief = (list, cap) => list.slice(0, cap).map((i) => i.path || i).join(", ");
+          if (plan.uploads.length) this.logger.info("上传(" + plan.uploads.length + "): " + brief(plan.uploads, 10));
+          if (plan.downloads.length) this.logger.info("下载(" + plan.downloads.length + "): " + brief(plan.downloads, 10));
+          if (plan.deletionsRemote.length) this.logger.info("删远(" + plan.deletionsRemote.length + "): " + brief(plan.deletionsRemote, 10));
+          if (plan.deletionsLocal.length) this.logger.info("删本(" + plan.deletionsLocal.length + "): " + brief(plan.deletionsLocal, 10));
+        }
         await this._onFinished(ctx, result);
         return result;
       } catch (err) {

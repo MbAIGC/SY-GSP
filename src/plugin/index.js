@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SY-GSP 插件入口(同步引擎 2.0)。
  * 职责: 生命周期、依赖装配、菜单/设置/面板挂接、自动同步管理。
  * 不包含 Git API 细节、合并细节与状态机实现(分属 git/sync 层)。
@@ -78,6 +78,8 @@ export default class SyGspPlugin extends q.Plugin {
         },
       });
       this.settingUtils = await this.settingsBuilder.build();
+      // 运行日志设备标识(与提交信息前缀同源): 多设备场景区分日志来源
+      this.logs.deviceTag = String(this.settingUtils.take("device_name") || "").trim().slice(0, 32);
       await this._migrateFromLegacyIfNeeded();
       this.conflictDialog = new ConflictDialog({
         q,
@@ -144,8 +146,27 @@ export default class SyGspPlugin extends q.Plugin {
       if (this.topBarElement && !document.contains(this.topBarElement)) {
         this._registerTopBar();
       }
+      this._updateTopBarPauseBadge();
     } catch (err) {
       console.warn("[SY-GSP] 顶栏自检失败:", err && err.message);
+    }
+  }
+
+  /** 顶栏图标暂停角标: 手动暂停同步期间可见(⏸ 角标 + title 说明) */
+  _updateTopBarPauseBadge() {
+    if (!this.topBarElement || typeof this.topBarElement.querySelector !== "function") return;
+    let badge = this.topBarElement.querySelector(".sygsp-pause-badge");
+    if (this._autoSyncPaused === true) {
+      this.topBarElement.title = "SY-GSP(同步已暂停)";
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "sygsp-pause-badge";
+        badge.textContent = "⏸";
+        this.topBarElement.appendChild(badge);
+      }
+    } else {
+      this.topBarElement.title = this.i18n.addTopBarIcon || "SY-GSP";
+      if (badge) badge.remove();
     }
   }
 
@@ -307,7 +328,7 @@ export default class SyGspPlugin extends q.Plugin {
     const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
     const workspace = new WorkspaceAdapter(this.kernel, {
       getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
-      getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
+      getSyncRange: () => Number(this.settingUtils.get("sync_range")) === 0 ? 1 : (Number(this.settingUtils.get("sync_range")) || 1),
       getNotebooks: async () => {
         const res = await this.kernel.lsNotebooks();
         return (res && res.notebooks) || [];
@@ -334,6 +355,7 @@ export default class SyGspPlugin extends q.Plugin {
       merger: new ThreeWayMerger(),
       commitBuilder: new CommitBuilder({
         requestLimit: Number(this.settingUtils.take("sygsp_blob_request_limit")) || 33554432,
+        deviceName: String(this.settingUtils.take("device_name") || ""),
       }),
       events: this.events,
       config: {
@@ -341,7 +363,7 @@ export default class SyGspPlugin extends q.Plugin {
           return self._repoKey(info);
         },
         get syncRange() {
-          return Number(self.settingUtils.take("sync_range")) || 0;
+          return Number(self.settingUtils.take("sync_range")) === 0 ? 1 : (Number(self.settingUtils.take("sync_range")) || 1);
         },
         get syncFileType() {
           return Number(self.settingUtils.take("sync_file_type")) === 1 ? "markdown" : "raw";
@@ -613,7 +635,7 @@ export default class SyGspPlugin extends q.Plugin {
     if (!this.settingUtils) return;
     if (Number(this.settingUtils.take("sync_mode")) !== 0) return;
     if (this.settingUtils.take("enabled_sync") === false) return;
-    this.startAutoSyncTimer(Number(this.settingUtils.take("sync_interval")) || 600000);
+    this.startAutoSyncTimer();
   }
 
   _stopAutoSyncTimer() {
@@ -624,15 +646,24 @@ export default class SyGspPlugin extends q.Plugin {
     }
   }
 
-  startAutoSyncTimer(intervalMs) {
+  /**
+   * 自动同步间隔(毫秒)。设置项单位为**秒**(i18n 与 UI 一致):
+   * - 常规: 值即秒;
+   * - 兼容历史误存毫秒值(≥30000 视为旧毫秒,自动 ÷1000);
+   * - 界限: 最小 30s(防配置异常变成同步风暴),最大 24h。
+   */
+  _autoSyncIntervalMs() {
+    const raw = Number(this.settingUtils.take("sync_interval")) || 600;
+    let seconds = raw;
+    if (raw >= 30000) seconds = Math.round(raw / 1000);
+    seconds = Math.min(Math.max(seconds, 30), 86400);
+    return seconds * 1000;
+  }
+
+  startAutoSyncTimer() {
     this._stopAutoSyncTimer();
     if (this._autoSyncPaused === true) return; // 用户手动暂停中,不启动
-    // 间隔下限 30s: 配置异常(如迁移来的秒值被当毫秒)会把定时器变成同步风暴
-    const MIN_INTERVAL = 30000;
-    const safeInterval = Math.max(Number(intervalMs) || 600000, MIN_INTERVAL);
-    if (safeInterval !== intervalMs) {
-      this.logs.warn("自动同步间隔配置过小(" + intervalMs + "ms),已按最小间隔 " + Math.round(safeInterval / 1000) + "s 执行");
-    }
+    const intervalMs = this._autoSyncIntervalMs();
     this.timerTask = setInterval(() => {
       if (this._autoSyncPaused === true) return;
       if (this.controller.isConflictPaused()) return; // 暂停期间自动触发被跳过
@@ -640,8 +671,8 @@ export default class SyGspPlugin extends q.Plugin {
       this.syncNow({ trigger: "automatic" }).catch((err) => {
         this.logs.error("自动同步异常: " + String((err && err.message) || err));
       });
-    }, safeInterval);
-    this.logs.info("自动同步已启动,间隔 " + Math.round(safeInterval / 1000) + "s");
+    }, intervalMs);
+    this.logs.info("自动同步已启动,间隔 " + Math.round(intervalMs / 1000) + "s");
   }
 
   /** 手动暂停/恢复自动同步(菜单开关);手动同步不受影响 */
@@ -657,6 +688,7 @@ export default class SyGspPlugin extends q.Plugin {
       this.logs.warn("用户暂停同步(手动同步不受影响)");
       this.notification.toast("同步已暂停,可从菜单恢复", "info");
     }
+    this._updateTopBarPauseBadge();
     if (this.controller) this.events.emit("state:changed", { state: this.controller.state });
   }
 
@@ -728,11 +760,11 @@ export default class SyGspPlugin extends q.Plugin {
       const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
       const workspace = new WorkspaceAdapter(this.kernel, {
         getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
-        getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
+        getSyncRange: () => Number(this.settingUtils.get("sync_range")) === 0 ? 1 : (Number(this.settingUtils.get("sync_range")) || 1),
         getNotebooks: async () => ((await this.kernel.lsNotebooks()) || {}).notebooks || [],
       });
       const adapter = new ContentAdapter(this.kernel, { backupDir: "temp/SY-GSP/backup/", i18n: this.i18n });
-      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { syncRange: Number(this.settingUtils.get("sync_range")) || 0, syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
+      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { syncRange: Number(this.settingUtils.get("sync_range")) === 0 ? 1 : (Number(this.settingUtils.get("sync_range")) || 1), syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
       report = await service.inspect();
       this.logs.info("同步重建: 校验完成,本地 " + report.localCount + " 个,远端 " + report.remoteCount + " 个,差异 " + (report.onlyLocal.length + report.onlyRemote.length + report.different.length) + " 个");
     } catch (err) {
@@ -1091,13 +1123,13 @@ export default class SyGspPlugin extends q.Plugin {
     }
     const workspace = new WorkspaceAdapter(this.kernel, {
       getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
-      getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
+      getSyncRange: () => Number(this.settingUtils.get("sync_range")) === 0 ? 1 : (Number(this.settingUtils.get("sync_range")) || 1),
       getNotebooks: async () => {
         const res = await this.kernel.lsNotebooks();
         return (res && res.notebooks) || [];
       },
     });
-    const scan = await workspace.scan({ range: Number(this.settingUtils.get("sync_range")) || 0 });
+    const scan = await workspace.scan({ range: Number(this.settingUtils.get("sync_range")) === 0 ? 1 : (Number(this.settingUtils.get("sync_range")) || 1) });
     rows.push({
       name: "本地扫描(同步范围内)",
       detail: scan.files.length + " 个文件" + (scan.enumErrorOccurred ? "(存在目录枚举异常)" : ""),

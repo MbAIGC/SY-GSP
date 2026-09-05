@@ -170,10 +170,11 @@ export class SettingsPanelBuilder {
     u.addItem({
       key: "sync_range",
       type: "select",
-      value: val("sync_range"),
+      // "工作空间"选项已移除: 历史值 0 迁移为 1(数据目录)
+      value: Number(val("sync_range")) === 0 ? 1 : val("sync_range"),
       title: t.syncRange,
       description: t.syncRangeDesc,
-      options: { 0: t.workSpace, 1: t.dataFile, 2: t.noteFile },
+      options: { 1: t.dataFile, 2: t.noteFile },
     });
     u.addItem({
       key: "sync_strategy",
@@ -205,6 +206,13 @@ export class SettingsPanelBuilder {
       value: val("sync_interval"),
       title: t.syncInterval,
       description: t.syncIntervalDesc,
+    });
+    u.addItem({
+      key: "device_name",
+      type: "text",
+      value: val("device_name"),
+      title: (t.sygspDeviceName) || "设备名称",
+      description: (t.sygspDeviceNameDesc) || "用于 GitHub 提交信息标识来源,如 pad;留空则不加前缀",
     });
     u.addItem({
       key: "sygsp_auto_retry",

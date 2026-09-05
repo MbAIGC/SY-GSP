@@ -68,3 +68,30 @@ test("Gitee 暂不支持: build 不接受 provider 分派(载荷契约仅 GitHub
   assert.equal(result.batches[0].gitee, undefined);
   assert.equal(result.batches[0].github, undefined);
 });
+test("设备名称前缀: 提交信息带 '<设备>-推送:' 前缀;换行/控制字符被清理;留空无前缀", () => {
+  const named = new CommitBuilder({ deviceName: "pad" });
+  const r1 = named.build({
+    operationId: "op-1",
+    uploads: [{ path: "a.md", op: "update", bytes: new Uint8Array(4) }],
+    deletionsRemote: [],
+  });
+  assert.match(r1.batches[0].message, /^pad-推送: sync: create 0, update 1, delete 0 \[op-1 part 1\/1\]$/);
+
+  const dirty = new CommitBuilder({ deviceName: "my\r\ndev\tice" });
+  const r2 = dirty.build({
+    operationId: "op-2",
+    uploads: [{ path: "a.md", op: "update", bytes: new Uint8Array(4) }],
+    deletionsRemote: [],
+  });
+  assert.match(r2.batches[0].message, /^my dev ice-推送: /, "换行与制表符清理为空格");
+
+  const empty = new CommitBuilder({});
+  const r3 = empty.build({
+    operationId: "op-3",
+    uploads: [{ path: "a.md", op: "update", bytes: new Uint8Array(4) }],
+    deletionsRemote: [],
+  });
+  assert.ok(!r3.batches[0].message.startsWith("-推送"), "留空不加前缀");
+  assert.match(r3.batches[0].message, /^sync: /);
+});
+

@@ -87,7 +87,7 @@
   "manualSync": "Manual sync (automatically sync once only when starting) ",
   "fullManualSync": "Full manual synchronization (complete manual synchronization, including startup/shutdown) ",
   "syncInterval": "Synchronization interval (seconds) ",
-  "syncIntervalDesc": "Time interval for automatic data synchronization after data is no longer changed ",
+  "syncIntervalDesc": "Auto sync interval in SECONDS (min 30). Triggers after data stays unchanged.",
   "latestCommitSha": "Last committed SHA value ",
   "latestCommitShaDesc": "Hash of the most recent commit of the current device ",
   "latestCommitTime": "Last commit time ",
@@ -148,7 +148,7 @@
     "cloud": "Cloud disk",
     "subPlatform": {
       "git": {
-                "githubAPI": "github(API)"
+        "githubAPI": "github(API)"
       },
       "cloud": {
         "baidu": "Baidu Netdisk",
@@ -256,5 +256,7 @@
   "fileLoadFailed": "Failed to load file content",
   "sygspQueueBusy": "A sync task is already running; this request has been queued",
   "sygspConflictSetMissing": "Conflict details not found; diagnosis panel opened, resync to rebuild the conflict set",
-  "sygspLogsRefresh": "Refresh"
+  "sygspLogsRefresh": "Refresh",
+  "sygspDeviceName": "Device name",
+  "sygspDeviceNameDesc": "Tags GitHub commit messages with the source device, e.g. pad; leave empty for no prefix"
 }

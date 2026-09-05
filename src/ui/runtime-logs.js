@@ -25,6 +25,9 @@ export class RuntimeLogs {
     this._subscribers = [];
     this.plugin = null;
     this._saveChain = Promise.resolve();
+    /** 设备名称标识(来自设置 device_name): 非空时每条日志以 "<设备>-推送: " 前缀,
+     * 便于多设备场景区分日志来源(与 GitHub 提交信息前缀同一来源) */
+    this.deviceTag = "";
   }
 
   async load(plugin) {
@@ -57,10 +60,11 @@ export class RuntimeLogs {
   }
 
   append(level, text) {
+    const prefix = this.deviceTag ? this.deviceTag + "-推送: " : "";
     const entry = {
       at: new Date().toISOString(),
       level,
-      text: String(text).slice(0, 1000),
+      text: String(prefix + text).slice(0, 1000),
     };
     this.entries.push(entry);
     while (this.entries.length > this.limit) this.entries.shift();

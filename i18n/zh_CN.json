@@ -87,7 +87,7 @@
   "manualSync": "手动同步（仅 启动时 自动同步一次）",
   "fullManualSync": "完全手动同步（完全手动进行同步，包括启动/关闭）",
   "syncInterval": "同步间隔(秒）",
-  "syncIntervalDesc": "数据不再变动后自动进行数据同步的时间间隔",
+  "syncIntervalDesc": "自动同步间隔,单位:秒,最小 30(数据不再变动后触发)",
   "latestCommitSha": "上次提交SHA值",
   "latestCommitShaDesc": "当前设备最近的一次提交的哈希值",
   "latestCommitTime": "上次提交时间",
@@ -148,7 +148,7 @@
     "cloud": "云盘",
     "subPlatform": {
       "git": {
-                "githubAPI": "github(API)"
+        "githubAPI": "github(API)"
       },
       "cloud": {
         "baidu": "百度网盘",
@@ -256,5 +256,7 @@
   "fileLoadFailed": "文件内容加载失败",
   "sygspQueueBusy": "已有同步任务在执行,本次请求已排队",
   "sygspConflictSetMissing": "未找到冲突明细,已打开诊断面板,可重新同步以重建冲突集",
-  "sygspLogsRefresh": "刷新"
+  "sygspLogsRefresh": "刷新",
+  "sygspDeviceName": "设备名称",
+  "sygspDeviceNameDesc": "用于 GitHub 提交信息标识来源,如 pad;留空则不加前缀"
 }

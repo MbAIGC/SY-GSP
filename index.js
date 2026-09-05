@@ -2034,9 +2034,10 @@ var BATCH_BYTE_LIMIT = 80 * 1024 * 1024;
 var DEFAULT_REQUEST_LIMIT = 32 * 1024 * 1024;
 var DELETE_ENTRY_BUDGET = 256;
 var CommitBuilder = class {
-  constructor({ requestLimit = DEFAULT_REQUEST_LIMIT, batchByteLimit = BATCH_BYTE_LIMIT } = {}) {
+  constructor({ requestLimit = DEFAULT_REQUEST_LIMIT, batchByteLimit = BATCH_BYTE_LIMIT, deviceName = "" } = {}) {
     this.requestLimit = requestLimit;
     this.batchByteLimit = batchByteLimit;
+    this.deviceName = String(deviceName || "").replace(/[\r\n\t]+/g, " ").trim().slice(0, 32);
   }
   /**
    * 构建提交批次。
@@ -2104,7 +2105,8 @@ var CommitBuilder = class {
     const deletes = chunk.deletions.length;
     const summary = "create " + creates + ", update " + updates + ", delete " + deletes;
     const partTag = " part " + part + "/" + total;
-    return "sync: " + summary + " [" + operationId + partTag + "]";
+    const prefix = this.deviceName ? this.deviceName + "-推送: " : "";
+    return prefix + "sync: " + summary + " [" + operationId + partTag + "]";
   }
   _encodedSize(bytes) {
     if (!bytes) return 0;
@@ -4045,6 +4047,14 @@ var SyncController = class {
           return result;
         }
         this.logger.info("同步完成 #" + ctx.id + " ↑" + (result.uploads || 0) + " ↓" + (result.downloads || 0) + " 删远" + (result.deletionsRemote || 0) + " 删本" + (result.deletionsLocal || 0) + " 拦删" + (result.skippedDeletes || 0) + " 超大" + (result.skippedLarge || 0) + " 大跳下" + (result.skippedLargeDownloads || 0) + " 漂移修" + (result.canonicalDrifts || 0));
+        const plan = ctx.plan;
+        if (plan) {
+          const brief = (list, cap) => list.slice(0, cap).map((i) => i.path || i).join(", ");
+          if (plan.uploads.length) this.logger.info("上传(" + plan.uploads.length + "): " + brief(plan.uploads, 10));
+          if (plan.downloads.length) this.logger.info("下载(" + plan.downloads.length + "): " + brief(plan.downloads, 10));
+          if (plan.deletionsRemote.length) this.logger.info("删远(" + plan.deletionsRemote.length + "): " + brief(plan.deletionsRemote, 10));
+          if (plan.deletionsLocal.length) this.logger.info("删本(" + plan.deletionsLocal.length + "): " + brief(plan.deletionsLocal, 10));
+        }
         await this._onFinished(ctx, result);
         return result;
       } catch (err) {
@@ -5014,10 +5024,11 @@ var SettingsPanelBuilder = class {
     u.addItem({
       key: "sync_range",
       type: "select",
-      value: val("sync_range"),
+      // "工作空间"选项已移除: 历史值 0 迁移为 1(数据目录)
+      value: Number(val("sync_range")) === 0 ? 1 : val("sync_range"),
       title: t.syncRange,
       description: t.syncRangeDesc,
-      options: { 0: t.workSpace, 1: t.dataFile, 2: t.noteFile }
+      options: { 1: t.dataFile, 2: t.noteFile }
     });
     u.addItem({
       key: "sync_strategy",
@@ -5049,6 +5060,13 @@ var SettingsPanelBuilder = class {
       value: val("sync_interval"),
       title: t.syncInterval,
       description: t.syncIntervalDesc
+    });
+    u.addItem({
+      key: "device_name",
+      type: "text",
+      value: val("device_name"),
+      title: t.sygspDeviceName || "设备名称",
+      description: t.sygspDeviceNameDesc || "用于 GitHub 提交信息标识来源,如 pad;留空则不加前缀"
     });
     u.addItem({
       key: "sygsp_auto_retry",
@@ -5784,6 +5802,7 @@ var RuntimeLogs = class {
     this._subscribers = [];
     this.plugin = null;
     this._saveChain = Promise.resolve();
+    this.deviceTag = "";
   }
   async load(plugin) {
     this.plugin = plugin || this.plugin;
@@ -5813,10 +5832,11 @@ var RuntimeLogs = class {
     };
   }
   append(level, text) {
+    const prefix = this.deviceTag ? this.deviceTag + "-推送: " : "";
     const entry = {
       at: (/* @__PURE__ */ new Date()).toISOString(),
       level,
-      text: String(text).slice(0, 1e3)
+      text: String(prefix + text).slice(0, 1e3)
     };
     this.entries.push(entry);
     while (this.entries.length > this.limit) this.entries.shift();
@@ -6591,6 +6611,7 @@ var SyGspPlugin = class extends q.Plugin {
         }
       });
       this.settingUtils = await this.settingsBuilder.build();
+      this.logs.deviceTag = String(this.settingUtils.take("device_name") || "").trim().slice(0, 32);
       await this._migrateFromLegacyIfNeeded();
       this.conflictDialog = new ConflictDialog({
         q,
@@ -6651,8 +6672,26 @@ var SyGspPlugin = class extends q.Plugin {
       if (this.topBarElement && !document.contains(this.topBarElement)) {
         this._registerTopBar();
       }
+      this._updateTopBarPauseBadge();
     } catch (err) {
       console.warn("[SY-GSP] 顶栏自检失败:", err && err.message);
+    }
+  }
+  /** 顶栏图标暂停角标: 手动暂停同步期间可见(⏸ 角标 + title 说明) */
+  _updateTopBarPauseBadge() {
+    if (!this.topBarElement || typeof this.topBarElement.querySelector !== "function") return;
+    let badge = this.topBarElement.querySelector(".sygsp-pause-badge");
+    if (this._autoSyncPaused === true) {
+      this.topBarElement.title = "SY-GSP(同步已暂停)";
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "sygsp-pause-badge";
+        badge.textContent = "⏸";
+        this.topBarElement.appendChild(badge);
+      }
+    } else {
+      this.topBarElement.title = this.i18n.addTopBarIcon || "SY-GSP";
+      if (badge) badge.remove();
     }
   }
   _startIconWatch() {
@@ -6800,7 +6839,7 @@ var SyGspPlugin = class extends q.Plugin {
     const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
     const workspace = new WorkspaceAdapter(this.kernel, {
       getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
-      getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
+      getSyncRange: () => Number(this.settingUtils.get("sync_range")) === 0 ? 1 : Number(this.settingUtils.get("sync_range")) || 1,
       getNotebooks: async () => {
         const res = await this.kernel.lsNotebooks();
         return res && res.notebooks || [];
@@ -6825,7 +6864,8 @@ var SyGspPlugin = class extends q.Plugin {
       planner,
       merger: new ThreeWayMerger(),
       commitBuilder: new CommitBuilder({
-        requestLimit: Number(this.settingUtils.take("sygsp_blob_request_limit")) || 33554432
+        requestLimit: Number(this.settingUtils.take("sygsp_blob_request_limit")) || 33554432,
+        deviceName: String(this.settingUtils.take("device_name") || "")
       }),
       events: this.events,
       config: {
@@ -6833,7 +6873,7 @@ var SyGspPlugin = class extends q.Plugin {
           return self._repoKey(info);
         },
         get syncRange() {
-          return Number(self.settingUtils.take("sync_range")) || 0;
+          return Number(self.settingUtils.take("sync_range")) === 0 ? 1 : Number(self.settingUtils.take("sync_range")) || 1;
         },
         get syncFileType() {
           return Number(self.settingUtils.take("sync_file_type")) === 1 ? "markdown" : "raw";
@@ -7080,7 +7120,7 @@ var SyGspPlugin = class extends q.Plugin {
     if (!this.settingUtils) return;
     if (Number(this.settingUtils.take("sync_mode")) !== 0) return;
     if (this.settingUtils.take("enabled_sync") === false) return;
-    this.startAutoSyncTimer(Number(this.settingUtils.take("sync_interval")) || 6e5);
+    this.startAutoSyncTimer();
   }
   _stopAutoSyncTimer() {
     if (this.timerTask) {
@@ -7089,14 +7129,23 @@ var SyGspPlugin = class extends q.Plugin {
       this.logs.info("自动同步已暂停");
     }
   }
-  startAutoSyncTimer(intervalMs) {
+  /**
+   * 自动同步间隔(毫秒)。设置项单位为**秒**(i18n 与 UI 一致):
+   * - 常规: 值即秒;
+   * - 兼容历史误存毫秒值(≥30000 视为旧毫秒,自动 ÷1000);
+   * - 界限: 最小 30s(防配置异常变成同步风暴),最大 24h。
+   */
+  _autoSyncIntervalMs() {
+    const raw = Number(this.settingUtils.take("sync_interval")) || 600;
+    let seconds = raw;
+    if (raw >= 3e4) seconds = Math.round(raw / 1e3);
+    seconds = Math.min(Math.max(seconds, 30), 86400);
+    return seconds * 1e3;
+  }
+  startAutoSyncTimer() {
     this._stopAutoSyncTimer();
     if (this._autoSyncPaused === true) return;
-    const MIN_INTERVAL = 3e4;
-    const safeInterval = Math.max(Number(intervalMs) || 6e5, MIN_INTERVAL);
-    if (safeInterval !== intervalMs) {
-      this.logs.warn("自动同步间隔配置过小(" + intervalMs + "ms),已按最小间隔 " + Math.round(safeInterval / 1e3) + "s 执行");
-    }
+    const intervalMs = this._autoSyncIntervalMs();
     this.timerTask = setInterval(() => {
       if (this._autoSyncPaused === true) return;
       if (this.controller.isConflictPaused()) return;
@@ -7104,8 +7153,8 @@ var SyGspPlugin = class extends q.Plugin {
       this.syncNow({ trigger: "automatic" }).catch((err) => {
         this.logs.error("自动同步异常: " + String(err && err.message || err));
       });
-    }, safeInterval);
-    this.logs.info("自动同步已启动,间隔 " + Math.round(safeInterval / 1e3) + "s");
+    }, intervalMs);
+    this.logs.info("自动同步已启动,间隔 " + Math.round(intervalMs / 1e3) + "s");
   }
   /** 手动暂停/恢复自动同步(菜单开关);手动同步不受影响 */
   _toggleAutoSyncPause() {
@@ -7120,6 +7169,7 @@ var SyGspPlugin = class extends q.Plugin {
       this.logs.warn("用户暂停同步(手动同步不受影响)");
       this.notification.toast("同步已暂停,可从菜单恢复", "info");
     }
+    this._updateTopBarPauseBadge();
     if (this.controller) this.events.emit("state:changed", { state: this.controller.state });
   }
   async _applyStartupBehavior() {
@@ -7183,11 +7233,11 @@ var SyGspPlugin = class extends q.Plugin {
       const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
       const workspace = new WorkspaceAdapter(this.kernel, {
         getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
-        getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
+        getSyncRange: () => Number(this.settingUtils.get("sync_range")) === 0 ? 1 : Number(this.settingUtils.get("sync_range")) || 1,
         getNotebooks: async () => (await this.kernel.lsNotebooks() || {}).notebooks || []
       });
       const adapter = new ContentAdapter(this.kernel, { backupDir: "temp/SY-GSP/backup/", i18n: this.i18n });
-      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { syncRange: Number(this.settingUtils.get("sync_range")) || 0, syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
+      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { syncRange: Number(this.settingUtils.get("sync_range")) === 0 ? 1 : Number(this.settingUtils.get("sync_range")) || 1, syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
       report = await service.inspect();
       this.logs.info("同步重建: 校验完成,本地 " + report.localCount + " 个,远端 " + report.remoteCount + " 个,差异 " + (report.onlyLocal.length + report.onlyRemote.length + report.different.length) + " 个");
     } catch (err) {
@@ -7509,13 +7559,13 @@ var SyGspPlugin = class extends q.Plugin {
     }
     const workspace = new WorkspaceAdapter(this.kernel, {
       getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
-      getSyncRange: () => Number(this.settingUtils.get("sync_range")) || 0,
+      getSyncRange: () => Number(this.settingUtils.get("sync_range")) === 0 ? 1 : Number(this.settingUtils.get("sync_range")) || 1,
       getNotebooks: async () => {
         const res = await this.kernel.lsNotebooks();
         return res && res.notebooks || [];
       }
     });
-    const scan = await workspace.scan({ range: Number(this.settingUtils.get("sync_range")) || 0 });
+    const scan = await workspace.scan({ range: Number(this.settingUtils.get("sync_range")) === 0 ? 1 : Number(this.settingUtils.get("sync_range")) || 1 });
     rows.push({
       name: "本地扫描(同步范围内)",
       detail: scan.files.length + " 个文件" + (scan.enumErrorOccurred ? "(存在目录枚举异常)" : "")
