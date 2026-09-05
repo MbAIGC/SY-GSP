@@ -24,7 +24,7 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
   });
   menu.addItem({
     label: actions.isAutoSyncPaused
-      ? (t.sygspMenuResumeAutoSync || "恢复同步")
+      ? (t.sygspMenuResumeAutoSync || "恢复同步(当前已暂停)")
       : (t.sygspMenuPauseAutoSync || "暂停同步"),
     icon: "iconSyncPause",
     click: actions.toggleAutoSyncPause,

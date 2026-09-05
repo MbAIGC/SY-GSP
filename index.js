@@ -6548,7 +6548,7 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
     click: actions.startSync
   });
   menu.addItem({
-    label: actions.isAutoSyncPaused ? t.sygspMenuResumeAutoSync || "恢复同步" : t.sygspMenuPauseAutoSync || "暂停同步",
+    label: actions.isAutoSyncPaused ? t.sygspMenuResumeAutoSync || "恢复同步(当前已暂停)" : t.sygspMenuPauseAutoSync || "暂停同步",
     icon: "iconSyncPause",
     click: actions.toggleAutoSyncPause
   });
