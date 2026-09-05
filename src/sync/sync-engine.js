@@ -1169,13 +1169,15 @@ export class SyncEngine {
         plan.skippedLargeDownloads.push({ path: item.path, size: remoteSize });
         continue;
       }
+      // conf.json 的下载是非破坏性字段级合并(名称取远端、设备状态保留本地),
+      // create/update 均跳过 M5 拦截: 新笔记本的 .sy 落地后,内核会立刻自动注册
+      // 并生成 conf.json——若此时被 M5 中止,新建笔记本将永远无法完成首次同步
+      const isConfDownload = isNotebookConfPath(item.path);
       if (item.op === "update") {
-        // conf.json 下载是非破坏性字段级合并(名称取远端、设备状态保留本地),
-        // 无需 M5 拦截;内核 touch 也不得打断同步
-        if (!allowRebuildOverwrite && !isNotebookConfPath(item.path)) {
+        if (!allowRebuildOverwrite && !isConfDownload) {
           await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
         }
-      } else if (!allowRebuildOverwrite) {
+      } else if (!allowRebuildOverwrite && !isConfDownload) {
         await this._assertLocalStillAbsent(ctx, item.path);
       }
       const localExistsNow = allowRebuildOverwrite && (await this._readLocalBytes(item.path)) !== null;

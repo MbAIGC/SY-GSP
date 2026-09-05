@@ -3751,11 +3751,12 @@ var SyncEngine = class {
         plan.skippedLargeDownloads.push({ path: item.path, size: remoteSize });
         continue;
       }
+      const isConfDownload = isNotebookConfPath(item.path);
       if (item.op === "update") {
-        if (!allowRebuildOverwrite && !isNotebookConfPath(item.path)) {
+        if (!allowRebuildOverwrite && !isConfDownload) {
           await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
         }
-      } else if (!allowRebuildOverwrite) {
+      } else if (!allowRebuildOverwrite && !isConfDownload) {
         await this._assertLocalStillAbsent(ctx, item.path);
       }
       const localExistsNow = allowRebuildOverwrite && await this._readLocalBytes(item.path) !== null;

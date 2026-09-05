@@ -674,6 +674,27 @@ test("重建'以远程为准': 远端不存在的本地已注册笔记本也被�
   assert.equal(await (await h.kernel.getFile(a)).text(), "remote a");
 });
 
+test("conf.json: 新笔记本落地后内核抢先生成 conf.json → 不再触发'同步期间新建'冲突", async () => {
+  const conf = D + ".siyuan/conf.json";
+  const remoteConf = JSON.stringify({ name: "远端新建笔记" });
+  const h = await makeHarness({ remoteFiles: { [conf]: remoteConf }, localFiles: {} });
+  // 模拟: 下载落地前,思源内核已自动注册笔记本并生成 conf.json(本地字段)
+  const origApply = h.engine._applyLocalChanges.bind(h.engine);
+  h.engine._applyLocalChanges = async (ctx, plan, opts) => {
+    await h.kernel.putFile(conf, new Blob([enc(JSON.stringify({ name: "本地默认", sort: 9 }))]), false);
+    return origApply(ctx, plan, opts);
+  };
+  const result = await runQuiet(h);
+  assert.equal(result.success, true, "内核抢先创建不得中止同步: " + JSON.stringify(result));
+  assert.equal(result.downloads, 1);
+  const finalConf = JSON.parse(await (await h.kernel.getFile(conf)).text());
+  assert.equal(finalConf.name, "远端新建笔记", "名称取远端");
+  assert.deepEqual(finalConf.sort, 9, "内核生成的本地字段保留");
+  // 收敛: 第二轮零操作
+  const r2 = await runQuiet(h);
+  assert.equal(r2.uploads + r2.downloads, 0, "合并后应收敛: " + JSON.stringify(r2));
+});
+
 test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => {
   const kernel = makeFakeKernel({ "data/x/a.md": "hello" });
   const plugin = makeFakePlugin();
