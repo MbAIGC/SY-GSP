@@ -179,6 +179,13 @@ export class SyncController {
       this.notify(this.i18n("sygspQueueBusy", "已有同步任务在执行,本次请求已排队"), "info");
       this.logger.warn("同步请求已排队(通道忙): " + key);
     }
+    // 保险丝: 非合并触发(手动/验证/重建)在通道忙时会串行堆积,任何未来引入的
+    // 高频调用源都可能把队列灌满(实证: 重建后队列被疯狂填充)。积压超限直接丢弃。
+    const lane = this.queue.lanes.get(key);
+    if (lane && lane.pending >= 20) {
+      this.logger.warn("同步队列积压过多(" + lane.pending + " 个待执行),丢弃本次 " + trigger + " 请求");
+      return { skipped: true, queued: true };
+    }
 
     const ctx = createSyncContext({
       trigger,

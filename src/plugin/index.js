@@ -41,6 +41,9 @@ const ICONS_SYNC =
 // 同步重建: 双向对调箭头(镜像语义);思源内置图标集没有合适的"重建"图标
 const ICONS_REBUILD =
   '<symbol id="iconRebuild" viewBox="0 0 1024 1024"><path d="M192 384 H832 M704 256 L832 384 L704 512 M832 640 H192 M320 512 L192 640 L320 768" fill="none" stroke="currentColor" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/></symbol>';
+// 自动同步暂停开关: 双暂停条
+const ICONS_PAUSE =
+  '<symbol id="iconSyncPause" viewBox="0 0 1024 1024"><path d="M320 192h128v640H320zM576 192h128v640H576z" fill="currentColor"></path></symbol>';
 
 export default class SyGspPlugin extends q.Plugin {
   constructor(...args) {
@@ -190,6 +193,7 @@ export default class SyGspPlugin extends q.Plugin {
     this.addIcons(ICONS_MAIN);
     this.addIcons(ICONS_SYNC);
     this.addIcons(ICONS_REBUILD);
+    this.addIcons(ICONS_PAUSE);
   }
 
   // ---------- 装配 ----------
@@ -622,14 +626,38 @@ export default class SyGspPlugin extends q.Plugin {
 
   startAutoSyncTimer(intervalMs) {
     this._stopAutoSyncTimer();
+    if (this._autoSyncPaused === true) return; // 用户手动暂停中,不启动
+    // 间隔下限 30s: 配置异常(如迁移来的秒值被当毫秒)会把定时器变成同步风暴
+    const MIN_INTERVAL = 30000;
+    const safeInterval = Math.max(Number(intervalMs) || 600000, MIN_INTERVAL);
+    if (safeInterval !== intervalMs) {
+      this.logs.warn("自动同步间隔配置过小(" + intervalMs + "ms),已按最小间隔 " + Math.round(safeInterval / 1000) + "s 执行");
+    }
     this.timerTask = setInterval(() => {
+      if (this._autoSyncPaused === true) return;
       if (this.controller.isConflictPaused()) return; // 暂停期间自动触发被跳过
       this.controller.markAutoTick();
       this.syncNow({ trigger: "automatic" }).catch((err) => {
         this.logs.error("自动同步异常: " + String((err && err.message) || err));
       });
-    }, intervalMs);
-    this.logs.info("自动同步已启动,间隔 " + Math.round(intervalMs / 1000) + "s");
+    }, safeInterval);
+    this.logs.info("自动同步已启动,间隔 " + Math.round(safeInterval / 1000) + "s");
+  }
+
+  /** 手动暂停/恢复自动同步(菜单开关);手动同步不受影响 */
+  _toggleAutoSyncPause() {
+    if (this._autoSyncPaused === true) {
+      this._autoSyncPaused = false;
+      this.logs.info("用户恢复自动同步");
+      this._restartAutoSyncIfConfigured();
+      this.notification.toast("▶️ 自动同步已恢复", "info");
+    } else {
+      this._autoSyncPaused = true;
+      this._stopAutoSyncTimer();
+      this.logs.warn("用户暂停自动同步(手动同步不受影响)");
+      this.notification.toast("⏸️ 自动同步已暂停,可从菜单恢复", "info");
+    }
+    if (this.controller) this.events.emit("state:changed", { state: this.controller.state });
   }
 
   async _applyStartupBehavior() {
@@ -829,6 +857,8 @@ export default class SyGspPlugin extends q.Plugin {
     const actions = {
       startSync: () => this.syncNow({ trigger: "manual" }),
       openRebuild: () => this._openRebuildDialog(),
+      toggleAutoSyncPause: () => this._toggleAutoSyncPause(),
+      isAutoSyncPaused: () => this._autoSyncPaused === true,
       refreshWorkspaceTree: () => this.kernel.refreshFiletree(),
       recoverAssets: () => this._recoverAssets(),
       openHistory: () => this.openSyncHistoryPanel(),

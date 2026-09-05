@@ -23,6 +23,13 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
     click: actions.startSync,
   });
   menu.addItem({
+    label: actions.isAutoSyncPaused
+      ? (t.sygspMenuResumeAutoSync || "▶️ 恢复自动同步")
+      : (t.sygspMenuPauseAutoSync || "⏸️ 暂停自动同步"),
+    icon: "iconSyncPause",
+    click: actions.toggleAutoSyncPause,
+  });
+  menu.addItem({
     label: t.sygspMenuRebuild || "同步重建",
     icon: "iconRebuild",
     click: actions.openRebuild,

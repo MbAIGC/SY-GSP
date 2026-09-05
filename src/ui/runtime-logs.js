@@ -135,22 +135,59 @@ export function openLogsDialog({ q, i18n, logs }) {
   refresh.className = "b3-button b3-button--outline";
   refresh.type = "button";
   refresh.textContent = (i18n && i18n.sygspLogsRefresh) || "刷新";
+  // 冻结刷新: 日志刷屏(如队列异常)时仍可选中复制,不再被重渲染打断
+  let frozen = false;
+  const freeze = document.createElement("button");
+  freeze.className = "b3-button b3-button--outline";
+  freeze.type = "button";
+  freeze.textContent = "暂停刷新";
+  freeze.addEventListener("click", () => {
+    frozen = !frozen;
+    freeze.textContent = frozen ? "恢复刷新" : "暂停刷新";
+    if (!frozen) fill();
+  });
+  const copyAll = document.createElement("button");
+  copyAll.className = "b3-button b3-button--outline";
+  copyAll.type = "button";
+  copyAll.textContent = "复制全部";
+  copyAll.addEventListener("click", async () => {
+    const text = logs.render();
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+      }
+      copyAll.textContent = "已复制";
+      setTimeout(() => { copyAll.textContent = "复制全部"; }, 1500);
+    } catch (err) {
+      textarea.focus();
+      textarea.select();
+    }
+  });
   const textarea = document.createElement("textarea");
   textarea.className = "b3-text-field fn__flex-1";
   textarea.readOnly = true;
   textarea.style.cssText = "font-family:monospace;font-size:12px;min-height:0;resize:none;";
   const fill = () => {
+    if (frozen) return; // 冻结期间不重渲染,保证可选中复制
     textarea.value = logs.render() || emptyHint;
     textarea.scrollTop = 0; // 最新在前,滚动停在顶部
   };
   refresh.addEventListener("click", fill);
   fill();
   bar.appendChild(clear);
+  bar.appendChild(freeze);
+  bar.appendChild(copyAll);
   bar.appendChild(refresh);
   root.append(bar, textarea);
 
   // 打开期间实时刷新: 订阅新增条目,新日志产生即更新;对话框销毁时退订,不泄漏
-  const unsubscribe = logs.subscribe(fill);
+  const unsubscribe = logs.subscribe(() => {
+    if (!frozen) fill();
+  });
   const origDestroy = typeof dialog.destroy === "function" ? dialog.destroy.bind(dialog) : null;
   if (origDestroy) {
     dialog.destroy = () => {

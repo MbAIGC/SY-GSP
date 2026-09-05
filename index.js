@@ -3976,6 +3976,11 @@ var SyncController = class {
       this.notify(this.i18n("sygspQueueBusy", "已有同步任务在执行,本次请求已排队"), "info");
       this.logger.warn("同步请求已排队(通道忙): " + key);
     }
+    const lane = this.queue.lanes.get(key);
+    if (lane && lane.pending >= 20) {
+      this.logger.warn("同步队列积压过多(" + lane.pending + " 个待执行),丢弃本次 " + trigger + " 请求");
+      return { skipped: true, queued: true };
+    }
     const ctx = createSyncContext({
       trigger,
       mode: pausedRecord && overrides ? SyncMode.AUTO : mode,
@@ -5843,20 +5848,58 @@ function openLogsDialog({ q: q2, i18n, logs }) {
   refresh.className = "b3-button b3-button--outline";
   refresh.type = "button";
   refresh.textContent = i18n && i18n.sygspLogsRefresh || "刷新";
+  let frozen = false;
+  const freeze = document.createElement("button");
+  freeze.className = "b3-button b3-button--outline";
+  freeze.type = "button";
+  freeze.textContent = "暂停刷新";
+  freeze.addEventListener("click", () => {
+    frozen = !frozen;
+    freeze.textContent = frozen ? "恢复刷新" : "暂停刷新";
+    if (!frozen) fill();
+  });
+  const copyAll = document.createElement("button");
+  copyAll.className = "b3-button b3-button--outline";
+  copyAll.type = "button";
+  copyAll.textContent = "复制全部";
+  copyAll.addEventListener("click", async () => {
+    const text = logs.render();
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+      }
+      copyAll.textContent = "已复制";
+      setTimeout(() => {
+        copyAll.textContent = "复制全部";
+      }, 1500);
+    } catch (err) {
+      textarea.focus();
+      textarea.select();
+    }
+  });
   const textarea = document.createElement("textarea");
   textarea.className = "b3-text-field fn__flex-1";
   textarea.readOnly = true;
   textarea.style.cssText = "font-family:monospace;font-size:12px;min-height:0;resize:none;";
   const fill = () => {
+    if (frozen) return;
     textarea.value = logs.render() || emptyHint;
     textarea.scrollTop = 0;
   };
   refresh.addEventListener("click", fill);
   fill();
   bar.appendChild(clear);
+  bar.appendChild(freeze);
+  bar.appendChild(copyAll);
   bar.appendChild(refresh);
   root.append(bar, textarea);
-  const unsubscribe = logs.subscribe(fill);
+  const unsubscribe = logs.subscribe(() => {
+    if (!frozen) fill();
+  });
   const origDestroy = typeof dialog.destroy === "function" ? dialog.destroy.bind(dialog) : null;
   if (origDestroy) {
     dialog.destroy = () => {
@@ -6387,6 +6430,11 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
     click: actions.startSync
   });
   menu.addItem({
+    label: actions.isAutoSyncPaused ? t.sygspMenuResumeAutoSync || "▶️ 恢复自动同步" : t.sygspMenuPauseAutoSync || "⏸️ 暂停自动同步",
+    icon: "iconSyncPause",
+    click: actions.toggleAutoSyncPause
+  });
+  menu.addItem({
     label: t.sygspMenuRebuild || "同步重建",
     icon: "iconRebuild",
     click: actions.openRebuild
@@ -6485,6 +6533,7 @@ var PLUGIN_VERSION = "0.1.0";
 var ICONS_MAIN = '<symbol id="iconGmailSync" viewBox="0 0 1024 1024"><path d="M998.4 627.2c-51.2 230.4-256 396.8-499.2 396.8-224 0-409.6-140.8-480-339.2h121.6c64 134.4 198.4 230.4 358.4 230.4 179.2 0 332.8-121.6 384-281.6l115.2-6.4zM499.2 0c224 0 409.6 140.8 480 339.2h-121.6c-64-134.4-198.4-230.4-358.4-230.4-179.2 0-332.8 121.6-384 281.6L0 396.8C51.2 172.8 256 0 499.2 0z" fill="#646A73"></path><path d="M998.4 332.8c0 32-25.6 57.6-57.6 64h-140.8c-19.2 0-32-12.8-32-32v-51.2c0-19.2 12.8-32 32-32h83.2V32c0-12.8 12.8-25.6 25.6-32h57.6c19.2 0 32 12.8 32 32v300.8zM0 659.2c0-32 25.6-57.6 57.6-64h140.8c19.2 0 32 12.8 32 32v51.2c0 19.2-12.8 32-32 32H115.2V960c0 12.8-12.8 25.6-25.6 32H32c-19.2 0-32-12.8-32-32v-300.8z" fill="#646A73"></path><path d="M665.6 569.6H512V473.6h249.6c12.8 0 12.8 0 12.8 6.4 6.4 70.4 0 134.4-38.4 192-38.4 57.6-96 96-160 108.8-83.2 19.2-166.4 0-236.8-51.2-57.6-44.8-89.6-102.4-96-172.8-19.2-147.2 64-275.2 204.8-313.6 89.6-19.2 172.8 0 243.2 57.6l6.4 6.4L620.8 384l-6.4-6.4c-25.6-25.6-64-38.4-108.8-38.4-83.2 0-153.6 64-160 147.2-12.8 89.6 44.8 172.8 134.4 192 51.2 12.8 96 6.4 140.8-25.6 19.2-19.2 38.4-44.8 44.8-76.8v-6.4z" fill="#646A73"></path></symbol>';
 var ICONS_SYNC = '<symbol id="iconModeSync" viewBox="0 0 1024 1024"><path d="M512 128c-212.064 0-384 171.936-384 384h-64l106.624 149.312L277.312 512H213.344c0-164.928 133.728-298.656 298.656-298.656 61.6 0 118.848 18.624 166.4 50.56l46.912-51.904A380.544 380.544 0 0 0 512 128z m331.328 234.688L746.688 512h64c0 164.928-133.728 298.656-298.656 298.656a297.216 297.216 0 0 1-166.4-50.56l-46.912 51.904A380.544 380.544 0 0 0 512 896c212.064 0 384-171.936 384-384h64l-106.624-149.312z" fill="currentColor"></path></symbol>';
 var ICONS_REBUILD = '<symbol id="iconRebuild" viewBox="0 0 1024 1024"><path d="M192 384 H832 M704 256 L832 384 L704 512 M832 640 H192 M320 512 L192 640 L320 768" fill="none" stroke="currentColor" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/></symbol>';
+var ICONS_PAUSE = '<symbol id="iconSyncPause" viewBox="0 0 1024 1024"><path d="M320 192h128v640H320zM576 192h128v640H576z" fill="currentColor"></path></symbol>';
 var SyGspPlugin = class extends q.Plugin {
   constructor(...args) {
     super(...args);
@@ -6616,6 +6665,7 @@ var SyGspPlugin = class extends q.Plugin {
     this.addIcons(ICONS_MAIN);
     this.addIcons(ICONS_SYNC);
     this.addIcons(ICONS_REBUILD);
+    this.addIcons(ICONS_PAUSE);
   }
   // ---------- 装配 ----------
   async _initStores() {
@@ -7011,14 +7061,36 @@ var SyGspPlugin = class extends q.Plugin {
   }
   startAutoSyncTimer(intervalMs) {
     this._stopAutoSyncTimer();
+    if (this._autoSyncPaused === true) return;
+    const MIN_INTERVAL = 3e4;
+    const safeInterval = Math.max(Number(intervalMs) || 6e5, MIN_INTERVAL);
+    if (safeInterval !== intervalMs) {
+      this.logs.warn("自动同步间隔配置过小(" + intervalMs + "ms),已按最小间隔 " + Math.round(safeInterval / 1e3) + "s 执行");
+    }
     this.timerTask = setInterval(() => {
+      if (this._autoSyncPaused === true) return;
       if (this.controller.isConflictPaused()) return;
       this.controller.markAutoTick();
       this.syncNow({ trigger: "automatic" }).catch((err) => {
         this.logs.error("自动同步异常: " + String(err && err.message || err));
       });
-    }, intervalMs);
-    this.logs.info("自动同步已启动,间隔 " + Math.round(intervalMs / 1e3) + "s");
+    }, safeInterval);
+    this.logs.info("自动同步已启动,间隔 " + Math.round(safeInterval / 1e3) + "s");
+  }
+  /** 手动暂停/恢复自动同步(菜单开关);手动同步不受影响 */
+  _toggleAutoSyncPause() {
+    if (this._autoSyncPaused === true) {
+      this._autoSyncPaused = false;
+      this.logs.info("用户恢复自动同步");
+      this._restartAutoSyncIfConfigured();
+      this.notification.toast("▶️ 自动同步已恢复", "info");
+    } else {
+      this._autoSyncPaused = true;
+      this._stopAutoSyncTimer();
+      this.logs.warn("用户暂停自动同步(手动同步不受影响)");
+      this.notification.toast("⏸️ 自动同步已暂停,可从菜单恢复", "info");
+    }
+    if (this.controller) this.events.emit("state:changed", { state: this.controller.state });
   }
   async _applyStartupBehavior() {
     if (this._startupApplied) return;
@@ -7203,6 +7275,8 @@ var SyGspPlugin = class extends q.Plugin {
     const actions = {
       startSync: () => this.syncNow({ trigger: "manual" }),
       openRebuild: () => this._openRebuildDialog(),
+      toggleAutoSyncPause: () => this._toggleAutoSyncPause(),
+      isAutoSyncPaused: () => this._autoSyncPaused === true,
       refreshWorkspaceTree: () => this.kernel.refreshFiletree(),
       recoverAssets: () => this._recoverAssets(),
       openHistory: () => this.openSyncHistoryPanel(),
