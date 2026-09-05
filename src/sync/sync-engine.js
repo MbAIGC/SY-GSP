@@ -1014,7 +1014,11 @@ export class SyncEngine {
         continue;
       }
       if (item.op === "update") {
-        if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
+        // conf.json 下载是非破坏性字段级合并(名称取远端、设备状态保留本地),
+        // 无需 M5 拦截;内核 touch 也不得打断同步
+        if (!allowRebuildOverwrite && !isNotebookConfPath(item.path)) {
+          await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
+        }
       } else if (!allowRebuildOverwrite) {
         await this._assertLocalStillAbsent(ctx, item.path);
       }

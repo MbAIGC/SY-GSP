@@ -14,6 +14,7 @@
  */
 
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
+import { isNotebookConfPath } from "../local/notebook-conf.js";
 
 export const PlanAction = Object.freeze({
   UPLOAD_CREATE: "upload_create",
@@ -232,6 +233,12 @@ export class SyncPlanner {
       if (localSha && localSha === remoteEntry.sha) {
         // #7: 双方内容实际一致 → 无需上传,不制造冗余提交;BASE 会在本轮成功后推进
         plan.unchanged += 1;
+        return;
+      }
+      // conf.json: 规范化比较下"双侧都变"意味着名称有分歧,走下载的字段级合并
+      // (名称取远端、设备状态保留本地,天然收敛),绝不进文本 diff3 合并(必冲突)
+      if (isNotebookConfPath(path)) {
+        plan.downloads.push({ path, op: "update" });
         return;
       }
       if (isMergeable(path)) {

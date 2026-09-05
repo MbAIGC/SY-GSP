@@ -424,32 +424,40 @@ test("重建'以本地为准': 内核笔记本列表不可得时不做残留清�
   assert.ok(tree.some((e) => e.path === stray));
 });
 
-test("conf.json 同步语义: 内核 touch(排序等字段变化)不产生修改信号,不再触发冲突", async () => {
+test("conf.json 同步语义: 仅 name 参与,sort/closed 差异视为一致,不再产生冲突", async () => {
   const conf = D + ".siyuan/conf.json";
   const baseConf = JSON.stringify({ name: "我的笔记", closed: {}, sort: {} });
   const h = await makeHarness({ remoteFiles: { [conf]: baseConf }, localFiles: { [conf]: baseConf } });
   const baseCommit = await h.repo.snapshot("base");
   await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
 
-  // 第一轮: 升级迁移——远端还是旧版整文件,本地 canonical(仅 name)与之不同,
-  // 产生一次规范化上传;远端内容此后即为 canonical
+  // 第一轮: 升级迁移——远端还是旧版整文件,本地 canonical(仅 name)不同 → 一次迁移上传
   const touchedConf = JSON.stringify({ name: "我的笔记", closed: {}, sort: { "20260902191354": 1 } });
   await h.kernel.putFile(conf, new Blob([enc(touchedConf)]), false);
   const r1 = await runQuiet(h);
   assert.equal(r1.success, true);
-  assert.equal(r1.uploads, 1, "升级后首次同步应迁移上传规范化内容");
+  assert.equal(r1.uploads, 1, "升级后首次同步迁移上传规范化内容");
   const treeSha = (await h.repo.provider.getCommit(h.repo.head)).treeSha;
   const remoteBlob = (await h.repo.provider.getTree(treeSha)).find((e) => e.path === conf).sha;
   const remoteText = new TextDecoder().decode((await h.repo.provider.getBlob(remoteBlob)).bytes);
   assert.equal(remoteText, JSON.stringify({ name: "我的笔记" }), "远端已是仅含 name 的规范化内容");
 
-  // 第二轮: 内核再次 touch(排序变化,name 不变)→ 0 上传(修复前这里每轮都上传/冲突)
+  // 第二轮: 本地 sort/closed "莫名变动"(用户核心诉求)→ 视为一致,零操作
   await h.kernel.putFile(conf, new Blob([enc(JSON.stringify({ name: "我的笔记", closed: {}, sort: { z: 2 } }))]), false);
   const r2 = await runQuiet(h);
-  assert.equal(r2.uploads + r2.downloads, 0, "touch 后必须收敛: " + JSON.stringify(r2));
+  assert.equal(r2.uploads + r2.downloads, 0, "本地仅 sort/closed 变化必须视为一致: " + JSON.stringify(r2));
+  assert.equal(r2.conflicts, 0);
 
-  // 第三轮: 远端改名 + 同步窗口内内核又 touch 本地 → M5 不得拦截,字段级合并落地
-  // (远端内容用规范化形式——真实场景中上一轮迁移后远端即为 canonical)
+  // 第二轮半: 预升级仓库的远端整文件仅设备字段不同 → 一次无冲突迁移下载,本地字段保留
+  h.repo.files[conf] = JSON.stringify({ name: "我的笔记", closed: { x: 1 }, sort: 7 });
+  await h.repo.snapshot("legacy-remote-drift");
+  const r2b = await runQuiet(h);
+  assert.equal(r2b.success, true);
+  assert.equal(r2b.conflicts, 0, "仅设备字段差异不得产生冲突");
+  assert.equal(r2b.downloads, 1, "迁移下载一次");
+  assert.deepEqual(JSON.parse(await (await h.kernel.getFile(conf)).text()).sort, { z: 2 }, "合并保留本地设备状态");
+
+  // 第三轮: 远端改名 + 同步窗口内内核又 touch 本地 sort → M5 不拦截,字段级合并
   h.repo.files[conf] = JSON.stringify({ name: "云端新名" });
   await h.repo.snapshot("remote-rename");
   const origApply = h.engine._applyLocalChanges.bind(h.engine);
@@ -462,28 +470,30 @@ test("conf.json 同步语义: 内核 touch(排序等字段变化)不产生修改
   assert.equal(r3.downloads, 1);
   const finalLocal = JSON.parse(await (await h.kernel.getFile(conf)).text());
   assert.equal(finalLocal.name, "云端新名", "名称取远端");
-  assert.deepEqual(finalLocal.sort, { x: 9 }, "本地排序状态保留");
+  assert.deepEqual(finalLocal.sort, { x: 9 }, "本地设备状态保留");
 
   // 第四轮: 收敛
   const r4 = await runQuiet(h);
   assert.equal(r4.uploads + r4.downloads, 0, "合并后应收敛: " + JSON.stringify(r4));
 });
 
-test("conf.json 规范化: canonical 只含 name,合并保留本地字段", () => {
+test("conf.json 规范化: canonical 只含 name,合并保留本地设备状态", () => {
   const confBytes = enc(JSON.stringify({ name: "笔记A", sort: { a: 1 }, closed: {} }));
   const canonical = canonicalConfBytes(confBytes);
-  assert.equal(new TextDecoder().decode(canonical), JSON.stringify({ name: "笔记A" }), "规范化只保留 name");
+  assert.equal(new TextDecoder().decode(canonical), JSON.stringify({ name: "笔记A" }), "规范化只保留 name——sort/closed 差异视为一致");
+  // 只有 sort/closed 不同 → canonical 相同 → 视为一致
+  const variant = enc(JSON.stringify({ name: "笔记A", sort: 7, closed: { n: true } }));
+  assert.deepEqual(canonicalConfBytes(variant), canonical);
   // 无 name/解析失败 → 回退整文件语义
   assert.equal(canonicalConfBytes(enc('{"closed":{}}')), null);
   assert.equal(canonicalConfBytes(enc("not json")), null);
-  // 合并: name 取远端,其余保留本地;本地缺失时返回远端规范化
+  // 合并: name 取远端,其余保留本地;本地缺失时恢复远端
   const merged = mergeConfBytes(confBytes, enc(JSON.stringify({ name: "远端名", sort: {} })));
   const obj = JSON.parse(new TextDecoder().decode(merged));
   assert.equal(obj.name, "远端名");
   assert.deepEqual(obj.sort, { a: 1 }, "本地设备状态保留");
-  const fromRemote = mergeConfBytes(null, enc(JSON.stringify({ name: "远端名" })));
-  assert.equal(new TextDecoder().decode(fromRemote), JSON.stringify({ name: "远端名" }));
-  // 路径判定
+  const fromRemote = mergeConfBytes(null, enc(JSON.stringify({ name: "远端名", sort: 5 })));
+  assert.equal(new TextDecoder().decode(fromRemote), JSON.stringify({ name: "远端名", sort: 5 }), "本地缺失恢复远端全量");  // 路径判定
   assert.ok(isNotebookConfPath("data/20260902191353-9549go4/.siyuan/conf.json"));
   assert.ok(!isNotebookConfPath("data/20260902191353-9549go4/.siyuan/sort.json"));
 });

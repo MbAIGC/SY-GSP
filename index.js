@@ -1422,6 +1422,34 @@ function encodePath(path) {
   return String(path).split("/").map((seg) => encodeURIComponent(seg)).join("/");
 }
 
+// src/local/notebook-conf.js
+function isNotebookConfPath(path) {
+  return /^data\/[^/]+\/\.siyuan\/conf\.json$/i.test(String(path || "").replace(/\\/g, "/"));
+}
+function canonicalConfBytes(bytes) {
+  if (!bytes || bytes.length === 0) return null;
+  try {
+    const conf = JSON.parse(new TextDecoder().decode(bytes));
+    if (!conf || typeof conf.name !== "string" || !conf.name) return null;
+    return new TextEncoder().encode(JSON.stringify({ name: conf.name }));
+  } catch (err) {
+    return null;
+  }
+}
+function mergeConfBytes(localBytes, remoteBytes) {
+  const remoteCanonical = canonicalConfBytes(remoteBytes);
+  if (!remoteCanonical) return remoteBytes || null;
+  const remoteName = JSON.parse(new TextDecoder().decode(remoteCanonical)).name;
+  if (!localBytes || localBytes.length === 0) return remoteBytes;
+  try {
+    const local = JSON.parse(new TextDecoder().decode(localBytes));
+    const merged = Object.assign({}, local, { name: remoteName });
+    return new TextEncoder().encode(JSON.stringify(merged));
+  } catch (err) {
+    return remoteCanonical;
+  }
+}
+
 // src/sync/sync-planner.js
 var PlanAction = Object.freeze({
   UPLOAD_CREATE: "upload_create",
@@ -1612,6 +1640,10 @@ var SyncPlanner = class {
       const localSha = localShas.get(path);
       if (localSha && localSha === remoteEntry.sha) {
         plan.unchanged += 1;
+        return;
+      }
+      if (isNotebookConfPath(path)) {
+        plan.downloads.push({ path, op: "update" });
         return;
       }
       if (isMergeable(path)) {
@@ -2642,34 +2674,6 @@ function finish(ctx, { state, result, error }) {
   return ctx;
 }
 
-// src/local/notebook-conf.js
-function isNotebookConfPath(path) {
-  return /^data\/[^/]+\/\.siyuan\/conf\.json$/i.test(String(path || "").replace(/\\/g, "/"));
-}
-function canonicalConfBytes(bytes) {
-  if (!bytes || bytes.length === 0) return null;
-  try {
-    const conf = JSON.parse(new TextDecoder().decode(bytes));
-    if (!conf || typeof conf.name !== "string" || !conf.name) return null;
-    return new TextEncoder().encode(JSON.stringify({ name: conf.name }));
-  } catch (err) {
-    return null;
-  }
-}
-function mergeConfBytes(localBytes, remoteBytes) {
-  const remoteCanonical = canonicalConfBytes(remoteBytes);
-  if (!remoteCanonical) return remoteBytes || null;
-  const remoteName = JSON.parse(new TextDecoder().decode(remoteCanonical)).name;
-  if (!localBytes || localBytes.length === 0) return remoteCanonical;
-  try {
-    const local = JSON.parse(new TextDecoder().decode(localBytes));
-    const merged = Object.assign({}, local, { name: remoteName });
-    return new TextEncoder().encode(JSON.stringify(merged));
-  } catch (err) {
-    return remoteCanonical;
-  }
-}
-
 // src/sync/sync-engine.js
 var SyncEngine = class {
   /**
@@ -3552,7 +3556,9 @@ var SyncEngine = class {
         continue;
       }
       if (item.op === "update") {
-        if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
+        if (!allowRebuildOverwrite && !isNotebookConfPath(item.path)) {
+          await this._assertLocalUnchanged(ctx, item.path, "远端下载将覆盖本地文件,但同步期间本地被修改,已中止覆盖");
+        }
       } else if (!allowRebuildOverwrite) {
         await this._assertLocalStillAbsent(ctx, item.path);
       }
