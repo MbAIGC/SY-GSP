@@ -3875,7 +3875,7 @@ var SyncEngine = class {
       let kernelState = "回读失败";
       try {
         const check = await this.contentAdapter.kernel.getNotebookConf(app.notebookId);
-        const conf = check && typeof check === "object" ? check.data !== void 0 ? check.data : check : null;
+        const conf = check && typeof check === "object" ? check.conf || check.data || check : null;
         kernelState = conf ? JSON.stringify(conf).slice(0, 300) : "空";
       } catch (err) {
         kernelState = "失败: " + String(err && err.message || err).slice(0, 80);

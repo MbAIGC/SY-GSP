@@ -1257,7 +1257,8 @@ export class SyncEngine {
       let kernelState = "回读失败";
       try {
         const check = await this.contentAdapter.kernel.getNotebookConf(app.notebookId);
-        const conf = check && typeof check === "object" ? (check.data !== undefined ? check.data : check) : null;
+        // 响应形态: {box, conf:{name, icon, ...}} — 配置在 conf 字段下
+        const conf = check && typeof check === "object" ? (check.conf || check.data || check) : null;
         kernelState = conf ? JSON.stringify(conf).slice(0, 300) : "空";
       } catch (err) {
         kernelState = "失败: " + String((err && err.message) || err).slice(0, 80);
