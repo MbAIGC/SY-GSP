@@ -1459,6 +1459,18 @@ function mergeConfBytes(localBytes, remoteBytes) {
     return remoteCanonical;
   }
 }
+function preserveRemoteIcon(localBytes, remoteBytes) {
+  const local = parse(localBytes);
+  if (!local) return null;
+  const remote = parse(remoteBytes);
+  const localIcon = typeof local.icon === "string" && local.icon ? local.icon : null;
+  const remoteIcon = remote && typeof remote.icon === "string" && remote.icon ? remote.icon : null;
+  const merged = Object.assign({}, local, { name: local.name });
+  if (remoteIcon) merged.icon = remoteIcon;
+  else if (!localIcon) delete merged.icon;
+  else merged.icon = localIcon;
+  return new TextEncoder().encode(JSON.stringify(merged));
+}
 
 // src/sync/sync-planner.js
 var PlanAction = Object.freeze({
@@ -3678,7 +3690,7 @@ var SyncEngine = class {
           recoverable: true
         });
       }
-      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let bytes = new Uint8Array(await blob.arrayBuffer());
       if (bytes.length === 0 && /\.sy$/i.test(item.path)) {
         throw new SyncError({
           category: SyncErrorCategory.LOCAL_FILE,
@@ -3690,8 +3702,19 @@ var SyncEngine = class {
           recoverable: true
         });
       }
-      const uploadBytes = isNotebookConfPath(item.path) ? canonicalConfBytes(bytes) || bytes : bytes;
-      uploads.push(Object.assign({}, item, { bytes: uploadBytes, format }));
+      if (isNotebookConfPath(item.path)) {
+        let canonicalBytes = canonicalConfBytes(bytes);
+        if (canonicalBytes) {
+          try {
+            const remote = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
+            const preserved = preserveRemoteIcon(canonicalBytes, remote.bytes || null);
+            if (preserved) canonicalBytes = preserved;
+          } catch (err) {
+          }
+          bytes = canonicalBytes;
+        }
+      }
+      uploads.push(Object.assign({}, item, { bytes, format }));
     }
     return uploads;
   }

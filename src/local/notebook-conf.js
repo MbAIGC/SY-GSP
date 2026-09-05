@@ -60,3 +60,22 @@ export function mergeConfBytes(localBytes, remoteBytes) {
     return remoteCanonical;
   }
 }
+
+/**
+ * 上传保护: **空 icon 永不覆盖非空 icon**。
+ * 上传 conf.json 前对比当前远端内容——本地 icon 为空(内核改写痕迹/未设置)
+ * 而远端非空(另一端设置过)时,上传内容采用远端的 icon,防止抹掉对端设置。
+ * 名称以本地为准(上传语义: 本地的改名要传播);其余字段保留本地。
+ */
+export function preserveRemoteIcon(localBytes, remoteBytes) {
+  const local = parse(localBytes);
+  if (!local) return null;
+  const remote = parse(remoteBytes);
+  const localIcon = typeof local.icon === "string" && local.icon ? local.icon : null;
+  const remoteIcon = remote && typeof remote.icon === "string" && remote.icon ? remote.icon : null;
+  const merged = Object.assign({}, local, { name: local.name });
+  if (remoteIcon) merged.icon = remoteIcon;
+  else if (!localIcon) delete merged.icon;
+  else merged.icon = localIcon;
+  return new TextEncoder().encode(JSON.stringify(merged));
+}

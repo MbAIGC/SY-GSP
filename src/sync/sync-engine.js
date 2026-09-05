@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SyncEngine: 一次同步的执行体(2.0 方案 §7)。
  * 不变量:
  * - 未确认远端状态,不写入;
@@ -16,7 +16,7 @@
 
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
 import { SyncState, SyncMode, transition, finish } from "./sync-context.js";
-import { isNotebookConfPath, canonicalConfBytes, mergeConfBytes, confNotebookId } from "../local/notebook-conf.js";
+import { isNotebookConfPath, canonicalConfBytes, mergeConfBytes, confNotebookId, preserveRemoteIcon } from "../local/notebook-conf.js";
 
 /** 思源笔记本目录 id 形态: 14 位数字-字母数字 */
 const NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
@@ -1043,7 +1043,7 @@ export class SyncEngine {
           recoverable: true,
         });
       }
-      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let bytes = new Uint8Array(await blob.arrayBuffer());
       if (bytes.length === 0 && /\.sy$/i.test(item.path)) {
         throw new SyncError({
           category: SyncErrorCategory.LOCAL_FILE,
@@ -1055,9 +1055,23 @@ export class SyncEngine {
           recoverable: true,
         });
       }
-      // conf.json 只上传规范化内容(仅 name): 其余字段是设备本地状态,不跨设备
-      const uploadBytes = isNotebookConfPath(item.path) ? (canonicalConfBytes(bytes) || bytes) : bytes;
-      uploads.push(Object.assign({}, item, { bytes: uploadBytes, format }));
+      // conf.json 上传保护: 上传内容为规范化形式(name+icon);
+      // 本地 icon 为空而当前远端非空(另一端设置过)时,采用远端 icon——
+      // 空 icon 永不覆盖非空,防止多端互相抹图标
+      if (isNotebookConfPath(item.path)) {
+        let canonicalBytes = canonicalConfBytes(bytes);
+        if (canonicalBytes) {
+          try {
+            const remote = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
+            const preserved = preserveRemoteIcon(canonicalBytes, remote.bytes || null);
+            if (preserved) canonicalBytes = preserved;
+          } catch (err) {
+            // 远端读取失败(如文件不存在): 本地规范化内容照常上传
+          }
+          bytes = canonicalBytes;
+        }
+      }
+      uploads.push(Object.assign({}, item, { bytes, format }));
     }
     return uploads;
   }

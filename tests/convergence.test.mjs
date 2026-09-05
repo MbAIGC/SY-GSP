@@ -773,6 +773,30 @@ test("conf.json 回退: 内核不支持 setNotebookConf 时写盘并提示", asy
   assert.equal(await (await h.kernel.getFile(conf)).text(), JSON.stringify({ name: "远端名" }), "回退写盘落地");
 });
 
+test("上传保护: 本地 icon 为空而远端非空 → 空图标不覆盖远端设置", async () => {
+  const conf = D + ".siyuan/conf.json";
+  const h = await makeHarness({ remoteFiles: { [conf]: JSON.stringify({ name: "我的笔记", icon: "1f3f4-200d-2620-fe0f" }) }, localFiles: {} });
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  // NAS 形态: 内核注册后本地 conf 的 icon 为空 → 规划为上传(本地改、远端未变)
+  await h.kernel.putFile(conf, new Blob([enc(JSON.stringify({ name: "我的笔记", icon: "" }))]), false);
+  const result = await runQuiet(h);
+  assert.equal(result.success, true);
+  // 防抹除守卫: 不上传空 icon,改为从远端恢复并经 setNotebookConf 应用
+  assert.equal(result.uploads, 0, "空 icon 不得上传覆盖远端");
+  assert.equal(result.downloads, 1, "从远端恢复");
+  assert.ok(h.kernel.__appliedConfs.some((c) => c.data.icon === "1f3f4-200d-2620-fe0f"), "icon 必须经 setNotebookConf 恢复到内核");
+  // 远端内容未被抹掉
+  const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
+  const blob = (await h.repo.provider.getBlob(tree.find((e) => e.path === conf).sha)).bytes;
+  const remoteNow = JSON.parse(new TextDecoder().decode(blob));
+  assert.equal(remoteNow.icon, "1f3f4-200d-2620-fe0f", "远端设置的图标保持不变");
+  assert.equal(remoteNow.name, "我的笔记");
+  // 收敛
+  const r2 = await runQuiet(h);
+  assert.equal(r2.uploads + r2.downloads, 0, "恢复后应收敛: " + JSON.stringify(r2));
+});
+
 test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => {
   const kernel = makeFakeKernel({ "data/x/a.md": "hello" });
   const plugin = makeFakePlugin();
