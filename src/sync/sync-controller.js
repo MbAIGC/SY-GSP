@@ -312,9 +312,11 @@ export class SyncController {
           this.logger.warn("冲突集清理失败: " + ((err && err.message) || err));
         }
       }
-      this.autoSync.resume();
       this.notify(this.i18n("sygspResolvedMsg", "✅ 冲突已处理,自动同步已恢复"), "info");
     }
+    // 重建等入口会主动停掉自动同步定时器;无论本轮是否涉及冲突暂停都必须恢复,
+    // 否则重建一次之后自动同步静默失效(实证)。resume 内部幂等(非自动模式不重启)。
+    this.autoSync.resume();
     this.events.emit("state:changed", { state: this.state, ctx });
     this.events.emit("sync:success", { ctx, result });
   }
@@ -358,6 +360,8 @@ export class SyncController {
       return;
     }
     this.state = SyncState.FAILED;
+    // 普通失败不暂停自动同步;若入口(如重建)停过定时器,这里恢复,避免静默失效
+    this.autoSync.resume();
     this.events.emit("state:changed", { state: this.state, ctx, error: syncErr });
     this.events.emit("sync:error", { ctx, error: syncErr });
   }

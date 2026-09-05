@@ -728,6 +728,8 @@ export default class SyGspPlugin extends q.Plugin {
       title: "同步重建",
       content: '<div id="sygspRebuild" class="fn__flex-column" style="padding:16px;gap:12px;"></div>',
       width: "640px",
+      // 打开重建弹窗前已停止自动同步;用户取消/关闭时必须恢复,避免静默失效
+      destroyCallback: () => this._restartAutoSyncIfConfigured(),
     });
     const root = dialog.element.querySelector("#sygspRebuild");
 

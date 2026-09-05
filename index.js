@@ -4087,9 +4087,9 @@ var SyncController = class {
           this.logger.warn("冲突集清理失败: " + (err && err.message || err));
         }
       }
-      this.autoSync.resume();
       this.notify(this.i18n("sygspResolvedMsg", "✅ 冲突已处理,自动同步已恢复"), "info");
     }
+    this.autoSync.resume();
     this.events.emit("state:changed", { state: this.state, ctx });
     this.events.emit("sync:success", { ctx, result });
   }
@@ -4128,6 +4128,7 @@ var SyncController = class {
       return;
     }
     this.state = SyncState.FAILED;
+    this.autoSync.resume();
     this.events.emit("state:changed", { state: this.state, ctx, error: syncErr });
     this.events.emit("sync:error", { ctx, error: syncErr });
   }
@@ -7106,7 +7107,9 @@ var SyGspPlugin = class extends q.Plugin {
     const dialog = new q.Dialog({
       title: "同步重建",
       content: '<div id="sygspRebuild" class="fn__flex-column" style="padding:16px;gap:12px;"></div>',
-      width: "640px"
+      width: "640px",
+      // 打开重建弹窗前已停止自动同步;用户取消/关闭时必须恢复,避免静默失效
+      destroyCallback: () => this._restartAutoSyncIfConfigured()
     });
     const root = dialog.element.querySelector("#sygspRebuild");
     const grid = document.createElement("div");
