@@ -2259,6 +2259,13 @@ var ConflictService = class {
 };
 
 // src/sync/rebuild-service.js
+function bytesEqual2(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 var RebuildService = class {
   constructor(deps) {
     this.provider = deps.provider;
@@ -2309,6 +2316,12 @@ var RebuildService = class {
     for (const path of remote.keys()) {
       if (!local.has(path)) onlyRemote.push(path);
     }
+    const classified = await this._reclassifyConfSemantically({
+      same,
+      different,
+      local,
+      remote
+    });
     const repoKey = this.config.repoKey;
     const openSet = this.conflictService && this.conflictService.openSet(repoKey);
     const manifestPaths = this.manifestStore ? [...this.manifestStore.paths] : [];
@@ -2320,8 +2333,8 @@ var RebuildService = class {
       remoteHead: head.sha,
       localCount: local.size,
       remoteCount: remote.size,
-      same,
-      different,
+      same: classified.same,
+      different: classified.different,
       onlyLocal,
       onlyRemote,
       unreadable,
@@ -2331,7 +2344,36 @@ var RebuildService = class {
       conflictResidual: openSet ? (openSet.conflicts || []).filter((item) => item.status === "open").length : 0
     };
   }
-  /** 磁盘/远端存在但不在内核笔记本列表中的 data/<id>/ 路径(列表不可得时不判定) */
+  /**
+   * conf.json 语义重分类: 与同步语义一致,仅比较笔记本名称。
+   * 只有 sort/closed 等设备状态不同 → 从"内容不同"移入"内容相同"。
+   * 远端内容获取失败时保持原判定(宁可显示差异也不隐藏)。
+   */
+  async _reclassifyConfSemantically({ same, different, local, remote }) {
+    const sameSet = new Set(same);
+    const diffSet = new Set(different);
+    for (const path of different.slice()) {
+      if (!isNotebookConfPath(path) || !local.has(path) || !remote.has(path)) continue;
+      try {
+        const localBlob = await this.contentAdapter.readFileBlob(path, "raw");
+        const localCanonical = canonicalConfBytes(localBlob ? new Uint8Array(await localBlob.arrayBuffer()) : null);
+        const remoteBlob = await this.provider.getBlob(remote.get(path));
+        const remoteCanonical = canonicalConfBytes(remoteBlob ? remoteBlob.bytes : null);
+        if (!localCanonical || !remoteCanonical) continue;
+        if (bytesEqual2(localCanonical, remoteCanonical)) {
+          diffSet.delete(path);
+          sameSet.add(path);
+        }
+      } catch (err) {
+      }
+    }
+    return { same: [...sameSet], different: [...diffSet] };
+  }
+  /**
+   * 残留路径: 数据文件存在于磁盘/远端,但不在内核笔记本列表,
+   * 或在列表中标记已关闭(对用户而言与残留无异,重建时一并清理)。
+   * 列表不可得时不判定。
+   */
   async _strayNotebookPaths(paths) {
     if (!this.workspace || typeof this.workspace.getNotebooks !== "function") return [];
     let notebooks;
@@ -2340,11 +2382,15 @@ var RebuildService = class {
     } catch (err) {
       return [];
     }
-    const ids = new Set((notebooks || []).map((n) => n && n.id).filter(Boolean));
-    if (ids.size === 0) return [];
+    const closedOrMissing = /* @__PURE__ */ new Map();
+    for (const n of notebooks || []) {
+      if (n && n.id) closedOrMissing.set(n.id, n.closed === true);
+    }
+    if (closedOrMissing.size === 0) return [];
     return paths.filter((path) => {
       const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
-      return !!m && !ids.has(m[1]);
+      if (!m) return false;
+      return !closedOrMissing.has(m[1]) || closedOrMissing.get(m[1]) === true;
     });
   }
   _format(path) {
@@ -3088,15 +3134,20 @@ var SyncEngine = class {
    * 本地为准方向若本地枚举异常,禁止删远端(可能因漏扫而误删)。
    */
   /**
-   * 内核已注册的笔记本 id 集合(重建"以本地为准"的本地全貌依据)。
-   * 不可用/失败/为空返回 null: 表示无法判定,禁止做残留清理(宁可漏删不可误删)。
+   * 内核笔记本列表(id → 是否已关闭)(重建"以本地为准"的本地全貌依据)。
+   * 已关闭的笔记本仍注册在内核且数据在磁盘,但对用户而言与残留无异,
+   * 重建时一并清理(预览警告框显式列出)。列表不可得/为空返回 null:
+   * 表示无法判定,禁止做残留清理(宁可漏删不可误删)。
    */
-  async _registeredNotebookIds() {
+  async _kernelNotebooks() {
     if (!this.workspace || typeof this.workspace.getNotebooks !== "function") return null;
     try {
       const notebooks = await this.workspace.getNotebooks();
-      const ids = (notebooks || []).map((n) => n && n.id).filter(Boolean);
-      return ids.length > 0 ? new Set(ids) : null;
+      const map = /* @__PURE__ */ new Map();
+      for (const n of notebooks || []) {
+        if (n && n.id) map.set(n.id, n.closed === true);
+      }
+      return map.size > 0 ? map : null;
     } catch (err) {
       return null;
     }
@@ -3139,11 +3190,21 @@ var SyncEngine = class {
     const remotePaths = new Set(remoteEntries.keys());
     transition(ctx, SyncState.MERGING);
     this._emit("engine:phase", { ctx, state: SyncState.MERGING });
-    const registeredIds = keepLocal && rebuildRemote ? await this._registeredNotebookIds() : null;
+    const registeredIds = keepLocal && rebuildRemote ? await this._kernelNotebooks() : null;
+    if (keepLocal && rebuildRemote) {
+      const listed = registeredIds ? [...registeredIds].map(([id, closed]) => id + (closed ? "(已关闭)" : "")).join(", ") : "不可得(未做残留清理)";
+      this._emit("engine:operation", {
+        ctx,
+        operation: "重建残留判定(内核笔记本列表)",
+        count: registeredIds ? registeredIds.size : -1,
+        paths: [listed]
+      });
+    }
     const isStray = (path) => {
       if (!registeredIds) return false;
       const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
-      return !!m && !registeredIds.has(m[1]);
+      if (!m) return false;
+      return !registeredIds.has(m[1]) || registeredIds.get(m[1]) === true;
     };
     if (keepLocal) {
       const strayLocal = [];
@@ -7004,7 +7065,7 @@ var SyGspPlugin = class extends q.Plugin {
       warn.style.cssText = "padding:10px 12px;border:1px solid rgba(217,119,6,.45);background:rgba(217,119,6,.10);border-radius:6px;";
       const warnTitle = document.createElement("div");
       warnTitle.style.fontWeight = "600";
-      warnTitle.textContent = "⚠️ 本地残留(不在笔记本列表): " + report.strayNotebookPaths.length + " 个文件,重建时将一并清理";
+      warnTitle.textContent = "⚠️ 本地残留(不在笔记本列表或已关闭): " + report.strayNotebookPaths.length + " 个文件,重建时按所选方向清理";
       warn.appendChild(warnTitle);
       const warnList = document.createElement("div");
       warnList.style.cssText = "margin-top:4px;font-size:12px;max-height:96px;overflow:auto;word-break:break-all;";

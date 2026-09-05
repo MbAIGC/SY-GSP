@@ -1,4 +1,13 @@
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
+import { isNotebookConfPath, canonicalConfBytes } from "../local/notebook-conf.js";
+
+function bytesEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 
 /** 同步重建的只读扫描：不修改本地、远端或同步元数据。 */
 export class RebuildService {
@@ -60,6 +69,12 @@ export class RebuildService {
       if (!local.has(path)) onlyRemote.push(path);
     }
 
+    // conf.json 与同步语义对齐: 仅比较笔记本名称(规范化),
+    // 只有 sort/closed 等设备状态不同 → 预览按"内容相同"统计,不再误导为待处理差异
+    const classified = await this._reclassifyConfSemantically({
+      same, different, local, remote,
+    });
+
     const repoKey = this.config.repoKey;
     const openSet = this.conflictService && this.conflictService.openSet(repoKey);
     const manifestPaths = this.manifestStore ? [...this.manifestStore.paths] : [];
@@ -73,8 +88,8 @@ export class RebuildService {
       remoteHead: head.sha,
       localCount: local.size,
       remoteCount: remote.size,
-      same,
-      different,
+      same: classified.same,
+      different: classified.different,
       onlyLocal,
       onlyRemote,
       unreadable,
@@ -85,7 +100,38 @@ export class RebuildService {
     };
   }
 
-  /** 磁盘/远端存在但不在内核笔记本列表中的 data/<id>/ 路径(列表不可得时不判定) */
+  /**
+   * conf.json 语义重分类: 与同步语义一致,仅比较笔记本名称。
+   * 只有 sort/closed 等设备状态不同 → 从"内容不同"移入"内容相同"。
+   * 远端内容获取失败时保持原判定(宁可显示差异也不隐藏)。
+   */
+  async _reclassifyConfSemantically({ same, different, local, remote }) {
+    const sameSet = new Set(same);
+    const diffSet = new Set(different);
+    for (const path of different.slice()) {
+      if (!isNotebookConfPath(path) || !local.has(path) || !remote.has(path)) continue;
+      try {
+        const localBlob = await this.contentAdapter.readFileBlob(path, "raw");
+        const localCanonical = canonicalConfBytes(localBlob ? new Uint8Array(await localBlob.arrayBuffer()) : null);
+        const remoteBlob = await this.provider.getBlob(remote.get(path));
+        const remoteCanonical = canonicalConfBytes(remoteBlob ? remoteBlob.bytes : null);
+        if (!localCanonical || !remoteCanonical) continue; // 解析失败: 保持原判定
+        if (bytesEqual(localCanonical, remoteCanonical)) {
+          diffSet.delete(path);
+          sameSet.add(path);
+        }
+      } catch (err) {
+        // 保持原判定
+      }
+    }
+    return { same: [...sameSet], different: [...diffSet] };
+  }
+
+  /**
+   * 残留路径: 数据文件存在于磁盘/远端,但不在内核笔记本列表,
+   * 或在列表中标记已关闭(对用户而言与残留无异,重建时一并清理)。
+   * 列表不可得时不判定。
+   */
   async _strayNotebookPaths(paths) {
     if (!this.workspace || typeof this.workspace.getNotebooks !== "function") return [];
     let notebooks;
@@ -94,11 +140,15 @@ export class RebuildService {
     } catch (err) {
       return [];
     }
-    const ids = new Set((notebooks || []).map((n) => n && n.id).filter(Boolean));
-    if (ids.size === 0) return [];
+    const closedOrMissing = new Map();
+    for (const n of notebooks || []) {
+      if (n && n.id) closedOrMissing.set(n.id, n.closed === true);
+    }
+    if (closedOrMissing.size === 0) return [];
     return paths.filter((path) => {
       const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
-      return !!m && !ids.has(m[1]);
+      if (!m) return false;
+      return !closedOrMissing.has(m[1]) || closedOrMissing.get(m[1]) === true;
     });
   }
 

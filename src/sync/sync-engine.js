@@ -505,15 +505,20 @@ export class SyncEngine {
    * 本地为准方向若本地枚举异常,禁止删远端(可能因漏扫而误删)。
    */
   /**
-   * 内核已注册的笔记本 id 集合(重建"以本地为准"的本地全貌依据)。
-   * 不可用/失败/为空返回 null: 表示无法判定,禁止做残留清理(宁可漏删不可误删)。
+   * 内核笔记本列表(id → 是否已关闭)(重建"以本地为准"的本地全貌依据)。
+   * 已关闭的笔记本仍注册在内核且数据在磁盘,但对用户而言与残留无异,
+   * 重建时一并清理(预览警告框显式列出)。列表不可得/为空返回 null:
+   * 表示无法判定,禁止做残留清理(宁可漏删不可误删)。
    */
-  async _registeredNotebookIds() {
+  async _kernelNotebooks() {
     if (!this.workspace || typeof this.workspace.getNotebooks !== "function") return null;
     try {
       const notebooks = await this.workspace.getNotebooks();
-      const ids = (notebooks || []).map((n) => n && n.id).filter(Boolean);
-      return ids.length > 0 ? new Set(ids) : null;
+      const map = new Map();
+      for (const n of notebooks || []) {
+        if (n && n.id) map.set(n.id, n.closed === true);
+      }
+      return map.size > 0 ? map : null;
     } catch (err) {
       return null;
     }
@@ -559,11 +564,24 @@ export class SyncEngine {
     // UI 不显示)。这类残留若按磁盘扫描参与比对,会被判"未变化"——既不删远端
     // 也不清理本地,重建"成功"但远端多出的笔记本永远清不掉(用户实证场景)。
     // getNotebooks 不可用/失败/为空时不做残留清理,回退磁盘语义(宁可漏删不可误删)。
-    const registeredIds = keepLocal && rebuildRemote ? await this._registeredNotebookIds() : null;
+    const registeredIds = keepLocal && rebuildRemote ? await this._kernelNotebooks() : null;
+    if (keepLocal && rebuildRemote) {
+      const listed = registeredIds
+        ? [...registeredIds].map(([id, closed]) => id + (closed ? "(已关闭)" : "")).join(", ")
+        : "不可得(未做残留清理)";
+      this._emit("engine:operation", {
+        ctx,
+        operation: "重建残留判定(内核笔记本列表)",
+        count: registeredIds ? registeredIds.size : -1,
+        paths: [listed],
+      });
+    }
+    // 残留判定: 不在内核列表,或列表中标记已关闭 → 都按残留清理
     const isStray = (path) => {
       if (!registeredIds) return false;
       const m = /^data\/(\d{14}-[a-z0-9]+)(\/|$)/i.exec(String(path));
-      return !!m && !registeredIds.has(m[1]);
+      if (!m) return false;
+      return !registeredIds.has(m[1]) || registeredIds.get(m[1]) === true;
     };
     if (keepLocal) {
       const strayLocal = [];

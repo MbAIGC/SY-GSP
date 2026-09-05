@@ -759,7 +759,7 @@ export default class SyGspPlugin extends q.Plugin {
       warn.style.cssText = "padding:10px 12px;border:1px solid rgba(217,119,6,.45);background:rgba(217,119,6,.10);border-radius:6px;";
       const warnTitle = document.createElement("div");
       warnTitle.style.fontWeight = "600";
-      warnTitle.textContent = "⚠️ 本地残留(不在笔记本列表): " + report.strayNotebookPaths.length + " 个文件,重建时将一并清理";
+      warnTitle.textContent = "⚠️ 本地残留(不在笔记本列表或已关闭): " + report.strayNotebookPaths.length + " 个文件,重建时按所选方向清理";
       warn.appendChild(warnTitle);
       const warnList = document.createElement("div");
       warnList.style.cssText = "margin-top:4px;font-size:12px;max-height:96px;overflow:auto;word-break:break-all;";

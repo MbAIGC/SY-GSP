@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { SyncPlanner } from "../src/sync/sync-planner.js";
 import { CommitBuilder } from "../src/sync/commit-builder.js";
 import { isNotebookConfPath, canonicalConfBytes, mergeConfBytes } from "../src/local/notebook-conf.js";
+import { RebuildService } from "../src/sync/rebuild-service.js";
 import { makeHarness } from "./engine.test.mjs";
 import { makeFakePlugin, makeFakeKernel } from "./helpers.mjs";
 import { GitProvider } from "../src/git/git-provider.js";
@@ -496,6 +497,61 @@ test("conf.json 规范化: canonical 只含 name,合并保留本地设备状态"
   assert.equal(new TextDecoder().decode(fromRemote), JSON.stringify({ name: "远端名", sort: 5 }), "本地缺失恢复远端全量");  // 路径判定
   assert.ok(isNotebookConfPath("data/20260902191353-9549go4/.siyuan/conf.json"));
   assert.ok(!isNotebookConfPath("data/20260902191353-9549go4/.siyuan/sort.json"));
+});
+
+test("重建预览: conf.json 仅设备状态差异按语义一致统计;未注册笔记本计入残留", async () => {
+  const a = D + "a.md";
+  const confA = D + ".siyuan/conf.json";
+  const zombie = "data/20240101120003-zomb99/.siyuan/conf.json";
+  // 本地 conf 是完整 JSON,远端 conf 是规范化形式(仅 name 相同)——语义一致
+  const h = await makeHarness({
+    remoteFiles: {
+      [a]: "content v1",
+      [confA]: JSON.stringify({ name: "我的笔记" }),
+      [zombie]: JSON.stringify({ name: "僵尸笔记本" }),
+    },
+    localFiles: {
+      [a]: "content v2", // .sy 真实差异
+      [confA]: JSON.stringify({ name: "我的笔记", sort: 3, closed: {} }),
+      [zombie]: JSON.stringify({ name: "僵尸笔记本", sort: 1 }),
+    },
+  });
+  h.workspace.getNotebooks = async () => [{ id: "20240101120000-abc" }];
+  h.workspace.ignoreMatcher = () => ({ isIgnored: () => false });
+  const service = new RebuildService({
+    provider: h.repo.provider,
+    workspace: h.workspace,
+    contentAdapter: h.engine.contentAdapter,
+    metadataStore: h.metadataStore,
+    manifestStore: h.manifestStore,
+    conflictService: h.conflictService,
+    config: { syncRange: 1, syncFileType: "raw", repoKey: "github:o/r:main" },
+  });
+  const report = await service.inspect();
+  assert.ok(report.same.includes(confA), "conf.json 仅设备状态差异应按语义一致统计");
+  assert.ok(!report.different.includes(confA), "不得再显示为内容不同");
+  assert.ok(report.different.includes(a), "真实差异(.sy)仍显示为内容不同");
+  assert.ok(report.strayNotebookPaths.includes(zombie), "未注册笔记本残留必须显式列出");
+});
+
+test("重建'以本地为准': 已关闭的笔记本按残留清理(内核列表包含但仍需清除)", async () => {
+  const a = D + "a.md";
+  const closedNotebook = "data/20240101120004-closed1";
+  const h = await makeHarness({
+    remoteFiles: { [a]: "a", [closedNotebook + "/note.sy"]: "closed content" },
+    localFiles: { [a]: "a", [closedNotebook + "/note.sy"]: "closed content" },
+  });
+  // 内核列表包含已关闭笔记本(思源 lsNotebooks 会返回 closed 项)——用户实证场景
+  h.workspace.getNotebooks = async () => [
+    { id: "20240101120000-abc", closed: false },
+    { id: "20240101120004-closed1", closed: true },
+  ];
+  const result = await runQuiet(h, { trigger: "rebuild", mode: "local_over_remote" });
+  assert.equal(result.success, true);
+  assert.equal(result.deletionsRemote, 1, "已关闭笔记本的远端文件必须删除: " + JSON.stringify(result));
+  assert.equal(result.deletionsLocal, 1, "已关闭笔记本的本地文件必须一并清理");
+  const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
+  assert.deepEqual(tree.map((e) => e.path), [a]);
 });
 
 test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => {
