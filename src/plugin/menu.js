@@ -48,7 +48,6 @@ export function buildTopBarMenu({ q, plugin, i18n, actions, conflictPaused }) {
     icon: "iconFilter",
     type: "submenu",
     submenu: buildRadioItems(t.syncRange, [
-      ["0", t.workSpace],
       ["1", t.dataFile],
       ["2", t.noteFile],
     ], "sync_range", actions),

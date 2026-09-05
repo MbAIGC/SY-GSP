@@ -419,8 +419,7 @@ var ContentAdapter = class {
     if (isSiyuanDocPath(originalPath)) {
       const notebookId = notebookIdOf(originalPath);
       const result = await this.kernel.putFile(originalPath, blob, false);
-      await this.kernel.refreshFiletree();
-      await this.kernel.openNotebook(notebookId);
+      if (op === "create") await this.kernel.openNotebook(notebookId);
       return result;
     }
     return this.kernel.putFile(originalPath, blob, false);
@@ -3791,9 +3790,6 @@ var SyncEngine = class {
       if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
       await this.contentAdapter.removeFileWithBackup(item.path);
     }
-    if (plan.deletionsLocal.length > 0) {
-      await this.contentAdapter.kernel.refreshFiletree();
-    }
     if ((plan.skippedLargeDownloads || []).length > 0) {
       this._emit("engine:operation", {
         ctx,
@@ -3802,7 +3798,7 @@ var SyncEngine = class {
         paths: plan.skippedLargeDownloads.map((item) => item.path)
       });
     }
-    if (plan.downloads.length > 0 && !plan.downloads.some((item) => /\.sy$/i.test(item.path))) {
+    if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
   }
@@ -4991,6 +4987,13 @@ var SettingsPanelBuilder = class {
       description: t.disclaimeDesc
     });
     u.addItem({
+      key: "device_name",
+      type: "text",
+      value: val("device_name"),
+      title: t.sygspDeviceName || "设备名称",
+      description: t.sygspDeviceNameDesc || "用于 GitHub 提交信息标识来源,如 pad;留空则不加前缀"
+    });
+    u.addItem({
       key: "upload_platform",
       type: "select",
       value: val("upload_platform"),
@@ -5110,13 +5113,6 @@ var SettingsPanelBuilder = class {
       value: val("sync_interval"),
       title: t.syncInterval,
       description: t.syncIntervalDesc
-    });
-    u.addItem({
-      key: "device_name",
-      type: "text",
-      value: val("device_name"),
-      title: t.sygspDeviceName || "设备名称",
-      description: t.sygspDeviceNameDesc || "用于 GitHub 提交信息标识来源,如 pad;留空则不加前缀"
     });
     u.addItem({
       key: "sygsp_auto_retry",
@@ -5265,7 +5261,7 @@ var NotificationService = class {
   }
   conflictPaused({ kind, conflictCount, reason } = {}) {
     const isBase = kind === "BASE_UNRESOLVED";
-    const text = isBase ? this.i18n && this.i18n.sygspBaseUnresolvedMsg || "🔴 同步基准无法确认,自动同步已暂停,请打开插件菜单处理" : this.i18n && this.i18n.gSyncConflictMsg || "🔴 检测到同步冲突,自动同步已暂停";
+    const text = isBase ? this.i18n && this.i18n.sygspBaseUnresolvedMsg || "同步基准无法确认,自动同步已暂停,请打开插件菜单处理" : this.i18n && this.i18n.gSyncConflictMsg || "检测到同步冲突,自动同步已暂停";
     this.toast(conflictCount ? text + "(" + conflictCount + " 个文件)" : text, "error", 6e3);
     this._badge("conflict");
   }
@@ -5284,6 +5280,24 @@ var NotificationService = class {
     else if (kind === "success") el.classList.add("git-sync-success");
     else if (kind === "error") el.classList.add("git-sync-failed");
     else if (kind === "conflict") el.classList.add("git-sync-conflict-paused");
+    this._dot(kind === "conflict" || kind === "error" ? "#e53935" : null);
+  }
+  /** 在顶栏按钮右上角插入/更新/移除状态圆点 */
+  _dot(color) {
+    const el = this.topBarElement;
+    if (!el || typeof el.querySelector !== "function") return;
+    let dot = el.querySelector(".sygsp-state-dot");
+    if (!color) {
+      if (dot) dot.remove();
+      return;
+    }
+    if (!dot) {
+      dot = document.createElement("span");
+      dot.className = "sygsp-state-dot";
+      el.style.position = "relative";
+      el.appendChild(dot);
+    }
+    dot.style.background = color;
   }
 };
 
@@ -5315,9 +5329,9 @@ var ConflictDialog = class {
     const t = this.i18n;
     this.dialog = new q2.Dialog({
       title: t && t.gSyncConflictTitle || "⚠️ 检测到同步冲突",
-      content: '<div id="sygspConflictDialog" class="fn__flex-column" style="padding:16px;gap:10px;"></div>',
+      content: '<div id="sygspConflictDialog" class="fn__flex-column" style="padding:12px;gap:10px;"></div>',
       width: "760px",
-      height: "68vh",
+      height: "72vh",
       destroyCallback: () => {
         this.dialog = null;
       }
@@ -5407,6 +5421,15 @@ var ConflictDialog = class {
     summary.style.fontSize = "12px";
     summary.textContent = "共 " + (set.conflicts || []).length + " 个冲突文件" + (decidedCount > 0 ? " · 已处理 " + decidedCount + " · 待处理 " + openConflicts.length : "");
     root.appendChild(summary);
+    if (openConflicts.length > 0) {
+      const t2 = this.i18n;
+      const batchBar = document.createElement("div");
+      batchBar.className = "fn__flex fn__flex-wrap";
+      batchBar.style.cssText = "gap:8px;";
+      batchBar.appendChild(this._btn(t2 && t2.sygspKeepAllLocal || "全部保留本地", () => this._decideAll("keep_local"), "b3-button b3-button--text"));
+      batchBar.appendChild(this._btn(t2 && t2.sygspKeepAllRemote || "全部保留远端", () => this._decideAll("keep_remote"), "b3-button b3-button--text"));
+      root.appendChild(batchBar);
+    }
     const list = document.createElement("div");
     list.className = "fn__flex-1";
     list.style.overflow = "auto";
@@ -5472,12 +5495,7 @@ var ConflictDialog = class {
     const t = this.i18n;
     const bar = document.createElement("div");
     bar.className = "fn__flex fn__flex-wrap";
-    bar.style.cssText = "gap:8px;padding-top:8px;border-top:1px solid var(--b3-border-color);";
-    bar.appendChild(this._btn(t && t.sygspKeepAllLocal || "全部保留本地", () => this._decideAll("keep_local"), "b3-button b3-button--text"));
-    bar.appendChild(this._btn(t && t.sygspKeepAllRemote || "全部保留远端", () => this._decideAll("keep_remote"), "b3-button b3-button--text"));
-    const spacer = document.createElement("div");
-    spacer.className = "fn__flex-1";
-    bar.appendChild(spacer);
+    bar.style.cssText = "gap:8px;justify-content:flex-end;border-top:1px solid var(--b3-border-color);padding-top:10px;";
     if (openCount === 0) {
       bar.appendChild(this._btn("关闭", () => this.close(), "b3-button b3-button--cancel"));
     } else {
@@ -6553,7 +6571,6 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
     icon: "iconFilter",
     type: "submenu",
     submenu: buildRadioItems(t.syncRange, [
-      ["0", t.workSpace],
       ["1", t.dataFile],
       ["2", t.noteFile]
     ], "sync_range", actions)
@@ -6661,7 +6678,13 @@ var SyGspPlugin = class extends q.Plugin {
         }
       });
       this.settingUtils = await this.settingsBuilder.build();
-      this.logs.deviceTag = String(this.settingUtils.take("device_name") || "").trim().slice(0, 32);
+      let deviceName = String(this.settingUtils.take("device_name") || "").trim();
+      if (!deviceName) {
+        deviceName = "设备-" + Math.random().toString(16).slice(2, 6);
+        await this.settingsBuilder.utils.setAndSave("device_name", deviceName);
+        this.logs.info("设备名称未设置,已生成默认: " + deviceName);
+      }
+      this.logs.deviceTag = deviceName.slice(0, 32);
       await this._migrateFromLegacyIfNeeded();
       this.conflictDialog = new ConflictDialog({
         q,
@@ -6727,7 +6750,7 @@ var SyGspPlugin = class extends q.Plugin {
       console.warn("[SY-GSP] 顶栏自检失败:", err && err.message);
     }
   }
-  /** 顶栏图标暂停角标: 手动暂停同步期间可见(⏸ 角标 + title 说明) */
+  /** 顶栏图标暂停角标: 手动暂停同步期间显示橙色圆点(悬停说明) */
   _updateTopBarPauseBadge() {
     if (!this.topBarElement || typeof this.topBarElement.querySelector !== "function") return;
     let badge = this.topBarElement.querySelector(".sygsp-pause-badge");
@@ -6736,7 +6759,7 @@ var SyGspPlugin = class extends q.Plugin {
       if (!badge) {
         badge = document.createElement("span");
         badge.className = "sygsp-pause-badge";
-        badge.textContent = "⏸";
+        this.topBarElement.style.position = "relative";
         this.topBarElement.appendChild(badge);
       }
     } else {

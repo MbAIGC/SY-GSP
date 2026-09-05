@@ -1211,9 +1211,6 @@ export class SyncEngine {
       if (!allowRebuildOverwrite) await this._assertLocalUnchanged(ctx, item.path, "远端已删除该文件,但同步期间本地被修改,拒绝删除本地内容");
       await this.contentAdapter.removeFileWithBackup(item.path);
     }
-    if (plan.deletionsLocal.length > 0) {
-      await this.contentAdapter.kernel.refreshFiletree();
-    }
     if ((plan.skippedLargeDownloads || []).length > 0) {
       this._emit("engine:operation", {
         ctx,
@@ -1222,7 +1219,8 @@ export class SyncEngine {
         paths: plan.skippedLargeDownloads.map((item) => item.path),
       });
     }
-    if (plan.downloads.length > 0 && !plan.downloads.some((item) => /\.sy$/i.test(item.path))) {
+    // 统一刷新一次: 有任何本地落地/删除后让内核重索引(替代散落的条件式刷新)
+    if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
   }

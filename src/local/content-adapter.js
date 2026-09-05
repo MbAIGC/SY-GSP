@@ -67,8 +67,8 @@ export class ContentAdapter {
     if (isSiyuanDocPath(originalPath)) {
       const notebookId = notebookIdOf(originalPath);
       const result = await this.kernel.putFile(originalPath, blob, false);
-      await this.kernel.refreshFiletree();
-      await this.kernel.openNotebook(notebookId);
+      // openNotebook 会切换当前笔记本视图,仅在新建时调用,避免打断编辑
+      if (op === "create") await this.kernel.openNotebook(notebookId);
       return result;
     }
     return this.kernel.putFile(originalPath, blob, false);

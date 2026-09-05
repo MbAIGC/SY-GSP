@@ -86,6 +86,14 @@ export class SettingsPanelBuilder {
       title: t.disclaimeTitle,
       description: t.disclaimeDesc,
     });
+    // 设备名称: 提交信息与日志的来源标识,置于设置页首项
+    u.addItem({
+      key: "device_name",
+      type: "text",
+      value: val("device_name"),
+      title: (t.sygspDeviceName) || "设备名称",
+      description: (t.sygspDeviceNameDesc) || "用于 GitHub 提交信息标识来源,如 pad;留空则不加前缀",
+    });
     u.addItem({
       key: "upload_platform",
       type: "select",
@@ -206,13 +214,6 @@ export class SettingsPanelBuilder {
       value: val("sync_interval"),
       title: t.syncInterval,
       description: t.syncIntervalDesc,
-    });
-    u.addItem({
-      key: "device_name",
-      type: "text",
-      value: val("device_name"),
-      title: (t.sygspDeviceName) || "设备名称",
-      description: (t.sygspDeviceNameDesc) || "用于 GitHub 提交信息标识来源,如 pad;留空则不加前缀",
     });
     u.addItem({
       key: "sygsp_auto_retry",

@@ -69,8 +69,8 @@ export class NotificationService {
   conflictPaused({ kind, conflictCount, reason } = {}) {
     const isBase = kind === "BASE_UNRESOLVED";
     const text = isBase
-      ? (this.i18n && this.i18n.sygspBaseUnresolvedMsg) || "🔴 同步基准无法确认,自动同步已暂停,请打开插件菜单处理"
-      : (this.i18n && this.i18n.gSyncConflictMsg) || "🔴 检测到同步冲突,自动同步已暂停";
+      ? (this.i18n && this.i18n.sygspBaseUnresolvedMsg) || "同步基准无法确认,自动同步已暂停,请打开插件菜单处理"
+      : (this.i18n && this.i18n.gSyncConflictMsg) || "检测到同步冲突,自动同步已暂停";
     this.toast(conflictCount ? text + "(" + conflictCount + " 个文件)" : text, "error", 6000);
     this._badge("conflict");
   }
@@ -92,5 +92,26 @@ export class NotificationService {
     else if (kind === "success") el.classList.add("git-sync-success");
     else if (kind === "error") el.classList.add("git-sync-failed");
     else if (kind === "conflict") el.classList.add("git-sync-conflict-paused");
+    // 元素级状态圆点: 不依赖 CSS 类与 svg 选择器命中,任何端上都能显示
+    // (红=冲突/错误;同步中/成功不显示圆点)
+    this._dot(kind === "conflict" || kind === "error" ? "#e53935" : null);
+  }
+
+  /** 在顶栏按钮右上角插入/更新/移除状态圆点 */
+  _dot(color) {
+    const el = this.topBarElement;
+    if (!el || typeof el.querySelector !== "function") return;
+    let dot = el.querySelector(".sygsp-state-dot");
+    if (!color) {
+      if (dot) dot.remove();
+      return;
+    }
+    if (!dot) {
+      dot = document.createElement("span");
+      dot.className = "sygsp-state-dot";
+      el.style.position = "relative";
+      el.appendChild(dot);
+    }
+    dot.style.background = color;
   }
 }

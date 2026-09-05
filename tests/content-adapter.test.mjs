@@ -22,7 +22,7 @@ function makeKernel({ failRefresh = false } = {}) {
   };
 }
 
-test("原生思源文档落地: 先写入,刷新文件树,再打开笔记本", async () => {
+test("原生思源文档落地: 新建时写入并打开笔记本(刷新由引擎统一执行)", async () => {
   const kernel = makeKernel();
   const adapter = new ContentAdapter(kernel);
   await adapter.writeFileBlob(
@@ -33,18 +33,22 @@ test("原生思源文档落地: 先写入,刷新文件树,再打开笔记本", a
   );
   assert.deepEqual(kernel.calls, [
     ["putFile", "data/20260903001348-uwng1aa/20260903211217-uy02kmt.sy"],
-    ["refreshFiletree"],
     ["openNotebook", "20260903001348-uwng1aa"],
   ]);
 });
 
-test("原生思源文档落地: 刷新文件树失败必须上抛", async () => {
-  const kernel = makeKernel({ failRefresh: true });
+test("原生思源文档落地: 更新不切换笔记本视图(不打断编辑)", async () => {
+  const kernel = makeKernel();
   const adapter = new ContentAdapter(kernel);
-  await assert.rejects(
-    () => adapter.writeFileBlob("data/20260903001348-uwng1aa/20260903211217-uy02kmt.sy", new Blob(["{}"]), "raw", "create"),
-    /刷新文件树失败/
+  await adapter.writeFileBlob(
+    "data/20260903001348-uwng1aa/20260903211217-uy02kmt.sy",
+    new Blob(["{}"]),
+    "raw",
+    "update"
   );
+  assert.deepEqual(kernel.calls, [
+    ["putFile", "data/20260903001348-uwng1aa/20260903211217-uy02kmt.sy"],
+  ], "update 不得调用 openNotebook/refreshFiletree");
 });
 
 test("普通文件落地: 不调用笔记本打开接口", async () => {

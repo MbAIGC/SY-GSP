@@ -78,8 +78,15 @@ export default class SyGspPlugin extends q.Plugin {
         },
       });
       this.settingUtils = await this.settingsBuilder.build();
+      // 设备名称默认值: 思源/浏览器环境拿不到系统主机名,首次生成持久化默认名
+      let deviceName = String(this.settingUtils.take("device_name") || "").trim();
+      if (!deviceName) {
+        deviceName = "设备-" + Math.random().toString(16).slice(2, 6);
+        await this.settingsBuilder.utils.setAndSave("device_name", deviceName);
+        this.logs.info("设备名称未设置,已生成默认: " + deviceName);
+      }
       // 运行日志设备标识(与提交信息前缀同源): 多设备场景区分日志来源
-      this.logs.deviceTag = String(this.settingUtils.take("device_name") || "").trim().slice(0, 32);
+      this.logs.deviceTag = deviceName.slice(0, 32);
       await this._migrateFromLegacyIfNeeded();
       this.conflictDialog = new ConflictDialog({
         q,
@@ -152,7 +159,7 @@ export default class SyGspPlugin extends q.Plugin {
     }
   }
 
-  /** 顶栏图标暂停角标: 手动暂停同步期间可见(⏸ 角标 + title 说明) */
+  /** 顶栏图标暂停角标: 手动暂停同步期间显示橙色圆点(悬停说明) */
   _updateTopBarPauseBadge() {
     if (!this.topBarElement || typeof this.topBarElement.querySelector !== "function") return;
     let badge = this.topBarElement.querySelector(".sygsp-pause-badge");
@@ -161,7 +168,7 @@ export default class SyGspPlugin extends q.Plugin {
       if (!badge) {
         badge = document.createElement("span");
         badge.className = "sygsp-pause-badge";
-        badge.textContent = "⏸";
+        this.topBarElement.style.position = "relative";
         this.topBarElement.appendChild(badge);
       }
     } else {

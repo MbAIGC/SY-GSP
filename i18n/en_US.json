@@ -178,7 +178,7 @@
   "gSyncResolvedMsg": "✅ Conflict resolved, auto sync resumed",
   "gSyncResolveFailedMsg": "❌ Resolution sync failed, conflict still pending",
   "gSyncOpenDocHint": "The conflict doc was created next to the original (name contains _conflict_ prefix). Open it in the file tree.",
-  "gSyncRuntimeLogsTitle": "SGSP runtime logs",
+  "gSyncRuntimeLogsTitle": "SY-GSP Runtime Logs",
   "gSyncHistoryError": "❌ The sync history panel is unavailable. Please try again later.",
   "gSyncStartMsg": "🔄 Syncing...",
   "gSyncSuccessMsg": "✅ Sync succeeded",

@@ -7,3 +7,6 @@
 
 /* 同步历史面板(与思源 history__* 风格对齐的最小补充) */
 #sygspSyncHistory{display:flex;flex-direction:column;gap:4px}
+
+.sygsp-pause-badge{position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#f5a623;box-shadow:0 0 0 1.5px var(--b3-theme-background)}
+.sygsp-state-dot{position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;box-shadow:0 0 0 1.5px var(--b3-theme-background)}

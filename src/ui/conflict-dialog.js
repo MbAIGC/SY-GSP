@@ -36,9 +36,9 @@ export class ConflictDialog {
     const t = this.i18n;
     this.dialog = new q.Dialog({
       title: (t && t.gSyncConflictTitle) || "⚠️ 检测到同步冲突",
-      content: '<div id="sygspConflictDialog" class="fn__flex-column" style="padding:16px;gap:10px;"></div>',
+      content: '<div id="sygspConflictDialog" class="fn__flex-column" style="padding:12px;gap:10px;"></div>',
       width: "760px",
-      height: "68vh",
+      height: "72vh",
       destroyCallback: () => {
         this.dialog = null;
       },
@@ -143,6 +143,17 @@ export class ConflictDialog {
       (decidedCount > 0 ? " · 已处理 " + decidedCount + " · 待处理 " + openConflicts.length : "");
     root.appendChild(summary);
 
+    // 批量决策按钮紧随摘要行(重要操作放上方,不因列表过长被遮挡)
+    if (openConflicts.length > 0) {
+      const t2 = this.i18n;
+      const batchBar = document.createElement("div");
+      batchBar.className = "fn__flex fn__flex-wrap";
+      batchBar.style.cssText = "gap:8px;";
+      batchBar.appendChild(this._btn((t2 && t2.sygspKeepAllLocal) || "全部保留本地", () => this._decideAll("keep_local"), "b3-button b3-button--text"));
+      batchBar.appendChild(this._btn((t2 && t2.sygspKeepAllRemote) || "全部保留远端", () => this._decideAll("keep_remote"), "b3-button b3-button--text"));
+      root.appendChild(batchBar);
+    }
+
     const list = document.createElement("div");
     list.className = "fn__flex-1";
     list.style.overflow = "auto";
@@ -220,14 +231,9 @@ export class ConflictDialog {
     const t = this.i18n;
     const bar = document.createElement("div");
     bar.className = "fn__flex fn__flex-wrap";
-    bar.style.cssText = "gap:8px;padding-top:8px;border-top:1px solid var(--b3-border-color);";
-    bar.appendChild(this._btn((t && t.sygspKeepAllLocal) || "全部保留本地", () => this._decideAll("keep_local"), "b3-button b3-button--text"));
-    bar.appendChild(this._btn((t && t.sygspKeepAllRemote) || "全部保留远端", () => this._decideAll("keep_remote"), "b3-button b3-button--text"));
-    const spacer = document.createElement("div");
-    spacer.className = "fn__flex-1";
-    bar.appendChild(spacer);
+    bar.style.cssText = "gap:8px;justify-content:flex-end;border-top:1px solid var(--b3-border-color);padding-top:10px;";
+    // 批量决策已上移到摘要行下方;底部仅保留出口,避免被长列表遮挡
     if (openCount === 0) {
-      // 全部决策完成、正在执行时的兜底出口
       bar.appendChild(this._btn("关闭", () => this.close(), "b3-button b3-button--cancel"));
     } else {
       bar.appendChild(this._btn((t && t.gSyncLater) || "稍后处理", () => this._later(), "b3-button b3-button--cancel"));
