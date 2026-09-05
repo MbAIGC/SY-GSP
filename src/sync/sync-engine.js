@@ -1246,12 +1246,10 @@ export class SyncEngine {
     // 回读内核状态 + 磁盘状态,全部打进日志用于诊断
     for (const app of confApplications) {
       const confObj = JSON.parse(new TextDecoder().decode(app.mergedBytes));
-      let kernelMsg = "未调用";
       try {
         await this.contentAdapter.kernel.setNotebookConf(app.notebookId, confObj);
-        kernelMsg = "已调用";
       } catch (err) {
-        kernelMsg = "不可用(" + String((err && err.message) || err).slice(0, 80) + ")";
+        // 内核不可用/失败不阻断: 后续写盘 + 异常检测兜底
       }
       await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
       let kernelState = "回读失败";
@@ -1270,12 +1268,37 @@ export class SyncEngine {
       } catch (err) {
         diskState = "失败: " + String((err && err.message) || err).slice(0, 80);
       }
-      this._emit("engine:operation", {
-        ctx,
-        operation: "笔记本配置同步诊断 [" + app.notebookId + "] setNotebookConf: " + kernelMsg,
-        count: 1,
-        paths: ["内核: " + kernelState, "磁盘: " + diskState],
-      });
+      // 常态只打一行确认;内核/磁盘与预期不符时才输出完整诊断
+      let anomaly = null;
+      try {
+        const kernelConf = JSON.parse(kernelState);
+        if (kernelConf.name !== confObj.name) anomaly = "内核名称不一致: " + kernelConf.name;
+        else if (confObj.icon && kernelConf.icon !== confObj.icon) anomaly = "内核 icon 未生效: " + kernelConf.icon;
+      } catch (err) {
+        anomaly = "内核回读不可解析";
+      }
+      try {
+        const diskConf = JSON.parse(diskState);
+        if (diskConf.name !== confObj.name) anomaly = (anomaly ? anomaly + "; " : "") + "磁盘名称不一致: " + diskConf.name;
+        else if (confObj.icon && diskConf.icon !== confObj.icon) anomaly = (anomaly ? anomaly + "; " : "") + "磁盘 icon 未生效: " + diskConf.icon;
+      } catch (err) {
+        anomaly = (anomaly ? anomaly + "; " : "") + "磁盘内容不可解析";
+      }
+      if (anomaly) {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "⚠️ 笔记本配置应用异常 [" + app.notebookId + "] " + anomaly,
+          count: 1,
+          paths: ["内核: " + kernelState, "磁盘: " + diskState],
+        });
+      } else {
+        this._emit("engine:operation", {
+          ctx,
+          operation: "笔记本配置已应用(setNotebookConf)",
+          count: 1,
+          paths: [app.notebookId],
+        });
+      }
     }
     // 统一刷新一次: 有任何本地落地/删除后让内核重索引(替代散落的条件式刷新)
     if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0 || confApplications.length > 0) {
