@@ -2259,6 +2259,7 @@ var ConflictService = class {
 };
 
 // src/sync/rebuild-service.js
+var NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
 function bytesEqual2(a, b) {
   if (!a || !b || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
@@ -2388,14 +2389,22 @@ var RebuildService = class {
       if (n && n.id) closedOrMissing.set(n.id, n.closed === true);
     }
     if (closedOrMissing.size === 0) return [];
-    return paths.filter((path) => {
+    const seen = /* @__PURE__ */ new Set();
+    const strays = [];
+    for (const path of paths) {
       const segments = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
       let notebookId = null;
-      if (segments[0] === "data" && segments[1]) notebookId = segments[1];
-      else if (segments[0] && /^\d{14}-[a-z0-9]+$/i.test(segments[0])) notebookId = segments[0];
-      if (!notebookId) return false;
-      return !closedOrMissing.has(notebookId) || closedOrMissing.get(notebookId) === true;
-    });
+      if (segments[0] === "data" && segments[1] && NOTEBOOK_ID_RE.test(segments[1])) notebookId = segments[1];
+      else if (segments[0] && NOTEBOOK_ID_RE.test(segments[0])) notebookId = segments[0];
+      if (!notebookId) continue;
+      if (!closedOrMissing.has(notebookId) || closedOrMissing.get(notebookId) === true) {
+        if (!seen.has(path)) {
+          seen.add(path);
+          strays.push(path);
+        }
+      }
+    }
+    return strays;
   }
   _format(path) {
     return this.config.syncFileType === "markdown" && /\.sy$/i.test(path) ? "markdown" : "raw";
@@ -2725,6 +2734,7 @@ function finish(ctx, { state, result, error }) {
 }
 
 // src/sync/sync-engine.js
+var NOTEBOOK_ID_RE2 = /^\d{14}-[a-z0-9]+$/i;
 var SyncEngine = class {
   /**
    * @param {object} deps {
@@ -3229,8 +3239,8 @@ var SyncEngine = class {
       if (!registeredIds) return false;
       const segments = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
       let notebookId = null;
-      if (segments[0] === "data" && segments[1]) notebookId = segments[1];
-      else if (segments[0] && /^\d{14}-[a-z0-9]+$/i.test(segments[0])) notebookId = segments[0];
+      if (segments[0] === "data" && segments[1] && NOTEBOOK_ID_RE2.test(segments[1])) notebookId = segments[1];
+      else if (segments[0] && NOTEBOOK_ID_RE2.test(segments[0])) notebookId = segments[0];
       if (!notebookId) return false;
       return !registeredIds.has(notebookId) || registeredIds.get(notebookId) === true;
     };

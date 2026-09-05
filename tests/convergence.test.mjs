@@ -594,6 +594,41 @@ test("重建'以本地为准': 仅含被忽略文件(.siyuan/sort.json)的残留
   assert.equal(await h.kernel.getFile(zombieSort), null, "本地 sort.json 已清理");
 });
 
+test("重建预览: 工作区目录(data/storage、data/.siyuan)绝不误判为残留", async () => {
+  const conf = D + ".siyuan/conf.json";
+  const zombie = "data/20240101120003-zomb99/.siyuan/sort.json";
+  const h = await makeHarness({
+    remoteFiles: {
+      [conf]: JSON.stringify({ name: "我的笔记" }),
+      [zombie]: "{}",
+      "data/.siyuan/indexignore": "",
+      "data/storage/petal/petals.json": "{}",
+    },
+    localFiles: {
+      [conf]: JSON.stringify({ name: "我的笔记", sort: 3 }),
+      [zombie]: "{}",
+      "data/.siyuan/indexignore": "",
+      "data/storage/petal/petals.json": "{}",
+    },
+  });
+  h.workspace.getNotebooks = async () => [{ id: "20240101120000-abc", closed: false }];
+  h.workspace.ignoreMatcher = () => ({ isIgnored: () => false });
+  const service = new RebuildService({
+    provider: h.repo.provider,
+    workspace: h.workspace,
+    contentAdapter: h.engine.contentAdapter,
+    metadataStore: h.metadataStore,
+    manifestStore: h.manifestStore,
+    conflictService: h.conflictService,
+    config: { syncRange: 1, syncFileType: "raw", repoKey: "github:o/r:main" },
+  });
+  const report = await service.inspect();
+  assert.ok(report.strayNotebookPaths.includes(zombie), "真僵尸命中");
+  assert.equal(report.strayNotebookPaths.some((p) => p.startsWith("data/storage")), false, "storage 不得误判");
+  assert.equal(report.strayNotebookPaths.some((p) => p.startsWith("data/.siyuan")), false, "工作区 .siyuan 不得误判");
+  assert.equal(new Set(report.strayNotebookPaths).size, report.strayNotebookPaths.length, "路径去重");
+});
+
 test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => {
   const kernel = makeFakeKernel({ "data/x/a.md": "hello" });
   const plugin = makeFakePlugin();

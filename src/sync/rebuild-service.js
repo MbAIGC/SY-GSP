@@ -1,6 +1,9 @@
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
 import { isNotebookConfPath, canonicalConfBytes } from "../local/notebook-conf.js";
 
+/** 思源笔记本目录 id 形态: 14 位数字-字母数字(data/.siyuan、data/storage 等绝不误判) */
+const NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
+
 function bytesEqual(a, b) {
   if (!a || !b || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
@@ -148,15 +151,24 @@ export class RebuildService {
       if (n && n.id) closedOrMissing.set(n.id, n.closed === true);
     }
     if (closedOrMissing.size === 0) return [];
-    // 按路径段识别笔记本 id(兼容仓库根布局与 data/ 前缀布局两种形态)
-    return paths.filter((path) => {
+    // 按路径段识别笔记本 id(兼容仓库根布局与 data/ 前缀布局)。
+    // 第二段必须形如思源笔记本 id——data/.siyuan、data/storage 等绝不误判。
+    const seen = new Set();
+    const strays = [];
+    for (const path of paths) {
       const segments = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
       let notebookId = null;
-      if (segments[0] === "data" && segments[1]) notebookId = segments[1];
-      else if (segments[0] && /^\d{14}-[a-z0-9]+$/i.test(segments[0])) notebookId = segments[0];
-      if (!notebookId) return false;
-      return !closedOrMissing.has(notebookId) || closedOrMissing.get(notebookId) === true;
-    });
+      if (segments[0] === "data" && segments[1] && NOTEBOOK_ID_RE.test(segments[1])) notebookId = segments[1];
+      else if (segments[0] && NOTEBOOK_ID_RE.test(segments[0])) notebookId = segments[0];
+      if (!notebookId) continue;
+      if (!closedOrMissing.has(notebookId) || closedOrMissing.get(notebookId) === true) {
+        if (!seen.has(path)) {
+          seen.add(path);
+          strays.push(path);
+        }
+      }
+    }
+    return strays;
   }
 
   _format(path) {

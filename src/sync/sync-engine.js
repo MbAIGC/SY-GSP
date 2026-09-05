@@ -18,6 +18,9 @@ import { SyncError, SyncErrorCategory } from "./sync-error.js";
 import { SyncState, SyncMode, transition, finish } from "./sync-context.js";
 import { isNotebookConfPath, canonicalConfBytes, mergeConfBytes } from "../local/notebook-conf.js";
 
+/** 思源笔记本目录 id 形态: 14 位数字-字母数字 */
+const NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
+
 export class SyncEngine {
   /**
    * @param {object} deps {
@@ -601,14 +604,15 @@ export class SyncEngine {
         paths: [listed],
       });
     }
-    // 残留判定: 按路径段识别笔记本 id(兼容仓库根布局与 data/ 前缀布局两种形态)。
-    // 不在内核列表,或列表中标记已关闭 → 都按残留清理
+    // 残留判定: 按路径段识别笔记本 id(兼容仓库根布局与 data/ 前缀布局)。
+    // 第二段必须形如思源笔记本 id(14 位数字-字母数字)——data/.siyuan、
+    // data/storage 等工作区目录绝不误判(实证误伤: storage 内其他插件配置)。
     const isStray = (path) => {
       if (!registeredIds) return false;
       const segments = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
       let notebookId = null;
-      if (segments[0] === "data" && segments[1]) notebookId = segments[1];
-      else if (segments[0] && /^\d{14}-[a-z0-9]+$/i.test(segments[0])) notebookId = segments[0];
+      if (segments[0] === "data" && segments[1] && NOTEBOOK_ID_RE.test(segments[1])) notebookId = segments[1];
+      else if (segments[0] && NOTEBOOK_ID_RE.test(segments[0])) notebookId = segments[0];
       if (!notebookId) return false;
       return !registeredIds.has(notebookId) || registeredIds.get(notebookId) === true;
     };
