@@ -3863,27 +3863,30 @@ var SyncEngine = class {
       });
     }
     for (const app of confApplications) {
-      let applied = false;
+      await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
+      let readback = null;
       try {
         const confObj = JSON.parse(new TextDecoder().decode(app.mergedBytes));
         await this.contentAdapter.kernel.setNotebookConf(app.notebookId, confObj);
-        applied = true;
+        try {
+          const check = await this.contentAdapter.kernel.getNotebookConf(app.notebookId);
+          const conf = check && typeof check === "object" ? check.data || check : null;
+          readback = conf ? "name=" + (conf.name !== void 0 ? conf.name : "?") + ", icon=" + (typeof conf.icon === "string" && conf.icon ? conf.icon : "(空)") + ", closed=" + (conf.closed !== void 0 ? conf.closed : "?") : "回读为空";
+        } catch (err) {
+          readback = "回读失败: " + String(err && err.message || err);
+        }
         this._emit("engine:operation", {
           ctx,
           operation: "笔记本配置已应用到内核(setNotebookConf)",
           count: 1,
-          paths: [app.notebookId]
+          paths: [app.notebookId + " | 回读: " + readback]
         });
       } catch (err) {
-        if (err instanceof SyncError) throw err;
-      }
-      if (!applied) {
-        await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
         this._emit("engine:operation", {
           ctx,
-          operation: "笔记本配置已写盘(该端内核不支持 setNotebookConf,重启思源后生效)",
+          operation: "setNotebookConf 失败,已回退写盘(重启思源后生效)",
           count: 1,
-          paths: [app.path]
+          paths: [app.notebookId + " | " + String(err && err.message || err)]
         });
       }
     }

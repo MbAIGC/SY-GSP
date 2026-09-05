@@ -1241,31 +1241,38 @@ export class SyncEngine {
         paths: plan.skippedLargeDownloads.map((item) => item.path),
       });
     }
-    // conf.json 应用(整批下载完成后): 经内核 setNotebookConf 同时更新内存/磁盘/UI;
-    // 内核不支持或失败时回退 putFile 写盘并提示重启生效(兼容,不丢数据)
+    // conf.json 应用(整批下载完成后): 先写盘保证磁盘为合并后内容,再经内核
+    // setNotebookConf 应用到运行内核(内存+UI),并回读验证——内核返回成功但
+    // 实际未生效的情况(实证)必须可见
     for (const app of confApplications) {
-      let applied = false;
+      await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
+      let readback = null;
       try {
         const confObj = JSON.parse(new TextDecoder().decode(app.mergedBytes));
         await this.contentAdapter.kernel.setNotebookConf(app.notebookId, confObj);
-        applied = true;
+        try {
+          const check = await this.contentAdapter.kernel.getNotebookConf(app.notebookId);
+          const conf = check && typeof check === "object" ? (check.data || check) : null;
+          readback = conf
+            ? "name=" + (conf.name !== undefined ? conf.name : "?") +
+              ", icon=" + (typeof conf.icon === "string" && conf.icon ? conf.icon : "(空)") +
+              ", closed=" + (conf.closed !== undefined ? conf.closed : "?")
+            : "回读为空";
+        } catch (err) {
+          readback = "回读失败: " + String((err && err.message) || err);
+        }
         this._emit("engine:operation", {
           ctx,
           operation: "笔记本配置已应用到内核(setNotebookConf)",
           count: 1,
-          paths: [app.notebookId],
+          paths: [app.notebookId + " | 回读: " + readback],
         });
       } catch (err) {
-        if (err instanceof SyncError) throw err; // 网络/远端类错误照常上抛重试
-        // 内核不支持该 API: 回退写盘
-      }
-      if (!applied) {
-        await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
         this._emit("engine:operation", {
           ctx,
-          operation: "笔记本配置已写盘(该端内核不支持 setNotebookConf,重启思源后生效)",
+          operation: "setNotebookConf 失败,已回退写盘(重启思源后生效)",
           count: 1,
-          paths: [app.path],
+          paths: [app.notebookId + " | " + String((err && err.message) || err)],
         });
       }
     }
