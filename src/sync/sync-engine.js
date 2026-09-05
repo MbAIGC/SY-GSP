@@ -531,6 +531,20 @@ export class SyncEngine {
     }
   }
 
+  /** 本地磁盘上形如思源笔记本的目录(data/<id>,含未注册/已关闭的残留候选) */
+  async _collectLocalNotebookRoots() {
+    const roots = [];
+    try {
+      const entries = (await this.contentAdapter.kernel.readDir("data")) || [];
+      for (const entry of entries) {
+        if (NOTEBOOK_ID_RE.test(String(entry.name))) roots.push("data/" + entry.name);
+      }
+    } catch (err) {
+      // data 目录不可枚举: 放弃本地残留清理
+    }
+    return roots;
+  }
+
   /** 枚举本地目录下全部文件(不做忽略过滤)——残留目录整体清理用 */
   async _collectLocalFilesUnder(root) {
     const files = [];
@@ -592,8 +606,8 @@ export class SyncEngine {
     // UI 不显示)。这类残留若按磁盘扫描参与比对,会被判"未变化"——既不删远端
     // 也不清理本地,重建"成功"但远端多出的笔记本永远清不掉(用户实证场景)。
     // getNotebooks 不可用/失败/为空时不做残留清理,回退磁盘语义(宁可漏删不可误删)。
-    const registeredIds = keepLocal && rebuildRemote ? await this._kernelNotebooks() : null;
-    if (keepLocal && rebuildRemote) {
+    const registeredIds = rebuildRemote ? await this._kernelNotebooks() : null;
+    if (rebuildRemote) {
       const listed = registeredIds
         ? [...registeredIds].map(([id, closed]) => id + (closed ? "(已关闭)" : "")).join(", ")
         : "不可得(未做残留清理)";
@@ -741,6 +755,23 @@ export class SyncEngine {
       if (rebuildRemote && remoteWrites > 0) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localShas);
     } else {
       // 以远端为准: 仅本地侧变更,不产生远端写入
+      // 本地残留目录(不在内核列表/已关闭)一并清理,含被忽略文件(.siyuan/sort.json 等)
+      // ——扫描看不见它们,必须按内核枚举;与下载目标重叠的路径跳过(避免先写后删)
+      if (rebuildRemote && registeredIds) {
+        const localNotebookRoots = await this._collectLocalNotebookRoots();
+        const downloadPaths = new Set(plan.downloads.map((d) => d.path));
+        const strayPending = new Set(plan.deletionsLocal.map((d) => d.path));
+        for (const root of localNotebookRoots) {
+          const notebookId = root.split("/").pop();
+          if (registeredIds.has(notebookId) && registeredIds.get(notebookId) !== true) continue;
+          const strayFiles = (await this._collectLocalFilesUnder(root)).filter((p) => !downloadPaths.has(p) && !strayPending.has(p));
+          for (const p of strayFiles) {
+            plan.deletionsLocal.push({ path: p });
+            localShas.delete(p);
+            strayPending.add(p);
+          }
+        }
+      }
       const drifts = [];
       try {
         await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote, drifts, remoteEntries });

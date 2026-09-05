@@ -3167,6 +3167,18 @@ var SyncEngine = class {
       return null;
     }
   }
+  /** 本地磁盘上形如思源笔记本的目录(data/<id>,含未注册/已关闭的残留候选) */
+  async _collectLocalNotebookRoots() {
+    const roots = [];
+    try {
+      const entries = await this.contentAdapter.kernel.readDir("data") || [];
+      for (const entry of entries) {
+        if (NOTEBOOK_ID_RE2.test(String(entry.name))) roots.push("data/" + entry.name);
+      }
+    } catch (err) {
+    }
+    return roots;
+  }
   /** 枚举本地目录下全部文件(不做忽略过滤)——残留目录整体清理用 */
   async _collectLocalFilesUnder(root) {
     const files = [];
@@ -3225,8 +3237,8 @@ var SyncEngine = class {
     const remotePaths = new Set(remoteEntries.keys());
     transition(ctx, SyncState.MERGING);
     this._emit("engine:phase", { ctx, state: SyncState.MERGING });
-    const registeredIds = keepLocal && rebuildRemote ? await this._kernelNotebooks() : null;
-    if (keepLocal && rebuildRemote) {
+    const registeredIds = rebuildRemote ? await this._kernelNotebooks() : null;
+    if (rebuildRemote) {
       const listed = registeredIds ? [...registeredIds].map(([id, closed]) => id + (closed ? "(已关闭)" : "")).join(", ") : "不可得(未做残留清理)";
       this._emit("engine:operation", {
         ctx,
@@ -3360,6 +3372,21 @@ var SyncEngine = class {
       }
       if (rebuildRemote && remoteWrites > 0) await this._assertRemoteMatchesLocal(ctx, confirmedSha, localShas);
     } else {
+      if (rebuildRemote && registeredIds) {
+        const localNotebookRoots = await this._collectLocalNotebookRoots();
+        const downloadPaths = new Set(plan.downloads.map((d) => d.path));
+        const strayPending = new Set(plan.deletionsLocal.map((d) => d.path));
+        for (const root of localNotebookRoots) {
+          const notebookId = root.split("/").pop();
+          if (registeredIds.has(notebookId) && registeredIds.get(notebookId) !== true) continue;
+          const strayFiles = (await this._collectLocalFilesUnder(root)).filter((p) => !downloadPaths.has(p) && !strayPending.has(p));
+          for (const p of strayFiles) {
+            plan.deletionsLocal.push({ path: p });
+            localShas.delete(p);
+            strayPending.add(p);
+          }
+        }
+      }
       const drifts = [];
       try {
         await this._applyLocalChanges(ctx, plan, { allowRebuildOverwrite: rebuildRemote, drifts, remoteEntries });
@@ -6433,7 +6460,7 @@ function buildTopBarMenu({ q: q2, plugin, i18n, actions, conflictPaused }) {
     click: actions.startSync
   });
   menu.addItem({
-    label: actions.isAutoSyncPaused ? t.sygspMenuResumeAutoSync || "▶️ 恢复自动同步" : t.sygspMenuPauseAutoSync || "⏸️ 暂停自动同步",
+    label: actions.isAutoSyncPaused ? t.sygspMenuResumeAutoSync || "恢复同步" : t.sygspMenuPauseAutoSync || "暂停同步",
     icon: "iconSyncPause",
     click: actions.toggleAutoSyncPause
   });
@@ -7084,14 +7111,14 @@ var SyGspPlugin = class extends q.Plugin {
   _toggleAutoSyncPause() {
     if (this._autoSyncPaused === true) {
       this._autoSyncPaused = false;
-      this.logs.info("用户恢复自动同步");
+      this.logs.info("用户恢复同步");
       this._restartAutoSyncIfConfigured();
-      this.notification.toast("▶️ 自动同步已恢复", "info");
+      this.notification.toast("同步已恢复", "info");
     } else {
       this._autoSyncPaused = true;
       this._stopAutoSyncTimer();
-      this.logs.warn("用户暂停自动同步(手动同步不受影响)");
-      this.notification.toast("⏸️ 自动同步已暂停,可从菜单恢复", "info");
+      this.logs.warn("用户暂停同步(手动同步不受影响)");
+      this.notification.toast("同步已暂停,可从菜单恢复", "info");
     }
     if (this.controller) this.events.emit("state:changed", { state: this.controller.state });
   }

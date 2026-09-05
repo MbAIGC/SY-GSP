@@ -629,6 +629,29 @@ test("重建预览: 工作区目录(data/storage、data/.siyuan)绝不误判为�
   assert.equal(new Set(report.strayNotebookPaths).size, report.strayNotebookPaths.length, "路径去重");
 });
 
+test("重建'以远程为准': 本地残留目录(含被忽略文件)一并清理", async () => {
+  const a = D + "a.md";
+  // 本地有僵尸笔记本目录: conf.json(可见)+ sort.json(被忽略隐身)
+  const zombieConf = "data/20240101120006-zmb0888/.siyuan/conf.json";
+  const zombieSort = "data/20240101120006-zmb0888/.siyuan/sort.json";
+  const h = await makeHarness({
+    remoteFiles: { [a]: "remote a" },
+    localFiles: {
+      [a]: "local a",
+      [zombieConf]: JSON.stringify({ name: "僵尸" }),
+      [zombieSort]: "{}",
+    },
+  });
+  h.workspace.getNotebooks = async () => [{ id: "20240101120000-abc", closed: false }];
+  const result = await runQuiet(h, { trigger: "rebuild", mode: "remote_over_local" });
+  assert.equal(result.success, true);
+  assert.equal(result.downloads, 1, "远端文件正常下载");
+  assert.equal(result.deletionsLocal, 2, "本地残留目录整体清理(可见+被忽略): " + JSON.stringify(result));
+  assert.equal(await h.kernel.getFile(zombieConf), null, "僵尸 conf.json 已清理");
+  assert.equal(await h.kernel.getFile(zombieSort), null, "被忽略的 sort.json 也已清理");
+  assert.equal(await (await h.kernel.getFile(a)).text(), "remote a");
+});
+
 test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => {
   const kernel = makeFakeKernel({ "data/x/a.md": "hello" });
   const plugin = makeFakePlugin();

@@ -648,14 +648,14 @@ export default class SyGspPlugin extends q.Plugin {
   _toggleAutoSyncPause() {
     if (this._autoSyncPaused === true) {
       this._autoSyncPaused = false;
-      this.logs.info("用户恢复自动同步");
+      this.logs.info("用户恢复同步");
       this._restartAutoSyncIfConfigured();
-      this.notification.toast("▶️ 自动同步已恢复", "info");
+      this.notification.toast("同步已恢复", "info");
     } else {
       this._autoSyncPaused = true;
       this._stopAutoSyncTimer();
-      this.logs.warn("用户暂停自动同步(手动同步不受影响)");
-      this.notification.toast("⏸️ 自动同步已暂停,可从菜单恢复", "info");
+      this.logs.warn("用户暂停同步(手动同步不受影响)");
+      this.notification.toast("同步已暂停,可从菜单恢复", "info");
     }
     if (this.controller) this.events.emit("state:changed", { state: this.controller.state });
   }
