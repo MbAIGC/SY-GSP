@@ -16,33 +16,37 @@ export function isNotebookConfPath(path) {
 }
 
 /**
- * 字节 → 规范化字节(仅保留 name)。解析失败/无 name 返回 null,
- * 调用方回退整文件语义(不丢数据)。
+ * 字节 → 规范化字节(仅保留跨设备同步的字段: name + icon)。
+ * sort/closed 为设备本地状态,不参与比较——它们不同视为文件一致。
+ * 解析失败/无 name 返回 null,调用方回退整文件语义(不丢数据)。
  */
 export function canonicalConfBytes(bytes) {
   if (!bytes || bytes.length === 0) return null;
   try {
     const conf = JSON.parse(new TextDecoder().decode(bytes));
     if (!conf || typeof conf.name !== "string" || !conf.name) return null;
-    return new TextEncoder().encode(JSON.stringify({ name: conf.name }));
+    const canonical = { name: conf.name };
+    if (typeof conf.icon === "string" && conf.icon) canonical.icon = conf.icon;
+    return new TextEncoder().encode(JSON.stringify(canonical));
   } catch (err) {
     return null;
   }
 }
 
 /**
- * 下载合并: 名称取远端,sort/closed 等设备本地状态一律保留本地;
- * 本地缺失/解析失败时返回远端内容(新设备/重建恢复笔记本名称)。
+ * 下载合并: 名称与图标取远端(有则采用),sort/closed 等设备本地状态一律保留本地;
+ * 本地缺失/解析失败时返回远端内容(新设备/重建恢复笔记本名称与图标)。
  * 远端内容解析不出 name 时回退远端原文。
  */
 export function mergeConfBytes(localBytes, remoteBytes) {
   const remoteCanonical = canonicalConfBytes(remoteBytes);
   if (!remoteCanonical) return remoteBytes || null;
-  const remoteName = JSON.parse(new TextDecoder().decode(remoteCanonical)).name;
+  const remote = JSON.parse(new TextDecoder().decode(remoteCanonical));
   if (!localBytes || localBytes.length === 0) return remoteBytes; // 本地缺失: 恢复远端全量
   try {
     const local = JSON.parse(new TextDecoder().decode(localBytes));
-    const merged = Object.assign({}, local, { name: remoteName });
+    const merged = Object.assign({}, local, { name: remote.name });
+    if (typeof remote.icon === "string" && remote.icon) merged.icon = remote.icon;
     return new TextEncoder().encode(JSON.stringify(merged));
   } catch (err) {
     return remoteCanonical;

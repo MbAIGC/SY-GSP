@@ -1432,7 +1432,9 @@ function canonicalConfBytes(bytes) {
   try {
     const conf = JSON.parse(new TextDecoder().decode(bytes));
     if (!conf || typeof conf.name !== "string" || !conf.name) return null;
-    return new TextEncoder().encode(JSON.stringify({ name: conf.name }));
+    const canonical = { name: conf.name };
+    if (typeof conf.icon === "string" && conf.icon) canonical.icon = conf.icon;
+    return new TextEncoder().encode(JSON.stringify(canonical));
   } catch (err) {
     return null;
   }
@@ -1440,11 +1442,12 @@ function canonicalConfBytes(bytes) {
 function mergeConfBytes(localBytes, remoteBytes) {
   const remoteCanonical = canonicalConfBytes(remoteBytes);
   if (!remoteCanonical) return remoteBytes || null;
-  const remoteName = JSON.parse(new TextDecoder().decode(remoteCanonical)).name;
+  const remote = JSON.parse(new TextDecoder().decode(remoteCanonical));
   if (!localBytes || localBytes.length === 0) return remoteBytes;
   try {
     const local = JSON.parse(new TextDecoder().decode(localBytes));
-    const merged = Object.assign({}, local, { name: remoteName });
+    const merged = Object.assign({}, local, { name: remote.name });
+    if (typeof remote.icon === "string" && remote.icon) merged.icon = remote.icon;
     return new TextEncoder().encode(JSON.stringify(merged));
   } catch (err) {
     return remoteCanonical;

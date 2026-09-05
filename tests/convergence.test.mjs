@@ -478,23 +478,27 @@ test("conf.json 同步语义: 仅 name 参与,sort/closed 差异视为一致,不
   assert.equal(r4.uploads + r4.downloads, 0, "合并后应收敛: " + JSON.stringify(r4));
 });
 
-test("conf.json 规范化: canonical 只含 name,合并保留本地设备状态", () => {
-  const confBytes = enc(JSON.stringify({ name: "笔记A", sort: { a: 1 }, closed: {} }));
+test("conf.json 规范化: name/icon 参与,sort/closed 差异视为一致,合并保留本地设备状态", () => {
+  const confBytes = enc(JSON.stringify({ name: "笔记A", icon: "1f5cf", sort: { a: 1 }, closed: {} }));
   const canonical = canonicalConfBytes(confBytes);
-  assert.equal(new TextDecoder().decode(canonical), JSON.stringify({ name: "笔记A" }), "规范化只保留 name——sort/closed 差异视为一致");
+  assert.equal(new TextDecoder().decode(canonical), JSON.stringify({ name: "笔记A", icon: "1f5cf" }), "规范化保留 name+icon——sort/closed 差异视为一致");
   // 只有 sort/closed 不同 → canonical 相同 → 视为一致
-  const variant = enc(JSON.stringify({ name: "笔记A", sort: 7, closed: { n: true } }));
+  const variant = enc(JSON.stringify({ name: "笔记A", icon: "1f5cf", sort: 7, closed: { n: true } }));
   assert.deepEqual(canonicalConfBytes(variant), canonical);
+  // icon 变化 → canonical 不同 → 产生同步信号(跟随用户设置)
+  const iconChanged = enc(JSON.stringify({ name: "笔记A", icon: "2b50", sort: { a: 1 } }));
+  assert.notDeepEqual(canonicalConfBytes(iconChanged), canonical);
   // 无 name/解析失败 → 回退整文件语义
   assert.equal(canonicalConfBytes(enc('{"closed":{}}')), null);
   assert.equal(canonicalConfBytes(enc("not json")), null);
-  // 合并: name 取远端,其余保留本地;本地缺失时恢复远端
-  const merged = mergeConfBytes(confBytes, enc(JSON.stringify({ name: "远端名", sort: {} })));
+  // 合并: name/icon 取远端,其余保留本地;本地缺失时恢复远端
+  const merged = mergeConfBytes(confBytes, enc(JSON.stringify({ name: "远端名", icon: "2b50", sort: {} })));
   const obj = JSON.parse(new TextDecoder().decode(merged));
   assert.equal(obj.name, "远端名");
+  assert.equal(obj.icon, "2b50", "图标取远端");
   assert.deepEqual(obj.sort, { a: 1 }, "本地设备状态保留");
   const fromRemote = mergeConfBytes(null, enc(JSON.stringify({ name: "远端名", sort: 5 })));
-  assert.equal(new TextDecoder().decode(fromRemote), JSON.stringify({ name: "远端名", sort: 5 }), "本地缺失恢复远端全量");  // 路径判定
+  assert.equal(new TextDecoder().decode(fromRemote), JSON.stringify({ name: "远端名", sort: 5 }), "本地缺失恢复远端全量"); // 路径判定
   assert.ok(isNotebookConfPath("data/20260902191353-9549go4/.siyuan/conf.json"));
   assert.ok(!isNotebookConfPath("data/20260902191353-9549go4/.siyuan/sort.json"));
 });
