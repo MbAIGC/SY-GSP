@@ -191,9 +191,11 @@ function renderTable(n, ctx, indent) {
   return out;
 }
 
-/** 整文档渲染: 顶层块各自成段(块内行用换行连接),块与块之间空行分隔 */
+/** 整文档渲染: 首行为文档标题(Properties.title,用户定稿),随后顶层块各自成段 */
 export function renderDocument(doc, ctx = {}) {
-  return (doc.Children || [])
+  const title = doc && doc.Properties && typeof doc.Properties.title === "string" ? doc.Properties.title.trim() : "";
+  const head = title ? "# " + title + "\n\n" : "";
+  return head + (doc.Children || [])
     .map((n) => renderBlock(n, ctx, 0).join("\n"))
     .join("\n\n") + "\n";
 }

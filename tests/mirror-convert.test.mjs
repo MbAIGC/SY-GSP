@@ -19,6 +19,7 @@ const fixtureDoc = JSON.parse(
 
 test("真实样本转换: 标题/代码块(base64 语言)/公式/表格/任务列表/引用全部落位", () => {
   const md = renderDocument(fixtureDoc);
+  assert.match(md, /^# 这是一个Github同步的测试文档\n/m, "首行为文档标题");
   assert.match(md, /^# 欢迎使用 `Arya`/m, "一级标题+行内 code(标题后跟零宽字符,宽松匹配)");
   assert.match(md, /```js\n\/\/ 给页面里所有的 DOM 元素添加一个 1px 的描边（outline）;/m, "CodeBlockInfo base64(anM=→js) 与代码内容");
   assert.match(md, /\$\$\nE=mc\^2\n\$\$/m, "公式块");
