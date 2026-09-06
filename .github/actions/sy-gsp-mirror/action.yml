@@ -1,0 +1,24 @@
+name: 'SY-GSP 阅读镜像'
+description: '把仓库内思源 .sy 转换为 Markdown 阅读镜像(只写 <笔记本名>/**、Mirror-Index.md 与 Mirror-Errors.md,绝不触碰数据面与 .sy-gsp 控制面)'
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - id: build
+      run: node "${{ github.action_path }}/main.mjs" "${{ github.workspace }}"
+      shell: bash
+    - id: changed
+      run: |
+        if [ -n "$(git status --porcelain)" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+      shell: bash
+    - name: 提交镜像
+      if: steps.changed.outputs.changed == 'true'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -A
+        git commit -m "mirror: 源提交 ${{ github.sha }}"
+        git push
+      shell: bash
