@@ -4,7 +4,7 @@
 SY-GSP 是一款思源笔记 GitHub 同步插件，基于「同步引擎 2.0」方案以全新可读源码完整重写：三方合并、冲突中心、确认基准跟踪，全程不伪造成功。
 
 > 本插件的前身是 SGSP（Fork 自 [xstarling/sy-git-sync-plugin](https://github.com/xstarling/sy-git-sync-plugin) v0.3.0）。SY-GSP 为全新实现，旧版源码归档于仓库内 `SGSP-V1/` 目录，仅作历史参考。
-> 重写依据见 [docs/SGSP同步引擎2.0可落地实施方案.md](./docs/SGSP同步引擎2.0可落地实施方案.md)。
+> 重写依据见 [docs/V1/SGSP同步引擎2.0可落地实施方案.md](./docs/V1/SGSP同步引擎2.0可落地实施方案.md)。
 - **纯Vibe-Coing产物！！！ - 主要感谢 GLM-5.3-Flash**
 - **截止到v0.1.66版基本功能实现V1阶段，目前token花费月费：5.4亿**
 - 其中代码：GPT-5.6-Terra：126M，GLM-5.3-Flash，91.7M + 60M + 100M + 150M + 5M + 5M = 411.7M。

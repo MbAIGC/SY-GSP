@@ -6,6 +6,18 @@ SY-GSP is a SiYuan note plugin that syncs notes with GitHub repositories. It is 
 
 > The predecessor of this plugin was SGSP (forked from [xstarling/sy-git-sync-plugin](https://github.com/xstarling/sy-git-sync-plugin) v0.3.0). SY-GSP is a brand-new implementation; the legacy source is archived under `SGSP-V1/` in this repository for reference only.
 
+- **Pure Vibe-Coding product!!! - Main thanks to GLM-5.3-Flash**
+- As of v0.1.66, core V1 features are complete. Token cost so far: 540M
+- Code: GPT-5.6-Terra 126M, GLM-5.3-Flash 91.7M + 60M + 100M + 150M + 5M + 5M = 411.7M
+- Feature discussion / review: ChatGPT (some), DeepSeek-v4-flash (some), GLM-5.3: 3M
+
+## V2 - Planned features
+
+- **Use GitHub Actions to convert .sy on GitHub into Markdown, preserving the directory structure**
+- **Support second-level directories in the GitHub repo instead of storing everything under repo/data**
+- **Force-deleted notebooks/notes will not come back on the next sync**
+- **Plugin auto-update**
+
 ## Highlights
 
 - **Three-way merge**: local and remote changes are merged against the confirmed base (BASE). Non-overlapping edits merge automatically; overlapping conflicts go to the conflict center and are never silently overwritten.
