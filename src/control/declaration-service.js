@@ -11,13 +11,13 @@
  * - 声明不因单设备改配置/离开而删除,V1 不做声明 GC。
  */
 
-import { CONTROL_DIR } from "./control-plane.js";
+import { CONTROL_DIR, controlDirOf } from "./control-plane.js";
 import { parseControlFile, serializeControlFile } from "./control-plane.js";
 
 export const DECLARATION_SUFFIX = "-remoteRoot.json";
-/** 声明文件名: .sy-gsp/<device-token>-remoteRoot.json */
+/** 声明文件识别(任意深度的 .sy-gsp/ 目录: 兼容旧协议仓库根位置与协议 v2 空间内位置) */
 export const DECLARATION_RE = new RegExp(
-  "^" + CONTROL_DIR.replace(/\./g, "\\.") + "\\/([a-z0-9-]+)" + DECLARATION_SUFFIX.replace(/\./g, "\\.") + "$"
+  "(?:^|/)" + CONTROL_DIR.replace(/\./g, "\\.") + "\\/([a-z0-9-]+)" + DECLARATION_SUFFIX.replace(/\./g, "\\.") + "$"
 );
 
 /**
@@ -112,6 +112,7 @@ export class DeclarationService {
   /**
    * 本端是否需要创建声明条目(用户选择了尚未被任何声明指向的空间)。
    * 已声明 → null(直接复用,不创建新文件);默认根目录 → null(无需声明)。
+   * 声明写入本空间的控制面目录 <remoteRoot>/.sy-gsp/(协议 v2)。
    * @returns {Promise<{path:string, sha:string, mode:string}|null>}
    */
   async pendingEntry({ space, controlFiles, createBlob }) {
@@ -119,11 +120,13 @@ export class DeclarationService {
     const existing = await this.discover(controlFiles, (sha) => this.provider.getBlob(sha));
     if (existing.some((d) => d.healthy && d.space === space)) return null;
     const deviceToken = normalizeDeviceName(this.getDeviceName());
-    let path = CONTROL_DIR + "/" + deviceToken + DECLARATION_SUFFIX;
-    // 同名文件已被其他空间占用(设备改名/切换空间): 文件名追加空间短哈希区分,
+    const controlDir = controlDirOf(space);
+    const baseOf = (p) => p.slice(p.lastIndexOf("/") + 1);
+    let path = controlDir + "/" + deviceToken + DECLARATION_SUFFIX;
+    // 同名文件已被其他空间占用(设备改名/切换空间的场景): 文件名追加空间短哈希区分,
     // 已有声明绝不覆盖——声明者不是 owner,其他设备可能仍在使用
-    const occupied = existing.find((d) => d.file === path);
-    if (occupied) path = CONTROL_DIR + "/" + deviceToken + "-" + shortHash(space) + DECLARATION_SUFFIX;
+    const occupied = existing.find((d) => baseOf(d.file) === deviceToken + DECLARATION_SUFFIX);
+    if (occupied) path = controlDir + "/" + deviceToken + "-" + shortHash(space) + DECLARATION_SUFFIX;
     const bytes = serializeControlFile({ schemaVersion: 1, remoteRoot: space });
     const sha = await createBlob(bytes);
     return { path, sha, mode: "100644" };

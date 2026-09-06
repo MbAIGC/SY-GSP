@@ -93,13 +93,21 @@ export function toLocalPath(remotePath, remoteRoot) {
 }
 
 /**
- * 远端树条目分类: 控制面(.sy-gsp/**,恒在仓库根,不随 remoteRoot 变)、
+ * 控制面识别(协议 v2): 路径任意一段为 .sy-gsp 即控制面——同时覆盖
+ * 仓库根位置(默认根空间与旧协议 v1)与 <remoteRoot>/.sy-gsp(空间内)。
+ */
+export function isControlPlanePath(remotePath) {
+  return String(remotePath == null ? "" : remotePath).split("/").indexOf(CONTROL_DIR) >= 0;
+}
+
+/**
+ * 远端树条目分类: 控制面(.sy-gsp/**,协议 v2 起随空间走)、
  * 当前空间数据面、其他(其他空间/仓库级杂项文件)。
  * @returns {{kind:"control"}|{kind:"data", localPath:string}|{kind:"other"}}
  */
 export function classifyRemotePath(remotePath, remoteRoot) {
   const p = String(remotePath == null ? "" : remotePath);
-  if (p === CONTROL_DIR || p.startsWith(CONTROL_DIR + "/")) return { kind: "control" };
+  if (isControlPlanePath(p)) return { kind: "control" };
   const local = toLocalPath(p, remoteRoot);
   if (local === null) return { kind: "other" };
   return { kind: "data", localPath: local };

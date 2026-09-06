@@ -19,11 +19,13 @@ import { SyncState, SyncMode, transition, finish } from "./sync-context.js";
 import { isNotebookConfPath, canonicalConfBytes, mergeConfBytes, confNotebookId, preserveRemoteIcon } from "../local/notebook-conf.js";
 import { validateRemoteRoot, toRemotePath, splitRemoteTree } from "./remote-root.js";
 import {
-  CONTROL_SCHEMA_PATH,
+  CONTROL_DIR,
   CONTROL_SCHEMA_VERSION,
+  controlDirOf,
+  parseControlFile,
   serializeControlFile,
 } from "../control/control-plane.js";
-import { CATALOG_PATH } from "../control/catalog-service.js";
+import { LEGACY_CATALOG_PATH, catalogPathFor } from "../control/catalog-service.js";
 
 /** 思源笔记本目录 id 形态: 14 位数字-字母数字 */
 const NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
@@ -1202,23 +1204,32 @@ export class SyncEngine {
   }
 
   /**
-   * 收集本轮待提交的控制面条目(remoteRoot 声明/文档层级清单/schema 引导)。
+   * 收集本轮待提交的控制面条目(remoteRoot 声明/文档层级清单/协议版本/旧位置迁移)。
    * 控制面失败不阻断数据同步,但必须可见: 记入运行日志,下一轮自动重试。
-   * @param {Map<string, {sha,size}>} controlFiles 远端控制面文件清单(.sy-gsp/**)
+   * 协议 v2: 控制面位于 <remoteRoot>/.sy-gsp;旧协议(仓库根 .sy-gsp)文件在
+   * 命名空间下产生"新位置写入 + 旧位置删除"条目,与数据变更同批原子迁移。
+   * @param {Map<string, {sha,size}>} controlFiles 远端控制面文件清单(任意 .sy-gsp 段)
    * @returns {Promise<Array<{path:string, sha:string, mode:string}>>}
    */
   async _takeControlPlaneEntries(ctx, { controlFiles }) {
     if (!this.controlPlane) return [];
     const files = controlFiles || new Map();
-    const entries = [];
+    const space = this.config.remoteRoot || "";
+    const controlDir = controlDirOf(space);
+    // 旧协议位置(仓库根): 仅命名空间下与新位置不同,需要迁移
+    const legacyDir = space ? CONTROL_DIR : null;
     const createBlob = (bytes) => this.provider.createBlob(bytes);
+    /** @type {Map<string, {path:string, sha:string, mode:string}>} 按路径去重(写入/删除互不冲突) */
+    const byPath = new Map();
+    const legacyDeletes = [];
+
     try {
       const declaration = await this.controlPlane.declaration.pendingEntry({
-        space: this.config.remoteRoot || "",
+        space,
         controlFiles: files,
         createBlob,
       });
-      if (declaration) entries.push(declaration);
+      if (declaration) byPath.set(declaration.path, declaration);
     } catch (err) {
       this._emit("engine:operation", {
         ctx,
@@ -1229,12 +1240,12 @@ export class SyncEngine {
     }
     try {
       const catalog = await this.controlPlane.catalog.pendingEntry({
-        space: this.config.remoteRoot || "",
-        remoteEntry: files.get(CATALOG_PATH) || null,
+        space,
+        remoteEntry: files.get(catalogPathFor(space)) || files.get(LEGACY_CATALOG_PATH) || null,
         readBlob: (sha) => this.provider.getBlob(sha),
         createBlob,
       });
-      if (catalog) entries.push(catalog);
+      if (catalog) byPath.set(catalog.path, catalog);
     } catch (err) {
       this._emit("engine:operation", {
         ctx,
@@ -1243,15 +1254,46 @@ export class SyncEngine {
         paths: [],
       });
     }
-    if (entries.length > 0 && !files.has(CONTROL_SCHEMA_PATH)) {
-      // 首次写入控制面时补齐协议版本文件(幂等,已有则跳过)
-      entries.unshift({
-        path: CONTROL_SCHEMA_PATH,
-        sha: await createBlob(serializeControlFile({ schemaVersion: CONTROL_SCHEMA_VERSION })),
-        mode: "100644",
-      });
+
+    // 旧协议位置迁移: 根级 .sy-gsp/** 原样搬入 <空间>/.sy-gsp(同一批原子提交)。
+    // 新位置已有同名文件(新内容条目或已迁移)时以新位置为准,仅清理旧位置。
+    if (legacyDir) {
+      for (const legacyPath of files.keys()) {
+        if (!legacyPath.startsWith(legacyDir + "/")) continue;
+        const newPath = controlDir + "/" + legacyPath.slice(legacyDir.length + 1);
+        if (newPath === legacyPath) continue;
+        if (!byPath.has(newPath) && !files.has(newPath)) {
+          byPath.set(newPath, { path: newPath, sha: files.get(legacyPath).sha, mode: "100644" });
+        }
+        legacyDeletes.push(legacyPath);
+      }
     }
-    return entries;
+
+    // 协议版本引导: 有任何控制面写入(含迁移)时,保证新位置 schema.json 为当前协议版本;
+    // 迁移搬运的 v1 schema 由这里覆盖重写(设置在迁移条目之后,后者被覆盖)
+    if (byPath.size > 0) {
+      const schemaPath = controlDir + "/schema.json";
+      const current = files.get(schemaPath) || (legacyDir ? files.get(legacyDir + "/schema.json") : null);
+      let currentVersion = null;
+      if (current) {
+        try {
+          const parsed = parseControlFile((await this.provider.getBlob(current.sha)).bytes);
+          if (parsed.ok) currentVersion = Number(parsed.data.schemaVersion);
+        } catch (err) {
+          currentVersion = null; // 读取失败按需重写,下轮可见
+        }
+      }
+      if (currentVersion !== CONTROL_SCHEMA_VERSION) {
+        byPath.set(schemaPath, {
+          path: schemaPath,
+          sha: await createBlob(serializeControlFile({ schemaVersion: CONTROL_SCHEMA_VERSION })),
+          mode: "100644",
+        });
+      }
+    }
+
+    for (const legacyPath of legacyDeletes) byPath.set(legacyPath, { path: legacyPath, sha: null, mode: "100644" });
+    return [...byPath.values()];
   }
 
   /**

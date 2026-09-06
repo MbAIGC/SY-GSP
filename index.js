@@ -2314,7 +2314,11 @@ var ConflictService = class {
 // src/control/control-plane.js
 var CONTROL_DIR = ".sy-gsp";
 var CONTROL_SCHEMA_PATH = CONTROL_DIR + "/schema.json";
-var CONTROL_SCHEMA_VERSION = 1;
+var CONTROL_SCHEMA_VERSION = 2;
+function controlDirOf(remoteRoot) {
+  const root = String(remoteRoot == null ? "" : remoteRoot).trim();
+  return root ? root + "/" + CONTROL_DIR : CONTROL_DIR;
+}
 function parseControlFile(bytes) {
   if (!bytes || bytes.length === 0) return { ok: false, reason: "内容为空" };
   let data;
@@ -2397,9 +2401,12 @@ function toLocalPath(remotePath, remoteRoot) {
   if (!rest.startsWith("data/")) return null;
   return rest;
 }
+function isControlPlanePath(remotePath) {
+  return String(remotePath == null ? "" : remotePath).split("/").indexOf(CONTROL_DIR) >= 0;
+}
 function classifyRemotePath(remotePath, remoteRoot) {
   const p = String(remotePath == null ? "" : remotePath);
-  if (p === CONTROL_DIR || p.startsWith(CONTROL_DIR + "/")) return { kind: "control" };
+  if (isControlPlanePath(p)) return { kind: "control" };
   const local = toLocalPath(p, remoteRoot);
   if (local === null) return { kind: "other" };
   return { kind: "data", localPath: local };
@@ -2902,7 +2909,10 @@ function finish(ctx, { state, result, error }) {
 }
 
 // src/control/catalog-service.js
-var CATALOG_PATH = CONTROL_DIR + "/catalog.v1.json";
+var LEGACY_CATALOG_PATH = CONTROL_DIR + "/catalog.v1.json";
+function catalogPathFor(remoteRoot) {
+  return controlDirOf(remoteRoot) + "/catalog.v1.json";
+}
 var CatalogService = class {
   /**
    * @param {object} deps {kernel, getNotebooks: async () => [{id,name,closed?}]}
@@ -2978,7 +2988,7 @@ var CatalogService = class {
       spaces
     });
     const sha = await createBlob(bytes);
-    return { path: CATALOG_PATH, sha, mode: "100644" };
+    return { path: catalogPathFor(space), sha, mode: "100644" };
   }
 };
 
@@ -4013,23 +4023,29 @@ var SyncEngine = class {
     return { finalSha, baseSha };
   }
   /**
-   * 收集本轮待提交的控制面条目(remoteRoot 声明/文档层级清单/schema 引导)。
+   * 收集本轮待提交的控制面条目(remoteRoot 声明/文档层级清单/协议版本/旧位置迁移)。
    * 控制面失败不阻断数据同步,但必须可见: 记入运行日志,下一轮自动重试。
-   * @param {Map<string, {sha,size}>} controlFiles 远端控制面文件清单(.sy-gsp/**)
+   * 协议 v2: 控制面位于 <remoteRoot>/.sy-gsp;旧协议(仓库根 .sy-gsp)文件在
+   * 命名空间下产生"新位置写入 + 旧位置删除"条目,与数据变更同批原子迁移。
+   * @param {Map<string, {sha,size}>} controlFiles 远端控制面文件清单(任意 .sy-gsp 段)
    * @returns {Promise<Array<{path:string, sha:string, mode:string}>>}
    */
   async _takeControlPlaneEntries(ctx, { controlFiles }) {
     if (!this.controlPlane) return [];
     const files = controlFiles || /* @__PURE__ */ new Map();
-    const entries = [];
+    const space = this.config.remoteRoot || "";
+    const controlDir = controlDirOf(space);
+    const legacyDir = space ? CONTROL_DIR : null;
     const createBlob = (bytes) => this.provider.createBlob(bytes);
+    const byPath = /* @__PURE__ */ new Map();
+    const legacyDeletes = [];
     try {
       const declaration = await this.controlPlane.declaration.pendingEntry({
-        space: this.config.remoteRoot || "",
+        space,
         controlFiles: files,
         createBlob
       });
-      if (declaration) entries.push(declaration);
+      if (declaration) byPath.set(declaration.path, declaration);
     } catch (err) {
       this._emit("engine:operation", {
         ctx,
@@ -4040,12 +4056,12 @@ var SyncEngine = class {
     }
     try {
       const catalog = await this.controlPlane.catalog.pendingEntry({
-        space: this.config.remoteRoot || "",
-        remoteEntry: files.get(CATALOG_PATH) || null,
+        space,
+        remoteEntry: files.get(catalogPathFor(space)) || files.get(LEGACY_CATALOG_PATH) || null,
         readBlob: (sha) => this.provider.getBlob(sha),
         createBlob
       });
-      if (catalog) entries.push(catalog);
+      if (catalog) byPath.set(catalog.path, catalog);
     } catch (err) {
       this._emit("engine:operation", {
         ctx,
@@ -4054,14 +4070,39 @@ var SyncEngine = class {
         paths: []
       });
     }
-    if (entries.length > 0 && !files.has(CONTROL_SCHEMA_PATH)) {
-      entries.unshift({
-        path: CONTROL_SCHEMA_PATH,
-        sha: await createBlob(serializeControlFile({ schemaVersion: CONTROL_SCHEMA_VERSION })),
-        mode: "100644"
-      });
+    if (legacyDir) {
+      for (const legacyPath of files.keys()) {
+        if (!legacyPath.startsWith(legacyDir + "/")) continue;
+        const newPath = controlDir + "/" + legacyPath.slice(legacyDir.length + 1);
+        if (newPath === legacyPath) continue;
+        if (!byPath.has(newPath) && !files.has(newPath)) {
+          byPath.set(newPath, { path: newPath, sha: files.get(legacyPath).sha, mode: "100644" });
+        }
+        legacyDeletes.push(legacyPath);
+      }
     }
-    return entries;
+    if (byPath.size > 0) {
+      const schemaPath = controlDir + "/schema.json";
+      const current = files.get(schemaPath) || (legacyDir ? files.get(legacyDir + "/schema.json") : null);
+      let currentVersion = null;
+      if (current) {
+        try {
+          const parsed = parseControlFile((await this.provider.getBlob(current.sha)).bytes);
+          if (parsed.ok) currentVersion = Number(parsed.data.schemaVersion);
+        } catch (err) {
+          currentVersion = null;
+        }
+      }
+      if (currentVersion !== CONTROL_SCHEMA_VERSION) {
+        byPath.set(schemaPath, {
+          path: schemaPath,
+          sha: await createBlob(serializeControlFile({ schemaVersion: CONTROL_SCHEMA_VERSION })),
+          mode: "100644"
+        });
+      }
+    }
+    for (const legacyPath of legacyDeletes) byPath.set(legacyPath, { path: legacyPath, sha: null, mode: "100644" });
+    return [...byPath.values()];
   }
   /**
    * 无数据写入轮的控制面独立提交: 仅有控制面变化时发生,返回确认后的提交 sha
@@ -5122,7 +5163,7 @@ function parseRepoAddress(addr) {
 // src/control/declaration-service.js
 var DECLARATION_SUFFIX = "-remoteRoot.json";
 var DECLARATION_RE = new RegExp(
-  "^" + CONTROL_DIR.replace(/\./g, "\\.") + "\\/([a-z0-9-]+)" + DECLARATION_SUFFIX.replace(/\./g, "\\.") + "$"
+  "(?:^|/)" + CONTROL_DIR.replace(/\./g, "\\.") + "\\/([a-z0-9-]+)" + DECLARATION_SUFFIX.replace(/\./g, "\\.") + "$"
 );
 function normalizeDeviceName(raw) {
   const s = String(raw == null ? "" : raw).trim();
@@ -5198,6 +5239,7 @@ var DeclarationService = class {
   /**
    * 本端是否需要创建声明条目(用户选择了尚未被任何声明指向的空间)。
    * 已声明 → null(直接复用,不创建新文件);默认根目录 → null(无需声明)。
+   * 声明写入本空间的控制面目录 <remoteRoot>/.sy-gsp/(协议 v2)。
    * @returns {Promise<{path:string, sha:string, mode:string}|null>}
    */
   async pendingEntry({ space, controlFiles, createBlob }) {
@@ -5205,9 +5247,11 @@ var DeclarationService = class {
     const existing = await this.discover(controlFiles, (sha2) => this.provider.getBlob(sha2));
     if (existing.some((d) => d.healthy && d.space === space)) return null;
     const deviceToken = normalizeDeviceName(this.getDeviceName());
-    let path = CONTROL_DIR + "/" + deviceToken + DECLARATION_SUFFIX;
-    const occupied = existing.find((d) => d.file === path);
-    if (occupied) path = CONTROL_DIR + "/" + deviceToken + "-" + shortHash(space) + DECLARATION_SUFFIX;
+    const controlDir = controlDirOf(space);
+    const baseOf = (p) => p.slice(p.lastIndexOf("/") + 1);
+    let path = controlDir + "/" + deviceToken + DECLARATION_SUFFIX;
+    const occupied = existing.find((d) => baseOf(d.file) === deviceToken + DECLARATION_SUFFIX);
+    if (occupied) path = controlDir + "/" + deviceToken + "-" + shortHash(space) + DECLARATION_SUFFIX;
     const bytes = serializeControlFile({ schemaVersion: 1, remoteRoot: space });
     const sha = await createBlob(bytes);
     return { path, sha, mode: "100644" };

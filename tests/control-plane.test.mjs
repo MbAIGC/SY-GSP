@@ -21,7 +21,7 @@ import {
   normalizeDeviceName,
   shortHash,
 } from "../src/control/declaration-service.js";
-import { CatalogService, CATALOG_PATH } from "../src/control/catalog-service.js";
+import { CatalogService, catalogPathFor } from "../src/control/catalog-service.js";
 import { GitProvider } from "../src/git/git-provider.js";
 import { makeFakeKernel } from "./helpers.mjs";
 
@@ -46,9 +46,10 @@ test("控制面序列化: 键序稳定,同一逻辑内容逐字节一致", () =>
 });
 
 test("声明文件名识别与设备名规范化(GLM 3.3)", () => {
-  assert.ok(DECLARATION_RE.test(".sy-gsp/nas-remoteRoot.json"));
+  assert.ok(DECLARATION_RE.test(".sy-gsp/nas-remoteRoot.json"), "旧协议根级位置仍可识别(迁移兼容)");
+  assert.ok(DECLARATION_RE.test("SYNote/.sy-gsp/nas-remoteRoot.json"), "协议 v2 空间内位置");
   assert.ok(!DECLARATION_RE.test(".sy-gsp/nas-other.json"));
-  assert.equal(DECLARATION_RE.exec(".sy-gsp/android-01-remoteRoot.json")[1], "android-01");
+  assert.equal(DECLARATION_RE.exec("SYNote/.sy-gsp/android-01-remoteRoot.json")[1], "android-01");
   assert.equal(normalizeDeviceName("NAS"), "nas");
   assert.equal(normalizeDeviceName("Android-01"), "android-01");
   assert.equal(normalizeDeviceName("My PC"), "my-pc");
@@ -90,7 +91,7 @@ test("声明服务: 未声明的空间创建条目,已声明空间复用不创�
 
   const entry = await service.pendingEntry({ space: "A-Note", controlFiles: stub.files, createBlob: stub.createBlob });
   assert.ok(entry, "未声明 → 产出条目");
-  assert.equal(entry.path, ".sy-gsp/nas-remoteRoot.json");
+  assert.equal(entry.path, "A-Note/.sy-gsp/nas-remoteRoot.json", "声明写入空间内控制面目录(协议 v2)");
   const parsed = parseControlFile(stub.created[0].bytes);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.data.remoteRoot, "A-Note");
@@ -106,13 +107,14 @@ test("声明服务: 默认根目录不声明;同名文件被其他空间占用�
   const service = new DeclarationService({ provider: stub.provider, getDeviceName: () => "NAS" });
   assert.equal(await service.pendingEntry({ space: "", controlFiles: stub.files, createBlob: stub.createBlob }), null);
 
-  // nas-remoteRoot.json 已存在但声明的是 Mobile(设备改名后切换空间的场景)
+  // nas-remoteRoot.json 已存在但声明的是 Mobile(设备改名后切换空间的场景):
+  // 即使还在旧协议根级位置,同名占用也必须触发避让
   const bytes = serializeControlFile({ schemaVersion: 1, remoteRoot: "Mobile" });
   const sha = await stub.createBlob(bytes);
   stub.files.set(".sy-gsp/nas-remoteRoot.json", { sha, size: bytes.length });
   const entry = await service.pendingEntry({ space: "A-Note", controlFiles: stub.files, createBlob: stub.createBlob });
   assert.ok(entry, "A-Note 尚无声明 → 仍需创建");
-  assert.equal(entry.path, ".sy-gsp/nas-" + shortHash("A-Note") + "-remoteRoot.json", "同名文件避让");
+  assert.equal(entry.path, "A-Note/.sy-gsp/nas-" + shortHash("A-Note") + "-remoteRoot.json", "同名文件避让(按文件名,不限层级)");
   assert.equal(await service.pendingEntry({ space: "Mobile", controlFiles: stub.files, createBlob: stub.createBlob }), null, "Mobile 已声明");
 });
 
@@ -179,12 +181,12 @@ test("层级清单: 漂移检测与节级合并(其他空间保留)", async () =
 
   const entry1 = await service.pendingEntry({ space: "A-Note", remoteEntry: null, readBlob: stub.readBlob, createBlob: stub.createBlob });
   assert.ok(entry1, "首次产出清单");
-  assert.equal(entry1.path, CATALOG_PATH);
+  assert.equal(entry1.path, catalogPathFor("A-Note"), "清单写入空间内控制面目录");
   const file1 = parseControlFile(stub.created[0].bytes);
   assert.equal(file1.data.spaces["A-Note"].notebooks[nb].docs.d1.title, "根文档");
 
   // 模拟远端已有清单(含另一空间的节): 本空间无变化 → 不产生新提交
-  stub.files.set(CATALOG_PATH, { sha: entry1.sha, size: stub.created[0].bytes.length });
+  stub.files.set(catalogPathFor("A-Note"), { sha: entry1.sha, size: stub.created[0].bytes.length });
   const existingBytes = stub.created[0].bytes;
   const readBlob = async (sha) => ({ bytes: existingBytes });
   const entry2 = await service.pendingEntry({ space: "A-Note", remoteEntry: { sha: entry1.sha, size: existingBytes.length }, readBlob, createBlob: stub.createBlob });

@@ -17,11 +17,18 @@ import {
   CONTROL_DIR,
   CONTROL_SCHEMA_VERSION,
   controlDataEquals,
+  controlDirOf,
   parseControlFile,
   serializeControlFile,
 } from "./control-plane.js";
 
-export const CATALOG_PATH = CONTROL_DIR + "/catalog.v1.json";
+/** 旧协议(v0.2.0,仓库根)清单位置: 迁移完成前的读取兜底 */
+export const LEGACY_CATALOG_PATH = CONTROL_DIR + "/catalog.v1.json";
+
+/** 层级清单位置(协议 v2): 随同步空间走 <remoteRoot>/.sy-gsp/catalog.v1.json */
+export function catalogPathFor(remoteRoot) {
+  return controlDirOf(remoteRoot) + "/catalog.v1.json";
+}
 
 export class CatalogService {
   /**
@@ -103,6 +110,6 @@ export class CatalogService {
       spaces,
     });
     const sha = await createBlob(bytes);
-    return { path: CATALOG_PATH, sha, mode: "100644" };
+    return { path: catalogPathFor(space), sha, mode: "100644" };
   }
 }

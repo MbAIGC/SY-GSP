@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { makeHarness } from "./engine.test.mjs";
 import { DeclarationService } from "../src/control/declaration-service.js";
-import { CatalogService, CATALOG_PATH } from "../src/control/catalog-service.js";
+import { CatalogService, catalogPathFor } from "../src/control/catalog-service.js";
 import { GitProvider } from "../src/git/git-provider.js";
 
 const enc = (s) => GitProvider.textToBytes(s);
@@ -142,9 +142,9 @@ test("V2 控制面: 声明/层级清单/schema 随数据批次原子提交,第�
   assert.equal(first.uploads, 1);
   const paths = await treePaths(h.repo);
   assert.ok(paths.includes("A-Note/data/" + NB + "/a.md"), "数据入空间");
-  assert.ok(paths.includes(".sy-gsp/schema.json"), "控制面 schema 引导");
-  assert.ok(paths.includes(".sy-gsp/nas-remoteRoot.json"), "空间声明随批提交");
-  assert.ok(paths.includes(CATALOG_PATH), "层级清单随批提交");
+  assert.ok(paths.includes("A-Note/.sy-gsp/schema.json"), "控制面 schema 引导(空间内,协议 v2)");
+  assert.ok(paths.includes("A-Note/.sy-gsp/nas-remoteRoot.json"), "空间声明随批提交");
+  assert.ok(paths.includes(catalogPathFor("A-Note")), "层级清单随批提交");
   assert.equal(paths.length, 4, "旧根无任何副本");
 
   // 第二轮: 数据与控制面均无变化 → 零操作零提交
@@ -162,6 +162,7 @@ test("V2 控制面: 纯下载轮清单漂移走独立小提交并推进 BASE", a
     remoteRoot: "A-Note",
     remoteFiles: {
       [remotePath]: "v1",
+      // 旧协议(v0.2.0)根级声明: 迁移的输入
       ".sy-gsp/nas-remoteRoot.json": JSON.stringify({ schemaVersion: 1, remoteRoot: "A-Note" }),
     },
     localFiles: { [localPath]: "v1" },
@@ -179,17 +180,64 @@ test("V2 控制面: 纯下载轮清单漂移走独立小提交并推进 BASE", a
   assert.equal(result.success, true);
   assert.equal(result.downloads, 1);
   const paths = await treePaths(h.repo);
-  assert.ok(paths.includes(CATALOG_PATH), "纯下载轮也必须产出层级清单");
-  assert.ok(paths.includes(".sy-gsp/schema.json"), "首次写控制面时补齐 schema 引导");
+  assert.ok(paths.includes(catalogPathFor("A-Note")), "纯下载轮也必须产出层级清单");
+  assert.ok(paths.includes("A-Note/.sy-gsp/schema.json"), "首次写控制面时补齐 schema 引导");
+  assert.equal(await (await h.kernel.getFile(localPath)).text(), "v2");
   const headAfter = h.repo.head;
   assert.equal(h.metadataStore.getBaseCommit(spaceKey), headAfter, "BASE 推进到控制面提交");
-  const local = await h.kernel.getFile(localPath);
-  assert.equal(await local.text(), "v2");
 
   // 再跑一轮: 无数据无清单变化 → 零提交
   const second = await h.engine.run(h.makeCtx());
   assert.equal(second.success, true);
   assert.equal(h.repo.head, headAfter, "清单稳定后不再提交");
+});
+
+test("V2 协议迁移: 旧根级控制面文件在首轮同步中原样搬入空间目录并删除旧位置", async () => {
+  const inSpace = "A-Note/data/" + NB + "/a.md";
+  const legacyCatalog = JSON.stringify({
+    schemaVersion: 1,
+    spaces: { "A-Note": { notebooks: { [NB]: { name: "笔记", docs: { d1: { title: "文档一", parent: "", hpath: "/" } } } } } },
+  });
+  const h = await makeHarness({
+    remoteRoot: "A-Note",
+    remoteFiles: {
+      [inSpace]: "same content",
+      // v0.2.0 遗留: 三个旧位置控制面文件
+      ".sy-gsp/schema.json": JSON.stringify({ schemaVersion: 1 }),
+      ".sy-gsp/nas-remoteRoot.json": JSON.stringify({ schemaVersion: 1, remoteRoot: "A-Note" }),
+      ".sy-gsp/catalog.v1.json": legacyCatalog,
+    },
+    localFiles: { ["data/" + NB + "/a.md"]: "same content" },
+    controlPlane: makeControlPlane,
+  });
+  h.kernel.sql = async () => docRows();
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit(spaceKey, baseCommit.sha, "prep");
+  const legacyCatalogSha = (await h.repo.provider.getTree((await h.repo.provider.getCommit(baseCommit.sha)).treeSha))
+    .find((e) => e.path === ".sy-gsp/catalog.v1.json").sha;
+
+  const result = await h.engine.run(h.makeCtx());
+  assert.equal(result.success, true);
+  assert.equal(result.uploads + result.downloads + result.deletionsRemote + result.deletionsLocal, 0, "纯迁移轮: 无数据操作");
+
+  const paths = await treePaths(h.repo);
+  // 新位置: 声明与清单原样搬入(清单引用同一 blob sha,内容逐字节不变),schema 重写为 v2
+  assert.ok(paths.includes("A-Note/.sy-gsp/nas-remoteRoot.json"), "声明迁入空间");
+  assert.ok(paths.includes("A-Note/.sy-gsp/catalog.v1.json"), "清单迁入空间");
+  assert.ok(paths.includes("A-Note/.sy-gsp/schema.json"), "schema 在新位置重写");
+  assert.ok(!paths.includes(".sy-gsp/schema.json") && !paths.includes(".sy-gsp/nas-remoteRoot.json") && !paths.includes(".sy-gsp/catalog.v1.json"),
+    "旧位置三个文件全部删除");
+  const tree = await h.repo.provider.getTree((await h.repo.provider.getCommit(h.repo.head)).treeSha);
+  assert.equal(tree.find((e) => e.path === "A-Note/.sy-gsp/catalog.v1.json").sha, legacyCatalogSha, "清单内容原样迁移(同一 blob)");
+  const schemaBlob = await h.repo.provider.getBlob(tree.find((e) => e.path === "A-Note/.sy-gsp/schema.json").sha);
+  assert.match(new TextDecoder().decode(schemaBlob.bytes), /"schemaVersion": 2/, "迁移时 schema 升到协议 v2");
+  assert.equal(h.metadataStore.getBaseCommit(spaceKey), h.repo.head, "迁移提交确认后推进 BASE");
+
+  // 再跑一轮: 迁移已完成,零提交
+  const headAfter = h.repo.head;
+  const second = await h.engine.run(h.makeCtx());
+  assert.equal(second.success, true);
+  assert.equal(h.repo.head, headAfter, "迁移不回弹");
 });
 
 test("V2 T1 收敛(A-Note 空间): 混合变更一次同步后,第二轮零操作零冲突", async () => {

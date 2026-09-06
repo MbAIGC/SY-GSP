@@ -12,12 +12,24 @@
 
 import { SyncError, SyncErrorCategory } from "../sync/sync-error.js";
 
-/** 控制面命名空间(仓库根) */
+/** 控制面命名空间段名(协议 v2 起随空间走: <remoteRoot>/.sy-gsp;默认根退化为仓库根 .sy-gsp) */
 export const CONTROL_DIR = ".sy-gsp";
 /** 控制面 schema 版本文件 */
 export const CONTROL_SCHEMA_PATH = CONTROL_DIR + "/schema.json";
 /** 当前控制面协议版本: 文件版本高于此值时拒绝按旧语义解析(显式报告,不静默误读) */
-export const CONTROL_SCHEMA_VERSION = 1;
+export const CONTROL_SCHEMA_VERSION = 2;
+
+/**
+ * 控制面目录(协议 v2): 随同步空间走,公式无特判 ——
+ * "SYNote" → "SYNote/.sy-gsp";""(默认根) → ".sy-gsp"(仓库根)。
+ * 语义约定(2026-09-06 用户定稿): 控制面随空间共存亡,手动删除空间目录
+ * 即视为放弃该空间的元数据(声明/清单/后续墓碑)。
+ * 注: 仅做 trim,避免与 sync/remote-root.js 相互引用。
+ */
+export function controlDirOf(remoteRoot) {
+  const root = String(remoteRoot == null ? "" : remoteRoot).trim();
+  return root ? root + "/" + CONTROL_DIR : CONTROL_DIR;
+}
 
 /**
  * 解析控制面 JSON 文件(损坏容忍)。
