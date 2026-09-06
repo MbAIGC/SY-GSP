@@ -166,7 +166,7 @@ export class SettingsPanelBuilder {
       value: val("remote_root"),
       placeholder: (t.sygspRemoteRootPlaceholder) || "留空 = 默认根目录,例如 A-Note",
       title: (t.sygspRemoteRoot) || "远程同步空间(remoteRoot)",
-      description: (t.sygspRemoteRootDesc) || "数据将存放于远端仓库 <空间名>/data/**;留空 = 默认根目录 data/**。仅限单段目录名(中英文/数字/连字符/下划线)。启用前请先将所有设备升级到支持该功能的版本",
+      description: (t.sygspRemoteRootDesc) || "数据将存放于远端仓库 <空间名>/data/**;留空 = 默认根目录 data/**。仅限单段目录名(中英文/数字/连字符/下划线)。启用前请将所有设备升级到 v0.2.1 及以上",
       action: { callback: () => this._onRemoteRootChanged() },
     });
     u.addItem({
@@ -369,18 +369,19 @@ export class SettingsPanelBuilder {
     const u = this.utils;
     const previous = this._lastValidRemoteRoot != null ? this._lastValidRemoteRoot : "";
     const dialog = new this.q.Dialog({
-      title: (t.sygspRemoteRootConfirmTitle) || "切换同步空间确认",
+      title: (t.sygspRemoteRootConfirmTitle) || "切换远程同步空间确认",
       content: '<div id="sygspRemoteRootConfirm" style="padding:16px;white-space:pre-wrap"></div>',
       width: "560px",
     });
     const root = dialog.element.querySelector("#sygspRemoteRootConfirm");
     const targetText = target
-      ? "空间 " + target + "(远端 " + target + "/data/**)"
-      : (t.sygspRemoteRootDefault) || "默认根目录(远端 data/**)";
+      ? "远端 " + target + "/data/**"
+      : (t.sygspRemoteRootDefault) || "远端 data/**(默认根目录)";
     root.textContent = [
-      (t.sygspRemoteRootConfirmTarget) || "目标: {path}。旧空间数据不会被自动迁移或删除".replace("{path}", targetText),
-      (t.sygspRemoteRootConfirmRisk) || "⚠️ 所有设备必须已升级到支持 remoteRoot 的版本。旧版插件会把空间数据整份下载成工作区垃圾目录,并可能反复进入冲突暂停;旧版冲突选「保留本地」或执行「同步重建·以本地为准」会从远端删除该空间数据(可由 git 历史与本机备份恢复,但属于数据事故)",
-      (t.sygspRemoteRootConfirmWizard) || "确认后首次同步将进入首同步向导,请选择正确方向(上传本地/下载远端)",
+      // P0 修复: replace 必须作用于 i18n 命中后的最终字符串,否则 {path} 原样显示
+      ((t.sygspRemoteRootConfirmTarget) || "远程目录: {path}。旧空间数据不会被自动迁移或删除").replace("{path}", targetText),
+      (t.sygspRemoteRootConfirmRisk) || "⚠️ 需要所有设备已升级到 v0.2.1 及以上:\n· 未升级设备会把空间数据整份下载成工作区垃圾目录,并可能反复进入冲突暂停;\n· 未升级设备冲突选「保留本地」或执行「同步重建·以本地为准」会从远端删除该空间数据(可由 git 历史与本机备份恢复,但属于数据事故)",
+      (t.sygspRemoteRootConfirmFirstSync) || "首轮同步按逐路径规则收敛: 单边文件直接上传/下载,同名内容不同会进冲突中心;若远端空间已有其他设备数据、或想明确选边,建议先把同步策略改为「每次选择方向」或使用「同步重建」",
       (t.sygspRemoteRootConfirmUnknown) || "插件无法检测是否存在旧版设备,此确认仅为风险知悉",
     ].join("\n\n");
 

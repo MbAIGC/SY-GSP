@@ -227,30 +227,36 @@ test("层级清单: 远端清单损坏时按本空间重建(不阻断)", async (
   assert.equal(file.data.spaces["A-Note"].notebooks[nb].docs.d1.title, "t");
 });
 
-test("发现摘要: 声明行 + 默认根数据风险信号行", () => {
+test("发现摘要: 声明行 + 默认根数据信号行(按当前空间场景化)", () => {
   // 无记录: 明确提示而非空白
   assert.match(formatSpacesSummary({}), /未发现声明文件/);
 
   // 有声明且默认根无数据: 无风险行
-  const ok = formatSpacesSummary({
-    records: [{ healthy: true, device: "nas", space: "A-Note" }],
-    rootDataFiles: 0,
-  });
+  const ok = formatSpacesSummary({ records: [{ healthy: true, device: "nas", space: "A-Note" }], rootDataFiles: 0 }, {}, "A-Note");
   assert.match(ok, /nas → A-Note/);
   assert.match(ok, /0 个文件/);
   assert.ok(!ok.includes("⚠️"), "默认根无数据时不得出现风险行");
 
-  // 默认根仍有数据: 必须出现旧版共存风险提示
-  const risky = formatSpacesSummary({
-    records: [
-      { healthy: true, device: "nas", space: "A-Note" },
-      { healthy: false, device: "broken", space: "", reason: "JSON 解析失败" },
-    ],
-    rootDataFiles: 12,
-  });
+  // 已启用其他空间 + 默认根仍有数据: 必须出现旧目录风险提示
+  const risky = formatSpacesSummary(
+    {
+      records: [
+        { healthy: true, device: "nas", space: "A-Note" },
+        { healthy: false, device: "broken", space: "", reason: "JSON 解析失败" },
+      ],
+      rootDataFiles: 12,
+    },
+    {},
+    "A-Note"
+  );
   assert.match(risky, /nas → A-Note/);
   assert.match(risky, /broken\(声明无效: JSON 解析失败\)/);
   assert.match(risky, /12 个文件/);
   assert.match(risky, /⚠️ 默认根仍有数据/);
-  assert.match(risky, /升级所有设备/);
+  assert.match(risky, /v0\.2\.1/);
+
+  // 当前就在默认根: 根级数据是本空间自己的数据,不冒充"孤儿信号",只提示后续清理
+  const onDefault = formatSpacesSummary({ records: [], rootDataFiles: 12 }, {}, "");
+  assert.match(onDefault, /当前空间数据/);
+  assert.ok(!onDefault.includes("⚠️ 默认根仍有数据"), "默认根自身数据不得误报风险");
 });

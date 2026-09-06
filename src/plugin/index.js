@@ -255,9 +255,9 @@ export default class SyGspPlugin extends q.Plugin {
     }
   }
 
-  /** 已发现空间的展示摘要(一行一条: 设备 → 空间;附默认根数据信号) */
+  /** 已发现空间的展示摘要(一行一条: 设备 → 空间;附默认根数据信号,按当前空间场景化) */
   _knownSpacesSummary() {
-    return formatSpacesSummary(this._knownSpaces || {}, this.i18n);
+    return formatSpacesSummary(this._knownSpaces || {}, this.i18n, this._currentRemoteRoot());
   }
 
   /**
@@ -1154,18 +1154,18 @@ export default class SyGspPlugin extends q.Plugin {
     if (info.remoteRoot) {
       try {
         validateRemoteRoot(info.remoteRoot);
-        checks.push({ name: "同步空间(remoteRoot)", ok: true, detail: info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**" });
+        checks.push({ name: "远程同步空间(remoteRoot)", ok: true, detail: info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**" });
         // 旧版共存是启用空间后最主要的数据风险来源,诊断处常驻提醒(静态,无法远程探测旧版)
         checks.push({
           name: "旧版共存风险",
           ok: true,
-          detail: "⚠️ " + ((this.i18n && this.i18n.sygspRemoteRootDiagnosisRisk) || "旧版插件不识别 remoteRoot: 请确认所有设备已升级;未升级设备会误下载空间数据并反复冲突暂停,其「保留本地」/「同步重建·以本地为准」会从远端删除空间数据"),
+          detail: "⚠️ " + ((this.i18n && this.i18n.sygspRemoteRootDiagnosisRisk) || "旧版插件不识别 remoteRoot: 请确认所有设备已升级到 v0.2.1 及以上;未升级设备会误下载空间数据并反复冲突暂停,其「保留本地」/「同步重建·以本地为准」会从远端删除空间数据"),
         });
       } catch (err) {
-        checks.push({ name: "同步空间(remoteRoot)", ok: false, detail: String((err && err.message) || err) });
+        checks.push({ name: "远程同步空间(remoteRoot)", ok: false, detail: String((err && err.message) || err) });
       }
     } else {
-      checks.push({ name: "同步空间(remoteRoot)", ok: true, detail: "默认根目录 → 远端 data/**" });
+      checks.push({ name: "远程同步空间(remoteRoot)", ok: true, detail: "默认根目录 → 远端 data/**" });
     }
     checks.push({ name: "Token", ok: !!info.token, detail: info.token ? "已配置" : "未配置" });
 
@@ -1245,7 +1245,7 @@ export default class SyGspPlugin extends q.Plugin {
       detail: scan.files.length + " 个文件" + (scan.enumErrorOccurred ? "(存在目录枚举异常)" : ""),
     });
     rows.push({
-      name: "同步空间(remoteRoot)",
+      name: "远程同步空间(remoteRoot)",
       detail: info.remoteRoot
         ? info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**"
         : "默认根目录 → 远端 data/**",

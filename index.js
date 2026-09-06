@@ -5191,7 +5191,7 @@ function shortHash(text) {
   }
   return hash.toString(16).padStart(8, "0").slice(0, 6);
 }
-function formatSpacesSummary(cache, t = {}) {
+function formatSpacesSummary(cache, t = {}, currentSpace = "") {
   const records = cache && cache.records || [];
   const lines = records.map(
     (r) => r.healthy ? r.device + " → " + (r.space || (t.defaultRoot || "默认根目录")) : r.device + "(声明无效: " + (r.reason || "") + ")"
@@ -5199,9 +5199,18 @@ function formatSpacesSummary(cache, t = {}) {
   if (lines.length === 0) lines.push(t.none || "未发现声明文件(远端仅默认根目录)");
   const rootCount = Number(cache && cache.rootDataFiles);
   if (Number.isFinite(rootCount)) {
-    lines.push((t.rootData || "默认根目录 data/**: {n} 个文件").replace("{n}", String(rootCount)));
-    if (rootCount > 0) {
-      lines.push(t.rootDataRisk || "⚠️ 默认根仍有数据: 可能仍有设备使用默认根/旧版插件,启用其他空间前请先升级所有设备");
+    const onDefault = !String(currentSpace == null ? "" : currentSpace).trim();
+    if (onDefault) {
+      lines.push(
+        (t.rootDataCurrent || "默认根目录 data/**: {n} 个文件(当前空间数据;启用其他空间后将保留为旧目录)").replace("{n}", String(rootCount))
+      );
+    } else {
+      lines.push((t.rootData || "默认根目录 data/**: {n} 个文件").replace("{n}", String(rootCount)));
+      if (rootCount > 0) {
+        lines.push(
+          t.rootDataRisk || "⚠️ 默认根仍有数据: 若所有设备均已切换空间并升级到 v0.2.1 及以上,可按文档清理旧目录;否则请先升级未切换的设备"
+        );
+      }
     }
   }
   return lines.join("\n");
@@ -5625,7 +5634,7 @@ var SettingsPanelBuilder = class {
       value: val("remote_root"),
       placeholder: t.sygspRemoteRootPlaceholder || "留空 = 默认根目录,例如 A-Note",
       title: t.sygspRemoteRoot || "远程同步空间(remoteRoot)",
-      description: t.sygspRemoteRootDesc || "数据将存放于远端仓库 <空间名>/data/**;留空 = 默认根目录 data/**。仅限单段目录名(中英文/数字/连字符/下划线)。启用前请先将所有设备升级到支持该功能的版本",
+      description: t.sygspRemoteRootDesc || "数据将存放于远端仓库 <空间名>/data/**;留空 = 默认根目录 data/**。仅限单段目录名(中英文/数字/连字符/下划线)。启用前请将所有设备升级到 v0.2.1 及以上",
       action: { callback: () => this._onRemoteRootChanged() }
     });
     u.addItem({
@@ -5820,16 +5829,17 @@ var SettingsPanelBuilder = class {
     const u = this.utils;
     const previous = this._lastValidRemoteRoot != null ? this._lastValidRemoteRoot : "";
     const dialog = new this.q.Dialog({
-      title: t.sygspRemoteRootConfirmTitle || "切换同步空间确认",
+      title: t.sygspRemoteRootConfirmTitle || "切换远程同步空间确认",
       content: '<div id="sygspRemoteRootConfirm" style="padding:16px;white-space:pre-wrap"></div>',
       width: "560px"
     });
     const root = dialog.element.querySelector("#sygspRemoteRootConfirm");
-    const targetText = target ? "空间 " + target + "(远端 " + target + "/data/**)" : t.sygspRemoteRootDefault || "默认根目录(远端 data/**)";
+    const targetText = target ? "远端 " + target + "/data/**" : t.sygspRemoteRootDefault || "远端 data/**(默认根目录)";
     root.textContent = [
-      t.sygspRemoteRootConfirmTarget || "目标: {path}。旧空间数据不会被自动迁移或删除".replace("{path}", targetText),
-      t.sygspRemoteRootConfirmRisk || "⚠️ 所有设备必须已升级到支持 remoteRoot 的版本。旧版插件会把空间数据整份下载成工作区垃圾目录,并可能反复进入冲突暂停;旧版冲突选「保留本地」或执行「同步重建·以本地为准」会从远端删除该空间数据(可由 git 历史与本机备份恢复,但属于数据事故)",
-      t.sygspRemoteRootConfirmWizard || "确认后首次同步将进入首同步向导,请选择正确方向(上传本地/下载远端)",
+      // P0 修复: replace 必须作用于 i18n 命中后的最终字符串,否则 {path} 原样显示
+      (t.sygspRemoteRootConfirmTarget || "远程目录: {path}。旧空间数据不会被自动迁移或删除").replace("{path}", targetText),
+      t.sygspRemoteRootConfirmRisk || "⚠️ 需要所有设备已升级到 v0.2.1 及以上:\n· 未升级设备会把空间数据整份下载成工作区垃圾目录,并可能反复进入冲突暂停;\n· 未升级设备冲突选「保留本地」或执行「同步重建·以本地为准」会从远端删除该空间数据(可由 git 历史与本机备份恢复,但属于数据事故)",
+      t.sygspRemoteRootConfirmFirstSync || "首轮同步按逐路径规则收敛: 单边文件直接上传/下载,同名内容不同会进冲突中心;若远端空间已有其他设备数据、或想明确选边,建议先把同步策略改为「每次选择方向」或使用「同步重建」",
       t.sygspRemoteRootConfirmUnknown || "插件无法检测是否存在旧版设备,此确认仅为风险知悉"
     ].join("\n\n");
     const bar = document.createElement("div");
@@ -7515,9 +7525,9 @@ var SyGspPlugin = class extends q.Plugin {
       this._knownSpaces = null;
     }
   }
-  /** 已发现空间的展示摘要(一行一条: 设备 → 空间;附默认根数据信号) */
+  /** 已发现空间的展示摘要(一行一条: 设备 → 空间;附默认根数据信号,按当前空间场景化) */
   _knownSpacesSummary() {
-    return formatSpacesSummary(this._knownSpaces || {}, this.i18n);
+    return formatSpacesSummary(this._knownSpaces || {}, this.i18n, this._currentRemoteRoot());
   }
   /**
    * 只读检测远端同步空间: 读取仓库根 .sy-gsp/*-remoteRoot.json 声明,并统计
@@ -8334,17 +8344,17 @@ var SyGspPlugin = class extends q.Plugin {
     if (info.remoteRoot) {
       try {
         validateRemoteRoot(info.remoteRoot);
-        checks.push({ name: "同步空间(remoteRoot)", ok: true, detail: info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**" });
+        checks.push({ name: "远程同步空间(remoteRoot)", ok: true, detail: info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**" });
         checks.push({
           name: "旧版共存风险",
           ok: true,
-          detail: "⚠️ " + (this.i18n && this.i18n.sygspRemoteRootDiagnosisRisk || "旧版插件不识别 remoteRoot: 请确认所有设备已升级;未升级设备会误下载空间数据并反复冲突暂停,其「保留本地」/「同步重建·以本地为准」会从远端删除空间数据")
+          detail: "⚠️ " + (this.i18n && this.i18n.sygspRemoteRootDiagnosisRisk || "旧版插件不识别 remoteRoot: 请确认所有设备已升级到 v0.2.1 及以上;未升级设备会误下载空间数据并反复冲突暂停,其「保留本地」/「同步重建·以本地为准」会从远端删除空间数据")
         });
       } catch (err) {
-        checks.push({ name: "同步空间(remoteRoot)", ok: false, detail: String(err && err.message || err) });
+        checks.push({ name: "远程同步空间(remoteRoot)", ok: false, detail: String(err && err.message || err) });
       }
     } else {
-      checks.push({ name: "同步空间(remoteRoot)", ok: true, detail: "默认根目录 → 远端 data/**" });
+      checks.push({ name: "远程同步空间(remoteRoot)", ok: true, detail: "默认根目录 → 远端 data/**" });
     }
     checks.push({ name: "Token", ok: !!info.token, detail: info.token ? "已配置" : "未配置" });
     try {
@@ -8416,7 +8426,7 @@ var SyGspPlugin = class extends q.Plugin {
       detail: scan.files.length + " 个文件" + (scan.enumErrorOccurred ? "(存在目录枚举异常)" : "")
     });
     rows.push({
-      name: "同步空间(remoteRoot)",
+      name: "远程同步空间(remoteRoot)",
       detail: info.remoteRoot ? info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**" : "默认根目录 → 远端 data/**"
     });
     try {

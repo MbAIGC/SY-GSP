@@ -52,8 +52,10 @@ export function shortHash(text) {
  * - 每条声明一行: 设备 → 空间(或损坏原因);
  * - 附带默认根 data/** 文件数: 判断"可能仍有设备在使用默认根/旧版插件"
  *   的唯一可观测间接信号(无法确证,只能提醒)。
+ * - 风险行场景化: 当前就在默认根时,根级数据是本空间自己的数据而非
+ *   "孤儿信号",只提示计数与后续清理;已启用其他空间时才提示旧目录风险。
  */
-export function formatSpacesSummary(cache, t = {}) {
+export function formatSpacesSummary(cache, t = {}, currentSpace = "") {
   const records = (cache && cache.records) || [];
   const lines = records.map((r) =>
     r.healthy ? r.device + " → " + (r.space || (t.defaultRoot || "默认根目录")) : r.device + "(声明无效: " + (r.reason || "") + ")"
@@ -61,9 +63,19 @@ export function formatSpacesSummary(cache, t = {}) {
   if (lines.length === 0) lines.push(t.none || "未发现声明文件(远端仅默认根目录)");
   const rootCount = Number(cache && cache.rootDataFiles);
   if (Number.isFinite(rootCount)) {
-    lines.push((t.rootData || "默认根目录 data/**: {n} 个文件").replace("{n}", String(rootCount)));
-    if (rootCount > 0) {
-      lines.push(t.rootDataRisk || "⚠️ 默认根仍有数据: 可能仍有设备使用默认根/旧版插件,启用其他空间前请先升级所有设备");
+    const onDefault = !String(currentSpace == null ? "" : currentSpace).trim();
+    if (onDefault) {
+      lines.push(
+        (t.rootDataCurrent || "默认根目录 data/**: {n} 个文件(当前空间数据;启用其他空间后将保留为旧目录)").replace("{n}", String(rootCount))
+      );
+    } else {
+      lines.push((t.rootData || "默认根目录 data/**: {n} 个文件").replace("{n}", String(rootCount)));
+      if (rootCount > 0) {
+        lines.push(
+          t.rootDataRisk ||
+            "⚠️ 默认根仍有数据: 若所有设备均已切换空间并升级到 v0.2.1 及以上,可按文档清理旧目录;否则请先升级未切换的设备"
+        );
+      }
     }
   }
   return lines.join("\n");
