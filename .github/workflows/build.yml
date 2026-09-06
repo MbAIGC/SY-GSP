@@ -3,7 +3,7 @@ name: 构建发布
 # 触发:
 #   - 推送到 main: 测试 + 构建 + 冒烟,版本自动递增并发布 GitHub Release
 #   - 手动触发(workflow_dispatch): 可自定义版本号
-# 版本号: 从 v0.1.0 开始,每次成功编译补丁号 +1(v0.1.0 → v0.1.1 → …)
+# 版本号: V1 系列为 v0.1.0~v0.1.35;V2 系列从 v0.2.0 开始,每次成功编译补丁号 +1(v0.2.0 → v0.2.1 → …)
 
 on:
   push:
@@ -47,9 +47,10 @@ jobs:
           V="${{ github.event.inputs.version }}"
           V="${V#v}"
           if [ -z "$V" ]; then
+            # V2 版本系列(0.2.x): 无 v0.2 tag 时 max 为 -1,自动得到 0.2.0
             LATEST=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '[.[].tag_name | select(test("^v0\\.1\\.[0-9]+$")) | sub("^v0\\.1\\."; "") | tonumber] | max // -1')
-            V="0.1.$((LATEST + 1))"
+              --jq '[.[].tag_name | select(test("^v0\\.2\\.[0-9]+$")) | sub("^v0\\.2\\."; "") | tonumber] | max // -1')
+            V="0.2.$((LATEST + 1))"
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "本次发布版本: v$V"
