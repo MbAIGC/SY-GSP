@@ -49,7 +49,7 @@ for (const d of declarations) {
         parent: catDoc ? catDoc.parent || "" : "",
       });
     }
-    const paths = buildNotebookPaths({ notebookName: nb.name, docs: docsMap, reservedRootNames });
+    const paths = buildNotebookPaths({ notebookName: nb.name, docs: docsMap, reservedRootNames, rootDir: "MD-Note" });
     indexLines.push("## " + nb.name + "\n");
     for (const doc of nb.docs) {
       const info = paths.get(doc.id);
@@ -87,6 +87,12 @@ if (failures.length > 0) {
     fs.rmSync(path.join(repoRoot, "Mirror-Errors.md"));
   } catch {}
 }
+
+// 数据仓库根 README(用户定稿的占位文案;每次运行重写,手动编辑会被覆盖)
+generated.set(
+  "README.md",
+  "# SY-GSP转换测试\n\n本插件的前身是 SGSP（Fork 自 xstarling/sy-git-sync-plugin v0.3.0）。\n"
+);
 
 // 无变化检测: 与磁盘现有内容逐字节比对,零差异则不落盘(避免推送触发环)
 let changed = 0;

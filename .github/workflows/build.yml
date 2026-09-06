@@ -8,10 +8,11 @@ name: 构建发布
 on:
   push:
     branches: [main]
-    # 纯文档变更(重命名/编辑/新增 md)不触发构建发布
+    # 纯文档变更(重命名/编辑/新增 md)与阅读镜像 Action(非插件产物)不触发构建发布
     paths-ignore:
       - "**.md"
       - "docs/**"
+      - ".github/actions/**"
   workflow_dispatch:
     inputs:
       version:

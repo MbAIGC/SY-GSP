@@ -11,7 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderDocument, renderInline } from "../.github/actions/sy-gsp-mirror/lib/convert.mjs";
 import { buildNotebookPaths, sanitizeSegment, isReservedRootName } from "../.github/actions/sy-gsp-mirror/lib/paths.mjs";
-import { findDeclarations, listNotebooks, readCatalog } from "../.github/actions/sy-gsp-mirror/lib/discover.mjs";
+import { findDeclarations, listNotebooks, readCatalog, decodeSiYuanIcon } from "../.github/actions/sy-gsp-mirror/lib/discover.mjs";
 
 const fixtureDoc = JSON.parse(
   fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "mirror", "notebook", "doc.sy"), "utf8")
@@ -78,6 +78,22 @@ test("路径清洗与防碰撞: 非法字符/重名追加短ID/保留名追加-M
   assert.match(reserved.get("x").path, /^data-Mirror\//, "保留名追加 -Mirror");
   const spaceClash = buildNotebookPaths({ notebookName: "SYNote", docs: new Map([["x", { title: "t", parent: "" }]]), reservedRootNames: ["SYNote"] });
   assert.match(spaceClash.get("x").path, /^SYNote-Mirror\//, "与空间容器同名追加 -Mirror");
+  // 容器目录: rootDir 收纳(用户定稿 MD-Note)
+  const contained = buildNotebookPaths({ notebookName: "我的笔记本", docs: new Map([["x", { title: "t", parent: "" }]]), reservedRootNames: [], rootDir: "MD-Note" });
+  assert.equal(contained.get("x").path, "MD-Note/我的笔记本/t.md");
+});
+
+test("思源 icon 解码与笔记本目录延续: 十六进制码点串 → emoji 前缀", () => {
+  assert.equal(decodeSiYuanIcon("26a0-fe0f"), "⚠️");
+  assert.equal(decodeSiYuanIcon("1f3f4-200d-2620-fe0f"), "🏴‍☠️");
+  assert.equal(decodeSiYuanIcon(""), "");
+  assert.equal(decodeSiYuanIcon("not-hex"), "", "非法输入返回空");
+  const root = makeTempRepo({
+    "SYNote/data/20240101120000-abc/.siyuan/conf.json": JSON.stringify({ name: "V2版本测试", icon: "26a0-fe0f" }),
+    "SYNote/data/20240101120000-abc/20240101120001-aaa.sy": JSON.stringify({ ID: "20240101120001-aaa", Type: "NodeDocument", Properties: { title: "t" }, Children: [] }),
+  });
+  const nbs = listNotebooks(root, "SYNote");
+  assert.equal(nbs[0].name, "⚠️ V2版本测试", "笔记本名延续思源 icon");
 });
 
 function makeTempRepo(files) {

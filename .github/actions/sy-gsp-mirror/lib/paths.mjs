@@ -27,15 +27,17 @@ export function isReservedRootName(name) {
  * - 目录段冲突时对目录追加 --短docID(与文件同规则);
  * - 保留名/与空间容器冲突 → 追加 "-Mirror";
  * - catalog 缺失的文档(孤儿)平铺到笔记本根。
- * @param {object} args {notebookName, docs: Map<docId,{title,parent}>, reservedRootNames: string[]}
+ * @param {object} args {notebookName, docs: Map<docId,{title,parent}>, reservedRootNames: string[], rootDir?: string}
+ *   rootDir: 镜像容器目录(如 "MD-Note"),空串 = 直接放仓库根(用户定稿: 收纳进 MD-Note)
  * @returns {Map<docId, {path, orphan:boolean}>} path 为相对仓库根的 posix 路径(不含 .md 由本函数补全)
  */
-export function buildNotebookPaths({ notebookName, docs, reservedRootNames = [] }) {
+export function buildNotebookPaths({ notebookName, docs, reservedRootNames = [], rootDir = "" }) {
   const result = new Map();
   const used = new Set();
   const rootReserved = new Set([...reservedRootNames.map((n) => String(n).toLowerCase())]);
   let dir = sanitizeSegment(notebookName) || "未命名笔记本";
   if (dir.length === 0 || isReservedRootName(dir) || rootReserved.has(dir.toLowerCase())) dir = dir + "-Mirror";
+  const rootSeg = String(rootDir || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
   const short = (id) => String(id || "").slice(-7);
 
   const pathOf = (docId) => {
@@ -63,7 +65,7 @@ export function buildNotebookPaths({ notebookName, docs, reservedRootNames = [] 
     const probe = () => segments.concat(fileName).join("/").toLowerCase() + ".md";
     if (used.has(probe())) fileName = title + "--" + short(docId);
     used.add(probe());
-    const full = [dir].concat(segments).concat([fileName + ".md"]).join("/");
+    const full = [rootSeg, dir, ...segments, fileName + ".md"].filter(Boolean).join("/");
     const orphan = chain.length === 0 && docs.get(docId).parent && !docs.has(docs.get(docId).parent);
     const value = { path: full, orphan };
     result.set(docId, value);

@@ -9,6 +9,22 @@ import path from "node:path";
 
 const NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
 
+/**
+ * 思源笔记本 icon 字段解码: conf.json 存储为十六进制码点串(如 "26a0-fe0f" → ⚠️、
+ * "1f3f4-200d-2620-fe0f" → 🏴‍☠️)。非法/为空返回空串(不进目录名)。
+ */
+export function decodeSiYuanIcon(hex) {
+  const s = String(hex || "").trim();
+  if (!s) return "";
+  try {
+    const points = s.split("-").map((p) => parseInt(p, 16));
+    if (points.some((p) => !Number.isFinite(p) || p <= 0 || p > 0x10ffff)) return "";
+    return String.fromCodePoint(...points);
+  } catch {
+    return "";
+  }
+}
+
 /** 递归收集仓库内全部空间声明(兼容旧协议仓库根位置) */
 export function findDeclarations(repoRoot) {
   const found = [];
@@ -57,6 +73,9 @@ export function listNotebooks(repoRoot, space) {
     try {
       const conf = JSON.parse(fs.readFileSync(path.join(nbDir, ".siyuan", "conf.json"), "utf8"));
       if (conf && typeof conf.name === "string" && conf.name.trim()) name = conf.name.trim();
+      // 延续思源笔记本 icon: 目录名与索引均带 emoji 前缀(GitHub 直接渲染)
+      const icon = decodeSiYuanIcon(conf && conf.icon);
+      if (icon) name = icon + " " + name;
     } catch {}
     const docs = [];
     (function walk(dir) {
