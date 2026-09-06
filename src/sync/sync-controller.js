@@ -194,10 +194,12 @@ export class SyncController {
       owner: info.owner,
       repo: info.repo,
       branch: info.branch,
+      remoteRoot: info.remoteRoot,
     });
     if (overrides) ctx.overrides = overrides;
     this.logger.info("开始同步 #" + ctx.id + " trigger=" + trigger + " mode=" + mode +
-      " overrides=" + (overrides ? overrides.size : 0) + " repo=" + info.owner + "/" + info.repo + " branch=" + info.branch);
+      " overrides=" + (overrides ? overrides.size : 0) + " repo=" + info.owner + "/" + info.repo + " branch=" + info.branch +
+      (info.remoteRoot ? " space=" + info.remoteRoot : " space=默认根目录"));
 
     return this.queue.enqueue(
       key,
@@ -307,6 +309,7 @@ export class SyncController {
           owner: ctx.owner,
           repo: ctx.repo,
           branch: ctx.branch,
+          remoteRoot: ctx.remoteRoot,
         });
         ctx.originTrigger = originTrigger;
         ctx.attempt = attempt;
@@ -318,7 +321,7 @@ export class SyncController {
 
   async _onFinished(ctx, result) {
     this.state = SyncState.SUCCESS;
-    const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+    const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch, remoteRoot: ctx.remoteRoot });
     const hadPause = this._conflictByRepo.has(key);
     const pausedRecord = this._conflictByRepo.get(key) || null;
     if (hadPause) {
@@ -348,7 +351,7 @@ export class SyncController {
     if (ctx.state === SyncState.CONFLICT_PAUSED) {
       const kind = ctx.baseUnresolved ? "BASE_UNRESOLVED" : "FILE_CONFLICTS";
       const conflictList = (ctx.conflicts || []).filter((c) => c && c.path && c.path !== "__base__");
-      const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+      const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch, remoteRoot: ctx.remoteRoot });
       // 引擎通常会先保存冲突集；若保存与暂停状态写入发生时序/持久化异常，
       // 这里必须用上下文中的冲突列表补建，避免出现「已暂停但无可用冲突集」。
       if (kind === "FILE_CONFLICTS" && this.conflictService && !this.conflictService.openSet(key)) {

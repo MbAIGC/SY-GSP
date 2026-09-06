@@ -8,6 +8,7 @@
  */
 
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
+import { composeRepoKey } from "./remote-root.js";
 
 export class SyncQueue {
   constructor() {
@@ -16,8 +17,9 @@ export class SyncQueue {
     this.events = null; // 可选注入 event bus
   }
 
-  static keyOf({ provider, owner, repo, branch }) {
-    return provider + ":" + owner + "/" + repo + ":" + branch;
+  /** 队列通道键: 仓库分支 + 同步空间(remoteRoot,空根时与 V1 键格式一致) */
+  static keyOf(info) {
+    return composeRepoKey(info);
   }
 
   /**

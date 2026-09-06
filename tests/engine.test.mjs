@@ -11,6 +11,7 @@ import { createSyncContext, SyncState } from "../src/sync/sync-context.js";
 import { SyncError, SyncErrorCategory } from "../src/sync/sync-error.js";
 import { createEventBus } from "../src/util/event-bus.js";
 import { GitProvider } from "../src/git/git-provider.js";
+import { composeRepoKey } from "../src/sync/remote-root.js";
 import { makeFakeKernel, makeFakePlugin } from "./helpers.mjs";
 
 const enc = (s) => GitProvider.textToBytes(s);
@@ -151,7 +152,7 @@ async function makeFakeRepo(files = {}) {
   };
 }
 
-async function makeHarness({ remoteFiles = {}, localFiles = {}, commitBuilder = new CommitBuilder({}) } = {}) {
+async function makeHarness({ remoteFiles = {}, localFiles = {}, remoteRoot = "", controlPlane = null, commitBuilder = new CommitBuilder({}) } = {}) {
   const repo = await makeFakeRepo({ ...remoteFiles });
   const kernel = makeFakeKernel();
   for (const [path, content] of Object.entries(localFiles)) {
@@ -201,6 +202,9 @@ async function makeHarness({ remoteFiles = {}, localFiles = {}, commitBuilder = 
     readRemoteBlobBySha: (s) => repo.provider.getBlob(s),
     guardLocalDelete: async () => ({ allow: true, reasons: [] }),
   });
+  // 控制面注入: 传函数时以 {provider, kernel, workspace} 工厂形式构造
+  const resolvedControlPlane =
+    typeof controlPlane === "function" ? controlPlane({ provider: repo.provider, kernel, workspace }) : controlPlane;
   const engine = new SyncEngine({
     provider: repo.provider,
     workspace,
@@ -210,9 +214,15 @@ async function makeHarness({ remoteFiles = {}, localFiles = {}, commitBuilder = 
     conflictService,
     planner,
     merger: new ThreeWayMerger(),
+    controlPlane: resolvedControlPlane,
     commitBuilder,
     events: createEventBus(),
-    config: { repoKey: "github:o/r:main", syncRange: 1, syncFileType: "raw" },
+    config: {
+      repoKey: composeRepoKey({ provider: "github", owner: "o", repo: "r", branch: "main", remoteRoot }),
+      remoteRoot,
+      syncRange: 1,
+      syncFileType: "raw",
+    },
   });
   const makeCtx = (extra = {}) => {
     const { overrides, ...rest } = extra;

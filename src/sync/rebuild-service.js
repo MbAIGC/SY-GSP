@@ -1,5 +1,6 @@
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
 import { isNotebookConfPath, canonicalConfBytes } from "../local/notebook-conf.js";
+import { splitRemoteTree } from "./remote-root.js";
 
 /** 思源笔记本目录 id 形态: 14 位数字-字母数字(data/.siyuan、data/storage 等绝不误判) */
 const NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
@@ -55,11 +56,12 @@ export class RebuildService {
     const commit = await this.provider.getCommit(head.sha);
     const ignored = this.workspace.ignoreMatcher();
     const tree = await this.provider.getTree(commit.treeSha);
+    // 读侧边界: 远端树先按同步空间拆分(去前缀到本地命名空间;控制面 .sy-gsp/**
+    // 与其他空间路径剔除)——重建只镜像本空间,旧根/其他空间数据不受影响。
     // 原始树用于残留检测(被忽略文件也算残留目录的一部分,预览要如实列出);
     // 规划比对仍用过滤后的树(与同步语义一致)
-    const remoteRaw = new Map((tree || [])
-      .filter((entry) => entry && entry.type === "blob")
-      .map((entry) => [entry.path, entry.sha]));
+    const split = splitRemoteTree(tree, this.config.remoteRoot || "");
+    const remoteRaw = new Map([...split.data].map(([path, entry]) => [path, entry.sha]));
     const remote = new Map([...remoteRaw].filter(([path]) => !ignored.isIgnored(path)));
 
     const onlyLocal = [];

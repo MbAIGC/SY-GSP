@@ -129,7 +129,7 @@ let contextSeq = 0;
  * 创建一次同步的上下文。
  * baseCommit 是双方已确认的共同提交,不是"最后看到的远端提交"。
  */
-export function createSyncContext({ trigger, mode, provider, owner, repo, branch }) {
+export function createSyncContext({ trigger, mode, provider, owner, repo, branch, remoteRoot }) {
   contextSeq += 1;
   const now = new Date().toISOString();
   return {
@@ -140,6 +140,8 @@ export function createSyncContext({ trigger, mode, provider, owner, repo, branch
     owner: owner || "",
     repo: repo || "",
     branch: branch || "",
+    // 同步空间(remoteRoot): 参与队列通道与暂停记录的键隔离(V2 目录层级)
+    remoteRoot: String(remoteRoot == null ? "" : remoteRoot).trim(),
     startedAt: now,
     finishedAt: null,
     phase: SyncState.QUEUED,

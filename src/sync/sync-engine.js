@@ -17,6 +17,13 @@
 import { SyncError, SyncErrorCategory } from "./sync-error.js";
 import { SyncState, SyncMode, transition, finish } from "./sync-context.js";
 import { isNotebookConfPath, canonicalConfBytes, mergeConfBytes, confNotebookId, preserveRemoteIcon } from "../local/notebook-conf.js";
+import { validateRemoteRoot, toRemotePath, splitRemoteTree } from "./remote-root.js";
+import {
+  CONTROL_SCHEMA_PATH,
+  CONTROL_SCHEMA_VERSION,
+  serializeControlFile,
+} from "../control/control-plane.js";
+import { CATALOG_PATH } from "../control/catalog-service.js";
 
 /** 思源笔记本目录 id 形态: 14 位数字-字母数字 */
 const NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
@@ -40,6 +47,8 @@ export class SyncEngine {
     this.commitBuilder = deps.commitBuilder;
     this.events = deps.events;
     this.config = deps.config;
+    // 控制面服务(remoteRoot 声明 / 文档层级清单;可选,测试环境可缺省)
+    this.controlPlane = deps.controlPlane || null;
   }
 
   _emit(name, payload) {
@@ -89,6 +98,7 @@ export class SyncEngine {
       const rebuildRemote = ctx.trigger === "rebuild" || ctx.originTrigger === "rebuild";
       let remoteHead = null;
       let remoteEntries = new Map();
+      let controlFiles = new Map();
       let branchHeadMissing = false;
       try {
         try {
@@ -103,7 +113,12 @@ export class SyncEngine {
         ctx.observedRemoteHead = remoteHead.sha;
         const remoteCommit = await this.provider.getCommit(remoteHead.sha);
         ctx.remoteCommitDate = remoteCommit.date || null;
-        remoteEntries = await this._treeMap(await this.provider.getTree(remoteCommit.treeSha));
+        // 读侧边界: 远端树一次拆分为 数据面(去前缀到本地命名空间) + 控制面(.sy-gsp/**)。
+        // 其他空间/仓库杂项路径对规划层完全不可见——切换/启用空间绝不会把
+        // 旧根数据误判为"远端全删"或"远端全增"(V2 目录层级的核心保证)。
+        const treeSplit = await this._splitRemoteTree(await this.provider.getTree(remoteCommit.treeSha));
+        remoteEntries = treeSplit.data;
+        controlFiles = treeSplit.control;
       } catch (err) {
         // 只有分支引用本身不存在才允许按空仓库处理;提交/树 404 表示远端状态损坏或暂不可达。
         if (!(err instanceof SyncError && err.httpStatus === 404 && branchHeadMissing)) throw err;
@@ -138,7 +153,7 @@ export class SyncEngine {
       // 3.5 强制方向(首同步向导明确选边后的恢复路径): 跳过基准解析与三路合并,
       // 按用户选定方向镜像。RETRY 重规划需保留最初触发者(originTrigger)。
       if (forcedByWizard) {
-        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote, rawRemoteEntries });
+        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote, rawRemoteEntries, controlFiles });
       }
 
       // 4. BASE 解析
@@ -243,7 +258,9 @@ export class SyncEngine {
         // "回读到的 canonical 内容",下一轮即收敛,不把假修改留给用户
         ctx.canonicalDrifts = drifts.length;
         const driftSha = await this._applyCanonicalCorrections(ctx, drifts);
-        const confirmedSha = driftSha || (remoteHead ? remoteHead.sha : null);
+        // 本轮无数据写入时,控制面(空间声明/层级清单)如有变化,单独小提交并作为新基准
+        const controlSha = await this._pushControlPlaneIfNeeded(ctx, { controlFiles });
+        const confirmedSha = driftSha || controlSha || (remoteHead ? remoteHead.sha : null);
         if (confirmedSha) {
           await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha, ctx.id);
         }
@@ -278,7 +295,8 @@ export class SyncEngine {
       }
 
       // 10. 原子推送(引用 CAS + 回读确认;漂移时 BASE 取我方提交,不取未物化的并发头)
-      const push = await this._pushAtomic(ctx, batches);
+      const controlEntries = await this._takeControlPlaneEntries(ctx, { controlFiles });
+      const push = await this._pushAtomic(ctx, batches, controlEntries);
       if (!push || !push.finalSha) {
         throw new SyncError({
           category: SyncErrorCategory.REMOTE_CHANGED,
@@ -359,6 +377,8 @@ export class SyncEngine {
   // ---------- 阶段实现 ----------
 
   _checkConfig(ctx) {
+    // remoteRoot 在任何远端/本地操作前校验: 非法目录名绝不写入远端
+    validateRemoteRoot(this.config.remoteRoot || "");
     if (!ctx.owner || !ctx.repo) {
       throw new SyncError({ category: SyncErrorCategory.REPOSITORY, phase: SyncState.CHECKING, message: "仓库地址未配置或无法解析", recoverable: true });
     }
@@ -384,13 +404,12 @@ export class SyncEngine {
     });
   }
 
-  async _treeMap(entries) {
-    const map = new Map();
-    for (const e of entries || []) {
-      if (String(e.type).toLowerCase() !== "blob") continue;
-      map.set(e.path, { sha: e.sha, type: e.type, size: e.size || 0 });
-    }
-    return map;
+  /**
+   * 远端树拆分(读侧边界): 数据面条目去前缀到本地命名空间,控制面条目
+   * (.sy-gsp/**)按远端命名空间单列;其他空间/仓库杂项路径被剔除。
+   */
+  _splitRemoteTree(entries) {
+    return splitRemoteTree(entries, this.config.remoteRoot || "");
   }
 
   /**
@@ -467,9 +486,9 @@ export class SyncEngine {
         }
         const mbCommit = await this.provider.getCommit(mergeBase);
         ctx.baseRebuiltFrom = mergeBase;
-        return { baseEntries: await this._treeMap(await this.provider.getTree(mbCommit.treeSha)), baseSha: mergeBase };
+        return { baseEntries: (await this._splitRemoteTree(await this.provider.getTree(mbCommit.treeSha))).data, baseSha: mergeBase };
       }
-      return { baseEntries: await this._treeMap(await this.provider.getTree(baseCommit.treeSha)), baseSha };
+      return { baseEntries: (await this._splitRemoteTree(await this.provider.getTree(baseCommit.treeSha))).data, baseSha };
     }
 
     // 无确认基准: 首次同步
@@ -610,7 +629,7 @@ export class SyncEngine {
     return files;
   }
 
-  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false, rawRemoteEntries = new Map() } = {}) {
+  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false, rawRemoteEntries = new Map(), controlFiles = new Map() } = {}) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {
       throw new SyncError({
@@ -777,7 +796,8 @@ export class SyncEngine {
           await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
           throw this._skippedError(skipped, plan, "强制方向(以本地为准)的远端写入全部被跳过");
         }
-        const push = await this._pushAtomic(ctx, batches);
+        const controlEntries = await this._takeControlPlaneEntries(ctx, { controlFiles });
+        const push = await this._pushAtomic(ctx, batches, controlEntries);
         if (!push || !push.finalSha) {
           throw new SyncError({
             category: SyncErrorCategory.REMOTE_CHANGED,
@@ -823,6 +843,8 @@ export class SyncEngine {
       ctx.canonicalDrifts = drifts.length;
       const driftSha = await this._applyCanonicalCorrections(ctx, drifts);
       if (driftSha) confirmedSha = driftSha;
+      const controlSha = await this._pushControlPlaneIfNeeded(ctx, { controlFiles });
+      if (controlSha) confirmedSha = controlSha;
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
     }
 
@@ -840,7 +862,9 @@ export class SyncEngine {
    */
   async _assertRemoteMatchesLocal(ctx, commitSha, localShas) {
     const commit = await this.provider.getCommit(commitSha);
-    const remoteEntries = this._withoutIgnoredEntries(await this._treeMap(await this.provider.getTree(commit.treeSha)));
+    const remoteEntries = this._withoutIgnoredEntries(
+      (await this._splitRemoteTree(await this.provider.getTree(commit.treeSha))).data
+    );
     const remotePaths = new Set(remoteEntries.keys());
     const localPaths = new Set(localShas.keys());
     const residual = [...remotePaths].filter((path) => !localPaths.has(path));
@@ -1062,7 +1086,8 @@ export class SyncEngine {
         let canonicalBytes = canonicalConfBytes(bytes);
         if (canonicalBytes) {
           try {
-            const remote = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
+            // 写侧边界: 远端内容按同步空间路径读取
+            const remote = await this.provider.getFileContent(toRemotePath(item.path, this.config.remoteRoot || ""), ctx.observedRemoteHead);
             const preserved = preserveRemoteIcon(canonicalBytes, remote.bytes || null);
             if (preserved) canonicalBytes = preserved;
           } catch (err) {
@@ -1081,13 +1106,19 @@ export class SyncEngine {
    * 漂移语义(H3): 我方提交已进入远端父链(并发写手已推进)时,确认成功但远端头包含
    * 未在本机物化的并发内容——BASE 必须写"我方提交"(本地实际已物化的事实),
    * 不能写未物化的并发远端头,否则下一轮会把本地旧内容当成"本地修改"重传、回滚并发修改。
+   * @param {Array<{path:string, sha:string, mode:string}>} controlEntries
+   *   控制面条目(已是远端命名空间),并入首个处理批次,与数据变更同树提交
    * @returns {Promise<{finalSha:string, baseSha:string}>}
    */
-  async _pushAtomic(ctx, batches) {
+  async _pushAtomic(ctx, batches, controlEntries = []) {
     let finalSha = null;
     let baseSha = null;
+    let controlAppended = false;
+    const remoteRoot = this.config.remoteRoot || "";
     for (const batch of batches) {
-      if (batch.uploads.length === 0 && batch.deletePaths.length === 0) continue;
+      const isFirst = batch === batches[0];
+      const hasControl = isFirst && !controlAppended && controlEntries.length > 0;
+      if (batch.uploads.length === 0 && batch.deletePaths.length === 0 && !hasControl) continue;
       // 提交前二次读取远端 HEAD(不替代 CAS,仅尽早发现竞争);空仓库允许无头
       let headNow = null;
       try {
@@ -1116,10 +1147,16 @@ export class SyncEngine {
       const entries = [];
       for (const upload of batch.uploads) {
         const blobSha = await this.provider.createBlob(upload.bytes);
-        entries.push({ path: upload.path, sha: blobSha, mode: "100644" });
+        // 写侧边界: 数据条目统一加同步空间前缀(<remoteRoot>/data/**)
+        entries.push({ path: toRemotePath(upload.path, remoteRoot), sha: blobSha, mode: "100644" });
       }
       for (const dp of batch.deletePaths) {
-        entries.push({ path: dp.path, sha: null, mode: "100644" });
+        entries.push({ path: toRemotePath(dp.path, remoteRoot), sha: null, mode: "100644" });
+      }
+      if (isFirst && !controlAppended && controlEntries.length > 0) {
+        // 控制面条目已是远端命名空间(.sy-gsp/**),不加数据面前缀
+        for (const entry of controlEntries) entries.push(entry);
+        controlAppended = true;
       }
       const tree = await this.provider.createTree(treeBaseSha, entries);
       const parentSha = finalSha || (headNow ? headNow.sha : null);
@@ -1165,6 +1202,83 @@ export class SyncEngine {
   }
 
   /**
+   * 收集本轮待提交的控制面条目(remoteRoot 声明/文档层级清单/schema 引导)。
+   * 控制面失败不阻断数据同步,但必须可见: 记入运行日志,下一轮自动重试。
+   * @param {Map<string, {sha,size}>} controlFiles 远端控制面文件清单(.sy-gsp/**)
+   * @returns {Promise<Array<{path:string, sha:string, mode:string}>>}
+   */
+  async _takeControlPlaneEntries(ctx, { controlFiles }) {
+    if (!this.controlPlane) return [];
+    const files = controlFiles || new Map();
+    const entries = [];
+    const createBlob = (bytes) => this.provider.createBlob(bytes);
+    try {
+      const declaration = await this.controlPlane.declaration.pendingEntry({
+        space: this.config.remoteRoot || "",
+        controlFiles: files,
+        createBlob,
+      });
+      if (declaration) entries.push(declaration);
+    } catch (err) {
+      this._emit("engine:operation", {
+        ctx,
+        operation: "⚠️ 同步空间声明更新失败(数据同步不受影响,下轮重试): " + String((err && err.message) || err),
+        count: 1,
+        paths: [],
+      });
+    }
+    try {
+      const catalog = await this.controlPlane.catalog.pendingEntry({
+        space: this.config.remoteRoot || "",
+        remoteEntry: files.get(CATALOG_PATH) || null,
+        readBlob: (sha) => this.provider.getBlob(sha),
+        createBlob,
+      });
+      if (catalog) entries.push(catalog);
+    } catch (err) {
+      this._emit("engine:operation", {
+        ctx,
+        operation: "⚠️ 文档层级清单更新失败(数据同步不受影响,下轮重试): " + String((err && err.message) || err),
+        count: 1,
+        paths: [],
+      });
+    }
+    if (entries.length > 0 && !files.has(CONTROL_SCHEMA_PATH)) {
+      // 首次写入控制面时补齐协议版本文件(幂等,已有则跳过)
+      entries.unshift({
+        path: CONTROL_SCHEMA_PATH,
+        sha: await createBlob(serializeControlFile({ schemaVersion: CONTROL_SCHEMA_VERSION })),
+        mode: "100644",
+      });
+    }
+    return entries;
+  }
+
+  /**
+   * 无数据写入轮的控制面独立提交: 仅有控制面变化时发生,返回确认后的提交 sha
+   * (作为本轮 BASE 推进);无变化返回 null。
+   */
+  async _pushControlPlaneIfNeeded(ctx, { controlFiles }) {
+    const entries = await this._takeControlPlaneEntries(ctx, { controlFiles });
+    if (entries.length === 0) return null;
+    if (ctx.state === SyncState.MERGING) transition(ctx, SyncState.COMMITTING);
+    const message = (this.commitBuilder && this.commitBuilder.deviceName ? this.commitBuilder.deviceName + "-" : "") +
+      "控制面更新 [" + ctx.id + "]";
+    const push = await this._pushAtomic(ctx, [{ uploads: [], deletePaths: [], message }], entries);
+    if (!push || !push.finalSha) {
+      throw new SyncError({
+        category: SyncErrorCategory.REMOTE_CHANGED,
+        code: "PUSH_UNCONFIRMED",
+        operation: "pushControlPlane",
+        message: "控制面推送后无法确认远端引用状态,本轮不标记成功",
+        retryable: true,
+        recoverable: false,
+      });
+    }
+    return push.baseSha || push.finalSha;
+  }
+
+  /**
    * 远端确认后应用本地侧变更(下载/本地删除)。
    * M5: 破坏性写入前复查本地与快照是否一致,同步期间被用户修改/新建的文件一律
    * 中止覆盖,抛出可恢复错误,下一轮重新规划。
@@ -1201,7 +1315,8 @@ export class SyncEngine {
       if (localExistsNow) {
         await this.contentAdapter.backupFileWithBackup(item.path);
       }
-      const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
+      // 写侧边界: 远端内容按同步空间路径读取(本地路径 → <remoteRoot>/data/...)
+      const src = await this.provider.getFileContent(toRemotePath(item.path, this.config.remoteRoot || ""), ctx.observedRemoteHead);
       const writeOp = item.op === "create" && !localExistsNow ? "create" : "update";
       // conf.json 不直接写盘: 字段级合并(名称/图标取远端,设备状态保留本地)后,
       // 延后到整批下载完成,经内核 setNotebookConf 应用——否则运行中的内核会用

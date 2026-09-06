@@ -1,6 +1,6 @@
 /**
  * SyncMetadataStore: 同步基准元数据(2.0 方案 §5.4)。
- * - 按 "<platform>:<owner>/<repo>:<branch>" 隔离;
+ * - 按 "<platform>:<owner>/<repo>:<branch>[@<remoteRoot>]" 隔离(空空间时与 V1 键一致);
  * - 不存 Token、SSH 私钥、Authorization;
  * - lastConfirmedCommit 只有在远端引用更新成功且回读确认后才允许写入;
  * - 旧版 latest_commit_sha 仅作为 legacyHint 保留,永不自动当作确认基准;
@@ -8,6 +8,7 @@
  */
 
 import { SyncError, SyncErrorCategory } from "../sync/sync-error.js";
+import { composeRepoKey } from "../sync/remote-root.js";
 
 export const METADATA_FILE = "sync-metadata.json";
 export const SCHEMA_VERSION = 1;
@@ -24,8 +25,14 @@ export class SyncMetadataStore {
     this.versionMismatch = false;
   }
 
-  static keyOf({ provider, owner, repo, branch }) {
-    return provider + ":" + owner + "/" + repo + ":" + branch;
+  /**
+   * 基准隔离键: "<provider>:<owner>/<repo>:<branch>[@<remoteRoot>]"。
+   * remoteRoot 为空时与 V1 格式逐字一致(存量基准无需迁移);非空时按
+   * 同步空间隔离——切换空间即无基准,由首同步向导接管,绝不会复用旧空间的
+   * 基准提交(否则整批文件会被误判)。
+   */
+  static keyOf(info) {
+    return composeRepoKey(info);
   }
 
   async load() {

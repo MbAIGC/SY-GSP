@@ -22,6 +22,9 @@ import { LocalManifestStore } from "../storage/local-manifest-store.js";
 import { Migration } from "../storage/migration.js";
 import { createEventBus } from "../util/event-bus.js";
 import { parseRepoAddress } from "./repo-address.js";
+import { composeRepoKey, validateRemoteRoot, classifyRemotePath, splitRemoteTree } from "../sync/remote-root.js";
+import { DeclarationService, formatSpacesSummary } from "../control/declaration-service.js";
+import { CatalogService } from "../control/catalog-service.js";
 import { SettingsPanelBuilder } from "../ui/settings-builder.js";
 import { PER_PLATFORM_KEYS, PLATFORM_CONFIG_FILES } from "../ui/settings-panel.js";
 import { NotificationService } from "../ui/notification-service.js";
@@ -33,6 +36,9 @@ import { buildTopBarMenu } from "./menu.js";
 
 // 构建时由 build.mjs 从 plugin.json 注入;源码直跑(测试)环境下回退空串
 const PLUGIN_VERSION = (typeof __SY_GSP_VERSION__ === "string" && __SY_GSP_VERSION__) || "";
+
+/** 已发现同步空间的本地缓存(设置面板提示用;远端 .sy-gsp/ 声明才是发现事实) */
+const REMOTE_SPACES_FILE = "remote-spaces.json";
 
 const ICONS_MAIN =
   '<symbol id="iconGmailSync" viewBox="0 0 1024 1024"><path d="M998.4 627.2c-51.2 230.4-256 396.8-499.2 396.8-224 0-409.6-140.8-480-339.2h121.6c64 134.4 198.4 230.4 358.4 230.4 179.2 0 332.8-121.6 384-281.6l115.2-6.4zM499.2 0c224 0 409.6 140.8 480 339.2h-121.6c-64-134.4-198.4-230.4-358.4-230.4-179.2 0-332.8 121.6-384 281.6L0 396.8C51.2 172.8 256 0 499.2 0z" fill="#646A73"></path><path d="M998.4 332.8c0 32-25.6 57.6-57.6 64h-140.8c-19.2 0-32-12.8-32-32v-51.2c0-19.2 12.8-32 32-32h83.2V32c0-12.8 12.8-25.6 25.6-32h57.6c19.2 0 32 12.8 32 32v300.8zM0 659.2c0-32 25.6-57.6 57.6-64h140.8c19.2 0 32 12.8 32 32v51.2c0 19.2-12.8 32-32 32H115.2V960c0 12.8-12.8 25.6-25.6 32H32c-19.2 0-32-12.8-32-32v-300.8z" fill="#646A73"></path><path d="M665.6 569.6H512V473.6h249.6c12.8 0 12.8 0 12.8 6.4 6.4 70.4 0 134.4-38.4 192-38.4 57.6-96 96-160 108.8-83.2 19.2-166.4 0-236.8-51.2-57.6-44.8-89.6-102.4-96-172.8-19.2-147.2 64-275.2 204.8-313.6 89.6-19.2 172.8 0 243.2 57.6l6.4 6.4L620.8 384l-6.4-6.4c-25.6-25.6-64-38.4-108.8-38.4-83.2 0-153.6 64-160 147.2-12.8 89.6 44.8 172.8 134.4 192 51.2 12.8 96 6.4 140.8-25.6 19.2-19.2 38.4-44.8 44.8-76.8v-6.4z" fill="#646A73"></path></symbol>';
@@ -67,12 +73,15 @@ export default class SyGspPlugin extends q.Plugin {
       this.kernel = createKernel(q);
       await this.logs.load(this);
       await this._initStores();
+      await this._loadKnownSpaces();
       this.notification = new NotificationService({ q, i18n: this.i18n });
       this.settingsBuilder = new SettingsPanelBuilder({
         plugin: this,
         q,
         i18n: this.i18n,
         metadataStore: this.metadataStore,
+        detectRemoteSpaces: () => this._detectRemoteSpaces(),
+        knownSpacesSummary: () => this._knownSpacesSummary(),
         onPlatformChanged: async () => {
           this.logs.info("平台已切换: " + this._platform());
         },
@@ -237,6 +246,50 @@ export default class SyGspPlugin extends q.Plugin {
     await this.conflictService.load();
   }
 
+  /** 载入已发现空间的本地缓存(读取失败按空处理,可重新检测) */
+  async _loadKnownSpaces() {
+    try {
+      this._knownSpaces = await this.loadData(REMOTE_SPACES_FILE);
+    } catch (err) {
+      this._knownSpaces = null;
+    }
+  }
+
+  /** 已发现空间的展示摘要(一行一条: 设备 → 空间;附默认根数据信号) */
+  _knownSpacesSummary() {
+    return formatSpacesSummary(this._knownSpaces || {}, this.i18n);
+  }
+
+  /**
+   * 只读检测远端同步空间: 读取仓库根 .sy-gsp/*-remoteRoot.json 声明,并统计
+   * 默认根 data/** 文件数(判断"可能仍有设备在用默认根/旧版"的唯一间接信号)。
+   * 结果缓存到本地(remote-spaces.json)供设置面板展示,并作为返回摘要。
+   */
+  async _detectRemoteSpaces() {
+    const info = this._repoInfo();
+    if (!info.owner || !info.branch) {
+      throw new Error("仓库配置不完整,无法检测远程同步空间");
+    }
+    const provider = this._makeProvider(info);
+    const head = await provider.getBranchHead();
+    const commit = await provider.getCommit(head.sha);
+    const tree = await provider.getTree(commit.treeSha);
+    const controlFiles = splitRemoteTree(tree, info.remoteRoot).control;
+    const declaration = new DeclarationService({
+      provider,
+      getDeviceName: () => String(this.settingUtils.take("device_name") || ""),
+    });
+    const records = await declaration.discover(controlFiles, (sha) => provider.getBlob(sha));
+    this._knownSpaces = {
+      inspectedAt: new Date().toISOString(),
+      records,
+      rootDataFiles: (tree || []).filter((e) => e && e.type === "blob" && String(e.path).indexOf("data/") === 0).length,
+    };
+    await this.saveData(REMOTE_SPACES_FILE, this._knownSpaces);
+    this.logs.info("远程空间检测完成: " + records.length + " 条声明,默认根 " + this._knownSpaces.rootDataFiles + " 个文件");
+    return this._knownSpacesSummary();
+  }
+
   /** 旧版 SGSP 设置迁移(仅首次;失败不影响使用,详见迁移报告) */
   async _migrateFromLegacyIfNeeded() {
     const marker = await this.loadData("migration-report.json");
@@ -289,7 +342,7 @@ export default class SyGspPlugin extends q.Plugin {
 
   _repoInfo() {
     if (!this.settingUtils) {
-      return { provider: "github", owner: "", repo: "", branch: "", token: "" };
+      return { provider: "github", owner: "", repo: "", branch: "", token: "", remoteRoot: "" };
     }
     const addr = String(this.settingUtils.take("repository_address") || "");
     const parsed = parseRepoAddress(addr);
@@ -299,11 +352,18 @@ export default class SyGspPlugin extends q.Plugin {
       repo: parsed.repo,
       branch: String(this.settingUtils.take("repository_branch") || "").trim(),
       token: String(this.settingUtils.take("submit_token") || ""),
+      remoteRoot: this._currentRemoteRoot(),
     };
   }
 
+  /** 当前配置的同步空间(remoteRoot;空串 = 默认根目录) */
+  _currentRemoteRoot() {
+    if (!this.settingUtils) return "";
+    return String(this.settingUtils.take("remote_root") || "").trim();
+  }
+
   _repoKey(info) {
-    return info.provider + ":" + info.owner + "/" + info.repo + ":" + info.branch;
+    return composeRepoKey(info);
   }
 
   _buildController() {
@@ -332,6 +392,7 @@ export default class SyGspPlugin extends q.Plugin {
   _makeEngineDeps(ctx) {
     const info = this._repoInfo();
     const self = this;
+    const remoteRoot = info.remoteRoot;
     const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
     const workspace = new WorkspaceAdapter(this.kernel, {
       getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
@@ -351,6 +412,17 @@ export default class SyGspPlugin extends q.Plugin {
       guardLocalDelete: async (path) =>
         workspace.guardLocalDelete(path, self.manifestStore, { remoteEntryExists: true }),
     });
+    // 控制面服务(V2): remoteRoot 声明 + 文档层级清单,随引擎推送批次原子提交
+    const controlPlane = {
+      declaration: new DeclarationService({
+        provider,
+        getDeviceName: () => String(this.settingUtils.take("device_name") || ""),
+      }),
+      catalog: new CatalogService({
+        kernel: this.kernel,
+        getNotebooks: workspace.getNotebooks,
+      }),
+    };
     return {
       provider,
       workspace,
@@ -360,12 +432,14 @@ export default class SyGspPlugin extends q.Plugin {
       conflictService: this.conflictService,
       planner,
       merger: new ThreeWayMerger(),
+      controlPlane,
       commitBuilder: new CommitBuilder({
         requestLimit: Number(this.settingUtils.take("sygsp_blob_request_limit")) || 33554432,
         deviceName: String(this.settingUtils.take("device_name") || ""),
       }),
       events: this.events,
       config: {
+        remoteRoot,
         get repoKey() {
           return self._repoKey(info);
         },
@@ -774,7 +848,7 @@ export default class SyGspPlugin extends q.Plugin {
         getNotebooks: async () => ((await this.kernel.lsNotebooks()) || {}).notebooks || [],
       });
       const adapter = new ContentAdapter(this.kernel, { backupDir: "temp/SY-GSP/backup/", i18n: this.i18n });
-      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { syncRange: Number(this.settingUtils.get("sync_range")) === 0 ? 1 : (Number(this.settingUtils.get("sync_range")) || 1), syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
+      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { remoteRoot: info.remoteRoot, syncRange: Number(this.settingUtils.get("sync_range")) === 0 ? 1 : (Number(this.settingUtils.get("sync_range")) || 1), syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
       report = await service.inspect();
       this.logs.info("同步重建: 校验完成,本地 " + report.localCount + " 个,远端 " + report.remoteCount + " 个,差异 " + (report.onlyLocal.length + report.onlyRemote.length + report.different.length) + " 个");
     } catch (err) {
@@ -1007,16 +1081,24 @@ export default class SyGspPlugin extends q.Plugin {
     return new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
   }
 
-  /** 历史面板: 回滚(覆盖本地)/下载(另存到隔离目录) */
+  /** 历史面板: 回滚(覆盖本地)/下载(另存到隔离目录)。
+   * 面板展示的是远端路径(V2 起含空间前缀),落地前按同步空间映射回本地命名空间;
+   * 非本空间数据(其他空间/控制面)不允许覆盖本地 */
   async _writeCommitFile(path, ref, provider, overwrite) {
     try {
+      const kind = classifyRemotePath(path, this._currentRemoteRoot());
+      if (overwrite && kind.kind !== "data") {
+        this.notification.toast("该路径不属于当前同步空间,已停止回滚: " + path, "error");
+        return;
+      }
+      const localPath = kind.kind === "data" ? kind.localPath : path;
       const content = await provider.getFileContent(path, ref);
       const bytes = content.bytes;
       if (!bytes || bytes.length === 0) {
         this.notification.toast(this.i18n.sygspFileContentEmpty || "文件内容为空,已停止", "error");
         return;
       }
-      const targetPath = overwrite ? path : "temp/SY-GSP/downloads/" + String(path).replace(/^\/+/, "");
+      const targetPath = overwrite ? localPath : "temp/SY-GSP/downloads/" + String(localPath).replace(/^\/+/, "");
       await this.kernel.putFile(targetPath, new Blob([bytes]), false);
       const tpl = overwrite ? this.i18n.sygspRollbackDone || "已回滚" : this.i18n.sygspDownloadDone || "已下载";
       this.notification.toast(tpl + ": " + targetPath, "info");
@@ -1068,6 +1150,23 @@ export default class SyGspPlugin extends q.Plugin {
       ok: !!(info.owner && info.repo && info.branch),
       detail: info.owner ? info.provider + ": " + info.owner + "/" + info.repo + " @ " + info.branch : "仓库地址无法解析,请检查设置",
     });
+    // 同步空间配置校验: 非法 remoteRoot 会在同步前置检查中被拒绝,这里提前暴露
+    if (info.remoteRoot) {
+      try {
+        validateRemoteRoot(info.remoteRoot);
+        checks.push({ name: "同步空间(remoteRoot)", ok: true, detail: info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**" });
+        // 旧版共存是启用空间后最主要的数据风险来源,诊断处常驻提醒(静态,无法远程探测旧版)
+        checks.push({
+          name: "旧版共存风险",
+          ok: true,
+          detail: "⚠️ " + ((this.i18n && this.i18n.sygspRemoteRootDiagnosisRisk) || "旧版插件不识别 remoteRoot: 请确认所有设备已升级;未升级设备会误下载空间数据并反复冲突暂停,其「保留本地」/「同步重建·以本地为准」会从远端删除空间数据"),
+        });
+      } catch (err) {
+        checks.push({ name: "同步空间(remoteRoot)", ok: false, detail: String((err && err.message) || err) });
+      }
+    } else {
+      checks.push({ name: "同步空间(remoteRoot)", ok: true, detail: "默认根目录 → 远端 data/**" });
+    }
     checks.push({ name: "Token", ok: !!info.token, detail: info.token ? "已配置" : "未配置" });
 
     try {
@@ -1145,13 +1244,21 @@ export default class SyGspPlugin extends q.Plugin {
       name: "本地扫描(同步范围内)",
       detail: scan.files.length + " 个文件" + (scan.enumErrorOccurred ? "(存在目录枚举异常)" : ""),
     });
+    rows.push({
+      name: "同步空间(remoteRoot)",
+      detail: info.remoteRoot
+        ? info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**"
+        : "默认根目录 → 远端 data/**",
+    });
     try {
       const provider = this._makeProvider(info);
       const head = await provider.getBranchHead();
       const commit = await provider.getCommit(head.sha);
       const tree = await provider.getTree(commit.treeSha);
+      // 读侧边界一致: 只统计当前同步空间的数据面路径(其他空间/控制面不参与规划)
       const matcher = workspace.ignoreMatcher();
-      const remotePaths = new Set(tree.filter((e) => e.type === "blob" && !matcher.isIgnored(e.path)).map((e) => e.path));
+      const treeSplit = splitRemoteTree(tree, info.remoteRoot);
+      const remotePaths = new Set([...treeSplit.data.keys()].filter((p) => !matcher.isIgnored(p)));
       rows.push({ name: "远端文件", detail: remotePaths.size + " 个文件,HEAD " + head.sha.slice(0, 8) });
       const localSet = new Set(scan.files.map((f) => f.path));
       let onlyLocal = 0;

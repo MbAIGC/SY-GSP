@@ -30,6 +30,8 @@ export const SETTING_DEFAULTS = Object.freeze({
   sygsp_auto_retry: false,
   sygsp_success_notify: true,
   sygsp_blob_request_limit: 33554432, // 32MB
+  // V2 同步空间(remoteRoot): "" = 默认根目录(远端 data/**),非空 = <空间名>/data/**
+  remote_root: "",
 });
 
 /** 平台配置文件中的独立键(仓库地址/分支/Token/邮箱按平台分文件保存,与旧版一致) */

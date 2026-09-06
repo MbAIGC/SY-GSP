@@ -2311,6 +2311,117 @@ var ConflictService = class {
   }
 };
 
+// src/control/control-plane.js
+var CONTROL_DIR = ".sy-gsp";
+var CONTROL_SCHEMA_PATH = CONTROL_DIR + "/schema.json";
+var CONTROL_SCHEMA_VERSION = 1;
+function parseControlFile(bytes) {
+  if (!bytes || bytes.length === 0) return { ok: false, reason: "内容为空" };
+  let data;
+  try {
+    data = JSON.parse(new TextDecoder().decode(bytes));
+  } catch (err) {
+    return { ok: false, reason: "JSON 解析失败: " + String(err && err.message || err) };
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { ok: false, reason: "结构不是对象" };
+  }
+  const version = Number(data.schemaVersion);
+  if (!Number.isFinite(version)) return { ok: false, reason: "缺少 schemaVersion" };
+  if (version > CONTROL_SCHEMA_VERSION) {
+    return { ok: false, reason: "schemaVersion v" + version + " 高于本插件支持的 v" + CONTROL_SCHEMA_VERSION + ",请升级插件" };
+  }
+  return { ok: true, data };
+}
+function serializeControlFile(data) {
+  return new TextEncoder().encode(JSON.stringify(sortKeysDeep(data), null, 2) + "\n");
+}
+function controlDataEquals(a, b) {
+  const ea = serializeControlFile(a);
+  const eb = serializeControlFile(b);
+  if (ea.length !== eb.length) return false;
+  for (let i = 0; i < ea.length; i++) if (ea[i] !== eb[i]) return false;
+  return true;
+}
+function sortKeysDeep(value) {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value).sort()) out[key] = sortKeysDeep(value[key]);
+    return out;
+  }
+  return value;
+}
+
+// src/sync/remote-root.js
+var REMOTE_ROOT_MAX_LENGTH = 64;
+var REMOTE_ROOT_RE = /^[\u4e00-\u9fa5a-zA-Z0-9_-]+$/;
+function validateRemoteRoot(raw) {
+  const value = normalizeRemoteRoot(raw);
+  if (value === "") return "";
+  if (value.length > REMOTE_ROOT_MAX_LENGTH) {
+    throw remoteRootError("长度超过 " + REMOTE_ROOT_MAX_LENGTH + " 字符");
+  }
+  if (value === "." || value === "..") {
+    throw remoteRootError('不允许使用 "." 或 ".."');
+  }
+  if (!REMOTE_ROOT_RE.test(value)) {
+    throw remoteRootError("只能包含中英文、数字、连字符与下划线,且不能包含路径分隔符或空白");
+  }
+  return value;
+}
+function normalizeRemoteRoot(raw) {
+  return String(raw == null ? "" : raw).trim();
+}
+function remoteRootError(reason) {
+  return new SyncError({
+    category: SyncErrorCategory.REPOSITORY,
+    code: "INVALID_REMOTE_ROOT",
+    operation: "checkConfig",
+    message: "同步空间(remoteRoot)配置无效: " + reason,
+    retryable: false,
+    recoverable: true
+  });
+}
+function toRemotePath(localPath, remoteRoot) {
+  const root = normalizeRemoteRoot(remoteRoot);
+  if (!root) return String(localPath == null ? "" : localPath);
+  return root + "/" + String(localPath == null ? "" : localPath);
+}
+function toLocalPath(remotePath, remoteRoot) {
+  const p = String(remotePath == null ? "" : remotePath);
+  const root = normalizeRemoteRoot(remoteRoot);
+  if (!root) return p;
+  if (!p.startsWith(root + "/")) return null;
+  const rest = p.slice(root.length + 1);
+  if (!rest.startsWith("data/")) return null;
+  return rest;
+}
+function classifyRemotePath(remotePath, remoteRoot) {
+  const p = String(remotePath == null ? "" : remotePath);
+  if (p === CONTROL_DIR || p.startsWith(CONTROL_DIR + "/")) return { kind: "control" };
+  const local = toLocalPath(p, remoteRoot);
+  if (local === null) return { kind: "other" };
+  return { kind: "data", localPath: local };
+}
+function splitRemoteTree(entries, remoteRoot) {
+  const data = /* @__PURE__ */ new Map();
+  const control = /* @__PURE__ */ new Map();
+  for (const e of entries || []) {
+    if (!e || String(e.type).toLowerCase() !== "blob") continue;
+    const item = { sha: e.sha, type: e.type, size: e.size || 0 };
+    const kind = classifyRemotePath(e.path, remoteRoot);
+    if (kind.kind === "control") control.set(e.path, item);
+    else if (kind.kind === "data") data.set(kind.localPath, item);
+  }
+  return { data, control };
+}
+function composeRepoKey({ provider, owner, repo, branch, remoteRoot } = {}) {
+  const base = String(provider || "") + ":" + String(owner || "") + "/" + String(repo || "") + ":" + String(branch || "");
+  const root = normalizeRemoteRoot(remoteRoot);
+  return root ? base + "@" + root : base;
+}
+
 // src/sync/rebuild-service.js
 var NOTEBOOK_ID_RE = /^\d{14}-[a-z0-9]+$/i;
 function bytesEqual2(a, b) {
@@ -2357,7 +2468,8 @@ var RebuildService = class {
     const commit = await this.provider.getCommit(head.sha);
     const ignored = this.workspace.ignoreMatcher();
     const tree = await this.provider.getTree(commit.treeSha);
-    const remoteRaw = new Map((tree || []).filter((entry) => entry && entry.type === "blob").map((entry) => [entry.path, entry.sha]));
+    const split = splitRemoteTree(tree, this.config.remoteRoot || "");
+    const remoteRaw = new Map([...split.data].map(([path, entry]) => [path, entry.sha]));
     const remote = new Map([...remoteRaw].filter(([path]) => !ignored.isIgnored(path)));
     const onlyLocal = [];
     const onlyRemote = [];
@@ -2470,8 +2582,9 @@ var SyncQueue = class {
     this.lanes = /* @__PURE__ */ new Map();
     this.events = null;
   }
-  static keyOf({ provider, owner, repo, branch }) {
-    return provider + ":" + owner + "/" + repo + ":" + branch;
+  /** 队列通道键: 仓库分支 + 同步空间(remoteRoot,空根时与 V1 键格式一致) */
+  static keyOf(info) {
+    return composeRepoKey(info);
   }
   /**
    * 入队一个任务。
@@ -2733,7 +2846,7 @@ var SyncMode = Object.freeze({
   LOCAL_OVER_REMOTE: "local_over_remote"
 });
 var contextSeq = 0;
-function createSyncContext({ trigger, mode, provider, owner, repo, branch }) {
+function createSyncContext({ trigger, mode, provider, owner, repo, branch, remoteRoot }) {
   contextSeq += 1;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   return {
@@ -2744,6 +2857,8 @@ function createSyncContext({ trigger, mode, provider, owner, repo, branch }) {
     owner: owner || "",
     repo: repo || "",
     branch: branch || "",
+    // 同步空间(remoteRoot): 参与队列通道与暂停记录的键隔离(V2 目录层级)
+    remoteRoot: String(remoteRoot == null ? "" : remoteRoot).trim(),
     startedAt: now,
     finishedAt: null,
     phase: SyncState.QUEUED,
@@ -2786,6 +2901,87 @@ function finish(ctx, { state, result, error }) {
   return ctx;
 }
 
+// src/control/catalog-service.js
+var CATALOG_PATH = CONTROL_DIR + "/catalog.v1.json";
+var CatalogService = class {
+  /**
+   * @param {object} deps {kernel, getNotebooks: async () => [{id,name,closed?}]}
+   */
+  constructor(deps) {
+    this.kernel = deps.kernel;
+    this.getNotebooks = deps.getNotebooks || (async () => []);
+  }
+  /**
+   * 生成当前工作区(即本端所同步空间)的清单节。
+   * 数据源: 内核 SQL(blocks 表 type='d' 文档块),笔记本名称来自 lsNotebooks。
+   * @returns {Promise<{notebooks: Object<string, {name:string, docs:Object<string, {title:string, parent:string, hpath:string}>}>}>}
+   */
+  async buildSection() {
+    let rows = [];
+    try {
+      rows = await this.kernel.sql("SELECT box, id, parent_id, hpath, content FROM blocks WHERE type = 'd'") || [];
+    } catch (err) {
+      throw new Error("内核文档树查询失败: " + String(err && err.message || err));
+    }
+    const notebooks = {};
+    const docIdsByBox = /* @__PURE__ */ new Map();
+    for (const row of rows || []) {
+      if (!row || !row.id || !row.box) continue;
+      if (!docIdsByBox.has(row.box)) docIdsByBox.set(row.box, /* @__PURE__ */ new Set());
+      docIdsByBox.get(row.box).add(row.id);
+    }
+    let notebookNames = /* @__PURE__ */ new Map();
+    try {
+      for (const n of await this.getNotebooks() || []) {
+        if (n && n.id) notebookNames.set(n.id, String(n.name || ""));
+      }
+    } catch (err) {
+    }
+    for (const [box, ids] of docIdsByBox) {
+      const docs = {};
+      for (const row of rows) {
+        if (!row || !row.id || row.box !== box) continue;
+        docs[row.id] = {
+          title: String(row.content || ""),
+          // 父文档: parent_id 指向同笔记本内的另一文档;根文档(或指针不可解析)记空串,
+          // 不假设内核对根文档 parent_id 的具体取值
+          parent: ids.has(row.parent_id) ? row.parent_id : "",
+          hpath: String(row.hpath || "/")
+        };
+      }
+      notebooks[box] = { name: notebookNames.get(box) || "", docs };
+    }
+    return { notebooks };
+  }
+  /**
+   * 产出层级清单的远端树条目(内容有变化时),供引擎并入当前推送批次。
+   * @param {object} args {space, remoteEntry: {sha,size}|null, readBlob, createBlob}
+   * @returns {Promise<{path:string, sha:string, mode:string}|null>} null = 内容无变化
+   */
+  async pendingEntry({ space, remoteEntry, readBlob, createBlob }) {
+    const section = await this.buildSection();
+    let existing = null;
+    if (remoteEntry) {
+      const blob = await readBlob(remoteEntry.sha);
+      const parsed = parseControlFile(blob ? blob.bytes : null);
+      if (parsed.ok) existing = parsed.data;
+    }
+    const existingSpaces = existing && existing.spaces && typeof existing.spaces === "object" ? existing.spaces : {};
+    if (controlDataEquals(existingSpaces[space] || null, section)) return null;
+    if (!existingSpaces[space] && Object.keys(section.notebooks).length === 0) return null;
+    const spaces = {};
+    for (const key of Object.keys(existingSpaces)) spaces[key] = existingSpaces[key];
+    spaces[space] = section;
+    const bytes = serializeControlFile({
+      schemaVersion: CONTROL_SCHEMA_VERSION,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      spaces
+    });
+    const sha = await createBlob(bytes);
+    return { path: CATALOG_PATH, sha, mode: "100644" };
+  }
+};
+
 // src/sync/sync-engine.js
 var NOTEBOOK_ID_RE2 = /^\d{14}-[a-z0-9]+$/i;
 var SyncEngine = class {
@@ -2807,6 +3003,7 @@ var SyncEngine = class {
     this.commitBuilder = deps.commitBuilder;
     this.events = deps.events;
     this.config = deps.config;
+    this.controlPlane = deps.controlPlane || null;
   }
   _emit(name, payload) {
     if (this.events) this.events.emit(name, payload);
@@ -2845,6 +3042,7 @@ var SyncEngine = class {
       const rebuildRemote = ctx.trigger === "rebuild" || ctx.originTrigger === "rebuild";
       let remoteHead = null;
       let remoteEntries = /* @__PURE__ */ new Map();
+      let controlFiles = /* @__PURE__ */ new Map();
       let branchHeadMissing = false;
       try {
         try {
@@ -2859,7 +3057,9 @@ var SyncEngine = class {
         ctx.observedRemoteHead = remoteHead.sha;
         const remoteCommit = await this.provider.getCommit(remoteHead.sha);
         ctx.remoteCommitDate = remoteCommit.date || null;
-        remoteEntries = await this._treeMap(await this.provider.getTree(remoteCommit.treeSha));
+        const treeSplit = await this._splitRemoteTree(await this.provider.getTree(remoteCommit.treeSha));
+        remoteEntries = treeSplit.data;
+        controlFiles = treeSplit.control;
       } catch (err) {
         if (!(err instanceof SyncError && err.httpStatus === 404 && branchHeadMissing)) throw err;
         if (confirmedBaseSha && !forcedByWizard) {
@@ -2880,7 +3080,7 @@ var SyncEngine = class {
       const rawRemoteEntries = remoteEntries;
       remoteEntries = this._withoutIgnoredEntries(remoteEntries);
       if (forcedByWizard) {
-        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote, rawRemoteEntries });
+        return this._runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote, rawRemoteEntries, controlFiles });
       }
       transition(ctx, SyncState.RESOLVING_BASE);
       this._emit("engine:phase", { ctx, state: SyncState.RESOLVING_BASE });
@@ -2966,7 +3166,8 @@ var SyncEngine = class {
         }
         ctx.canonicalDrifts = drifts2.length;
         const driftSha2 = await this._applyCanonicalCorrections(ctx, drifts2);
-        const confirmedSha2 = driftSha2 || (remoteHead ? remoteHead.sha : null);
+        const controlSha = await this._pushControlPlaneIfNeeded(ctx, { controlFiles });
+        const confirmedSha2 = driftSha2 || controlSha || (remoteHead ? remoteHead.sha : null);
         if (confirmedSha2) {
           await this.metadataStore.setConfirmedCommit(this.config.repoKey, confirmedSha2, ctx.id);
         }
@@ -2994,7 +3195,8 @@ var SyncEngine = class {
         await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
         throw this._skippedError(skipped, plan, "远端写入全部被跳过");
       }
-      const push = await this._pushAtomic(ctx, batches);
+      const controlEntries = await this._takeControlPlaneEntries(ctx, { controlFiles });
+      const push = await this._pushAtomic(ctx, batches, controlEntries);
       if (!push || !push.finalSha) {
         throw new SyncError({
           category: SyncErrorCategory.REMOTE_CHANGED,
@@ -3068,6 +3270,7 @@ var SyncEngine = class {
   }
   // ---------- 阶段实现 ----------
   _checkConfig(ctx) {
+    validateRemoteRoot(this.config.remoteRoot || "");
     if (!ctx.owner || !ctx.repo) {
       throw new SyncError({ category: SyncErrorCategory.REPOSITORY, phase: SyncState.CHECKING, message: "仓库地址未配置或无法解析", recoverable: true });
     }
@@ -3089,13 +3292,12 @@ var SyncEngine = class {
       recoverable: true
     });
   }
-  async _treeMap(entries) {
-    const map = /* @__PURE__ */ new Map();
-    for (const e of entries || []) {
-      if (String(e.type).toLowerCase() !== "blob") continue;
-      map.set(e.path, { sha: e.sha, type: e.type, size: e.size || 0 });
-    }
-    return map;
+  /**
+   * 远端树拆分(读侧边界): 数据面条目去前缀到本地命名空间,控制面条目
+   * (.sy-gsp/**)按远端命名空间单列;其他空间/仓库杂项路径被剔除。
+   */
+  _splitRemoteTree(entries) {
+    return splitRemoteTree(entries, this.config.remoteRoot || "");
   }
   /**
    * 本地内容的规划 sha:
@@ -3168,9 +3370,9 @@ var SyncEngine = class {
         }
         const mbCommit = await this.provider.getCommit(mergeBase);
         ctx.baseRebuiltFrom = mergeBase;
-        return { baseEntries: await this._treeMap(await this.provider.getTree(mbCommit.treeSha)), baseSha: mergeBase };
+        return { baseEntries: (await this._splitRemoteTree(await this.provider.getTree(mbCommit.treeSha))).data, baseSha: mergeBase };
       }
-      return { baseEntries: await this._treeMap(await this.provider.getTree(baseCommit.treeSha)), baseSha };
+      return { baseEntries: (await this._splitRemoteTree(await this.provider.getTree(baseCommit.treeSha))).data, baseSha };
     }
     if (!remoteHeadSha) {
       return { baseEntries: /* @__PURE__ */ new Map(), baseSha: null };
@@ -3293,7 +3495,7 @@ var SyncEngine = class {
     }
     return files;
   }
-  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false, rawRemoteEntries = /* @__PURE__ */ new Map() } = {}) {
+  async _runForcedDirection(ctx, remoteHead, remoteEntries, scan, localShas, { rebuildRemote = false, rawRemoteEntries = /* @__PURE__ */ new Map(), controlFiles = /* @__PURE__ */ new Map() } = {}) {
     const keepLocal = ctx.mode === SyncMode.LOCAL_OVER_REMOTE;
     if (!keepLocal && !remoteHead) {
       throw new SyncError({
@@ -3447,7 +3649,8 @@ var SyncEngine = class {
           await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
           throw this._skippedError(skipped, plan, "强制方向(以本地为准)的远端写入全部被跳过");
         }
-        const push = await this._pushAtomic(ctx, batches);
+        const controlEntries = await this._takeControlPlaneEntries(ctx, { controlFiles });
+        const push = await this._pushAtomic(ctx, batches, controlEntries);
         if (!push || !push.finalSha) {
           throw new SyncError({
             category: SyncErrorCategory.REMOTE_CHANGED,
@@ -3487,6 +3690,8 @@ var SyncEngine = class {
       ctx.canonicalDrifts = drifts.length;
       const driftSha = await this._applyCanonicalCorrections(ctx, drifts);
       if (driftSha) confirmedSha = driftSha;
+      const controlSha = await this._pushControlPlaneIfNeeded(ctx, { controlFiles });
+      if (controlSha) confirmedSha = controlSha;
       await this._rebuildManifest(ctx, plan, remoteEntries, { deletionsExecuted: false });
     }
     if (confirmedSha) {
@@ -3502,7 +3707,9 @@ var SyncEngine = class {
    */
   async _assertRemoteMatchesLocal(ctx, commitSha, localShas) {
     const commit = await this.provider.getCommit(commitSha);
-    const remoteEntries = this._withoutIgnoredEntries(await this._treeMap(await this.provider.getTree(commit.treeSha)));
+    const remoteEntries = this._withoutIgnoredEntries(
+      (await this._splitRemoteTree(await this.provider.getTree(commit.treeSha))).data
+    );
     const remotePaths = new Set(remoteEntries.keys());
     const localPaths = new Set(localShas.keys());
     const residual = [...remotePaths].filter((path) => !localPaths.has(path));
@@ -3706,7 +3913,7 @@ var SyncEngine = class {
         let canonicalBytes = canonicalConfBytes(bytes);
         if (canonicalBytes) {
           try {
-            const remote = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
+            const remote = await this.provider.getFileContent(toRemotePath(item.path, this.config.remoteRoot || ""), ctx.observedRemoteHead);
             const preserved = preserveRemoteIcon(canonicalBytes, remote.bytes || null);
             if (preserved) canonicalBytes = preserved;
           } catch (err) {
@@ -3723,13 +3930,19 @@ var SyncEngine = class {
    * 漂移语义(H3): 我方提交已进入远端父链(并发写手已推进)时,确认成功但远端头包含
    * 未在本机物化的并发内容——BASE 必须写"我方提交"(本地实际已物化的事实),
    * 不能写未物化的并发远端头,否则下一轮会把本地旧内容当成"本地修改"重传、回滚并发修改。
+   * @param {Array<{path:string, sha:string, mode:string}>} controlEntries
+   *   控制面条目(已是远端命名空间),并入首个处理批次,与数据变更同树提交
    * @returns {Promise<{finalSha:string, baseSha:string}>}
    */
-  async _pushAtomic(ctx, batches) {
+  async _pushAtomic(ctx, batches, controlEntries = []) {
     let finalSha = null;
     let baseSha = null;
+    let controlAppended = false;
+    const remoteRoot = this.config.remoteRoot || "";
     for (const batch of batches) {
-      if (batch.uploads.length === 0 && batch.deletePaths.length === 0) continue;
+      const isFirst = batch === batches[0];
+      const hasControl = isFirst && !controlAppended && controlEntries.length > 0;
+      if (batch.uploads.length === 0 && batch.deletePaths.length === 0 && !hasControl) continue;
       let headNow = null;
       try {
         headNow = await this.provider.getBranchHead();
@@ -3756,10 +3969,14 @@ var SyncEngine = class {
       const entries = [];
       for (const upload of batch.uploads) {
         const blobSha = await this.provider.createBlob(upload.bytes);
-        entries.push({ path: upload.path, sha: blobSha, mode: "100644" });
+        entries.push({ path: toRemotePath(upload.path, remoteRoot), sha: blobSha, mode: "100644" });
       }
       for (const dp of batch.deletePaths) {
-        entries.push({ path: dp.path, sha: null, mode: "100644" });
+        entries.push({ path: toRemotePath(dp.path, remoteRoot), sha: null, mode: "100644" });
+      }
+      if (isFirst && !controlAppended && controlEntries.length > 0) {
+        for (const entry of controlEntries) entries.push(entry);
+        controlAppended = true;
       }
       const tree = await this.provider.createTree(treeBaseSha, entries);
       const parentSha = finalSha || (headNow ? headNow.sha : null);
@@ -3796,6 +4013,79 @@ var SyncEngine = class {
     return { finalSha, baseSha };
   }
   /**
+   * 收集本轮待提交的控制面条目(remoteRoot 声明/文档层级清单/schema 引导)。
+   * 控制面失败不阻断数据同步,但必须可见: 记入运行日志,下一轮自动重试。
+   * @param {Map<string, {sha,size}>} controlFiles 远端控制面文件清单(.sy-gsp/**)
+   * @returns {Promise<Array<{path:string, sha:string, mode:string}>>}
+   */
+  async _takeControlPlaneEntries(ctx, { controlFiles }) {
+    if (!this.controlPlane) return [];
+    const files = controlFiles || /* @__PURE__ */ new Map();
+    const entries = [];
+    const createBlob = (bytes) => this.provider.createBlob(bytes);
+    try {
+      const declaration = await this.controlPlane.declaration.pendingEntry({
+        space: this.config.remoteRoot || "",
+        controlFiles: files,
+        createBlob
+      });
+      if (declaration) entries.push(declaration);
+    } catch (err) {
+      this._emit("engine:operation", {
+        ctx,
+        operation: "⚠️ 同步空间声明更新失败(数据同步不受影响,下轮重试): " + String(err && err.message || err),
+        count: 1,
+        paths: []
+      });
+    }
+    try {
+      const catalog = await this.controlPlane.catalog.pendingEntry({
+        space: this.config.remoteRoot || "",
+        remoteEntry: files.get(CATALOG_PATH) || null,
+        readBlob: (sha) => this.provider.getBlob(sha),
+        createBlob
+      });
+      if (catalog) entries.push(catalog);
+    } catch (err) {
+      this._emit("engine:operation", {
+        ctx,
+        operation: "⚠️ 文档层级清单更新失败(数据同步不受影响,下轮重试): " + String(err && err.message || err),
+        count: 1,
+        paths: []
+      });
+    }
+    if (entries.length > 0 && !files.has(CONTROL_SCHEMA_PATH)) {
+      entries.unshift({
+        path: CONTROL_SCHEMA_PATH,
+        sha: await createBlob(serializeControlFile({ schemaVersion: CONTROL_SCHEMA_VERSION })),
+        mode: "100644"
+      });
+    }
+    return entries;
+  }
+  /**
+   * 无数据写入轮的控制面独立提交: 仅有控制面变化时发生,返回确认后的提交 sha
+   * (作为本轮 BASE 推进);无变化返回 null。
+   */
+  async _pushControlPlaneIfNeeded(ctx, { controlFiles }) {
+    const entries = await this._takeControlPlaneEntries(ctx, { controlFiles });
+    if (entries.length === 0) return null;
+    if (ctx.state === SyncState.MERGING) transition(ctx, SyncState.COMMITTING);
+    const message = (this.commitBuilder && this.commitBuilder.deviceName ? this.commitBuilder.deviceName + "-" : "") + "控制面更新 [" + ctx.id + "]";
+    const push = await this._pushAtomic(ctx, [{ uploads: [], deletePaths: [], message }], entries);
+    if (!push || !push.finalSha) {
+      throw new SyncError({
+        category: SyncErrorCategory.REMOTE_CHANGED,
+        code: "PUSH_UNCONFIRMED",
+        operation: "pushControlPlane",
+        message: "控制面推送后无法确认远端引用状态,本轮不标记成功",
+        retryable: true,
+        recoverable: false
+      });
+    }
+    return push.baseSha || push.finalSha;
+  }
+  /**
    * 远端确认后应用本地侧变更(下载/本地删除)。
    * M5: 破坏性写入前复查本地与快照是否一致,同步期间被用户修改/新建的文件一律
    * 中止覆盖,抛出可恢复错误,下一轮重新规划。
@@ -3825,7 +4115,7 @@ var SyncEngine = class {
       if (localExistsNow) {
         await this.contentAdapter.backupFileWithBackup(item.path);
       }
-      const src = await this.provider.getFileContent(item.path, ctx.observedRemoteHead);
+      const src = await this.provider.getFileContent(toRemotePath(item.path, this.config.remoteRoot || ""), ctx.observedRemoteHead);
       const writeOp = item.op === "create" && !localExistsNow ? "create" : "update";
       if (isNotebookConfPath(item.path)) {
         const notebookId = confNotebookId(item.path);
@@ -4179,10 +4469,11 @@ var SyncController = class {
       provider: info.provider,
       owner: info.owner,
       repo: info.repo,
-      branch: info.branch
+      branch: info.branch,
+      remoteRoot: info.remoteRoot
     });
     if (overrides) ctx.overrides = overrides;
-    this.logger.info("开始同步 #" + ctx.id + " trigger=" + trigger + " mode=" + mode + " overrides=" + (overrides ? overrides.size : 0) + " repo=" + info.owner + "/" + info.repo + " branch=" + info.branch);
+    this.logger.info("开始同步 #" + ctx.id + " trigger=" + trigger + " mode=" + mode + " overrides=" + (overrides ? overrides.size : 0) + " repo=" + info.owner + "/" + info.repo + " branch=" + info.branch + (info.remoteRoot ? " space=" + info.remoteRoot : " space=默认根目录"));
     return this.queue.enqueue(
       key,
       () => this._runWithRetry(ctx),
@@ -4269,7 +4560,8 @@ var SyncController = class {
           provider: ctx.provider,
           owner: ctx.owner,
           repo: ctx.repo,
-          branch: ctx.branch
+          branch: ctx.branch,
+          remoteRoot: ctx.remoteRoot
         });
         ctx.originTrigger = originTrigger;
         ctx.attempt = attempt;
@@ -4280,7 +4572,7 @@ var SyncController = class {
   }
   async _onFinished(ctx, result) {
     this.state = SyncState.SUCCESS;
-    const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+    const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch, remoteRoot: ctx.remoteRoot });
     const hadPause = this._conflictByRepo.has(key);
     const pausedRecord = this._conflictByRepo.get(key) || null;
     if (hadPause) {
@@ -4305,7 +4597,7 @@ var SyncController = class {
     if (ctx.state === SyncState.CONFLICT_PAUSED) {
       const kind = ctx.baseUnresolved ? "BASE_UNRESOLVED" : "FILE_CONFLICTS";
       const conflictList = (ctx.conflicts || []).filter((c) => c && c.path && c.path !== "__base__");
-      const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch });
+      const key = SyncQueue.keyOf({ provider: ctx.provider, owner: ctx.owner, repo: ctx.repo, branch: ctx.branch, remoteRoot: ctx.remoteRoot });
       if (kind === "FILE_CONFLICTS" && this.conflictService && !this.conflictService.openSet(key)) {
         try {
           await this.conflictService.saveSet({
@@ -4438,8 +4730,14 @@ var SyncMetadataStore = class {
     this.data = { schemaVersion: SCHEMA_VERSION, repositories: {}, legacyHints: {} };
     this.versionMismatch = false;
   }
-  static keyOf({ provider, owner, repo, branch }) {
-    return provider + ":" + owner + "/" + repo + ":" + branch;
+  /**
+   * 基准隔离键: "<provider>:<owner>/<repo>:<branch>[@<remoteRoot>]"。
+   * remoteRoot 为空时与 V1 格式逐字一致(存量基准无需迁移);非空时按
+   * 同步空间隔离——切换空间即无基准,由首同步向导接管,绝不会复用旧空间的
+   * 基准提交(否则整批文件会被误判)。
+   */
+  static keyOf(info) {
+    return composeRepoKey(info);
   }
   async load() {
     try {
@@ -4821,6 +5119,101 @@ function parseRepoAddress(addr) {
   return { host: "", owner: "", repo: "" };
 }
 
+// src/control/declaration-service.js
+var DECLARATION_SUFFIX = "-remoteRoot.json";
+var DECLARATION_RE = new RegExp(
+  "^" + CONTROL_DIR.replace(/\./g, "\\.") + "\\/([a-z0-9-]+)" + DECLARATION_SUFFIX.replace(/\./g, "\\.") + "$"
+);
+function normalizeDeviceName(raw) {
+  const s = String(raw == null ? "" : raw).trim();
+  if (!s) return "user";
+  const folded = s.toLowerCase().replace(/\s+/g, "-");
+  if (/^[a-z0-9_-]{1,32}$/.test(folded) && !/^-+$/.test(folded)) {
+    return folded.replace(/^-+|-+$/g, "") || "user";
+  }
+  return "device-" + shortHash(s);
+}
+function shortHash(text) {
+  const s = String(text == null ? "" : text);
+  let hash = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    hash ^= s.charCodeAt(i);
+    hash = hash + (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0").slice(0, 6);
+}
+function formatSpacesSummary(cache, t = {}) {
+  const records = cache && cache.records || [];
+  const lines = records.map(
+    (r) => r.healthy ? r.device + " → " + (r.space || (t.defaultRoot || "默认根目录")) : r.device + "(声明无效: " + (r.reason || "") + ")"
+  );
+  if (lines.length === 0) lines.push(t.none || "未发现声明文件(远端仅默认根目录)");
+  const rootCount = Number(cache && cache.rootDataFiles);
+  if (Number.isFinite(rootCount)) {
+    lines.push((t.rootData || "默认根目录 data/**: {n} 个文件").replace("{n}", String(rootCount)));
+    if (rootCount > 0) {
+      lines.push(t.rootDataRisk || "⚠️ 默认根仍有数据: 可能仍有设备使用默认根/旧版插件,启用其他空间前请先升级所有设备");
+    }
+  }
+  return lines.join("\n");
+}
+var DeclarationService = class {
+  /**
+   * @param {object} deps {provider, getDeviceName: () => string}
+   */
+  constructor(deps) {
+    this.provider = deps.provider;
+    this.getDeviceName = deps.getDeviceName || (() => "");
+  }
+  /**
+   * 从控制面文件清单发现已有声明。
+   * @param {Map<string, {sha,size}>} controlFiles .sy-gsp/** 远端条目(远端命名空间)
+   * @param {(sha: string) => Promise<{bytes: Uint8Array}>} readBlob
+   * @returns {Promise<Array<{file:string, healthy:boolean, space:string, device:string, reason:string}>>}
+   */
+  async discover(controlFiles, readBlob) {
+    const found = [];
+    for (const file of controlFiles ? controlFiles.keys() : []) {
+      const match = DECLARATION_RE.exec(String(file));
+      if (!match) continue;
+      const record = { file, healthy: false, space: "", device: match[1], reason: "" };
+      try {
+        const blob = await readBlob(controlFiles.get(file).sha);
+        const parsed = parseControlFile(blob ? blob.bytes : null);
+        if (!parsed.ok) {
+          record.reason = parsed.reason;
+        } else if (typeof parsed.data.remoteRoot !== "string") {
+          record.reason = "缺少 remoteRoot 字段";
+        } else {
+          record.healthy = true;
+          record.space = parsed.data.remoteRoot;
+        }
+      } catch (err) {
+        record.reason = String(err && err.message || err);
+      }
+      found.push(record);
+    }
+    return found;
+  }
+  /**
+   * 本端是否需要创建声明条目(用户选择了尚未被任何声明指向的空间)。
+   * 已声明 → null(直接复用,不创建新文件);默认根目录 → null(无需声明)。
+   * @returns {Promise<{path:string, sha:string, mode:string}|null>}
+   */
+  async pendingEntry({ space, controlFiles, createBlob }) {
+    if (!space) return null;
+    const existing = await this.discover(controlFiles, (sha2) => this.provider.getBlob(sha2));
+    if (existing.some((d) => d.healthy && d.space === space)) return null;
+    const deviceToken = normalizeDeviceName(this.getDeviceName());
+    let path = CONTROL_DIR + "/" + deviceToken + DECLARATION_SUFFIX;
+    const occupied = existing.find((d) => d.file === path);
+    if (occupied) path = CONTROL_DIR + "/" + deviceToken + "-" + shortHash(space) + DECLARATION_SUFFIX;
+    const bytes = serializeControlFile({ schemaVersion: 1, remoteRoot: space });
+    const sha = await createBlob(bytes);
+    return { path, sha, mode: "100644" };
+  }
+};
+
 // src/ui/settings-panel.js
 var PLATFORM_CONFIG_FILES = {
   github: "plugin_config_git_sync_github"
@@ -4844,8 +5237,10 @@ var SETTING_DEFAULTS = Object.freeze({
   // SY-GSP 新增
   sygsp_auto_retry: false,
   sygsp_success_notify: true,
-  sygsp_blob_request_limit: 33554432
+  sygsp_blob_request_limit: 33554432,
   // 32MB
+  // V2 同步空间(remoteRoot): "" = 默认根目录(远端 data/**),非空 = <空间名>/data/**
+  remote_root: ""
 });
 var PER_PLATFORM_KEYS = Object.freeze([
   "repository_address",
@@ -5038,7 +5433,8 @@ var SettingUtils = class {
 // src/ui/settings-builder.js
 var SettingsPanelBuilder = class {
   /**
-   * @param {object} deps {plugin, q, i18n, onPlatformChanged(platform), onRepoFieldChanged(), metadataStore}
+   * @param {object} deps {plugin, q, i18n, onPlatformChanged(platform), onRepoFieldChanged(), metadataStore,
+   *   detectRemoteSpaces?: async () => string 摘要, knownSpacesSummary?: () => string}
    */
   constructor(deps) {
     this.plugin = deps.plugin;
@@ -5047,6 +5443,8 @@ var SettingsPanelBuilder = class {
     this.onPlatformChanged = deps.onPlatformChanged;
     this.onRepoFieldChanged = deps.onRepoFieldChanged;
     this.metadataStore = deps.metadataStore;
+    this.detectRemoteSpaces = deps.detectRemoteSpaces || null;
+    this.knownSpacesSummary = deps.knownSpacesSummary || null;
   }
   /** 当前远端平台。Gitee 暂不支持,恒为 github */
   currentPlatform() {
@@ -5076,6 +5474,14 @@ var SettingsPanelBuilder = class {
       if (saved && saved[key] !== void 0 && saved[key] !== null) this.utils.set(key, saved[key]);
     }
     this._platformFile = platformFile;
+    const rawRemoteRoot = String(this.utils.get("remote_root") || "");
+    try {
+      this._lastValidRemoteRoot = validateRemoteRoot(rawRemoteRoot);
+    } catch (err) {
+      this._lastValidRemoteRoot = "";
+      this.utils.set("remote_root", "");
+      await this.utils.save();
+    }
     this._refreshBaseHints();
     if (this._legacyGiteeNormalized) {
       this.utils.addItem({
@@ -5160,6 +5566,29 @@ var SettingsPanelBuilder = class {
       title: t.gitUserEmail,
       placeholder: t.gitUserEmailPlaceHolder,
       description: t.gitUserEmailDesc
+    });
+    u.addItem({
+      key: "remote_root",
+      type: "textinput",
+      value: val("remote_root"),
+      placeholder: t.sygspRemoteRootPlaceholder || "留空 = 默认根目录,例如 A-Note",
+      title: t.sygspRemoteRoot || "远程同步空间(remoteRoot)",
+      description: t.sygspRemoteRootDesc || "数据将存放于远端仓库 <空间名>/data/**;留空 = 默认根目录 data/**。仅限单段目录名(中英文/数字/连字符/下划线)。启用前请先将所有设备升级到支持该功能的版本",
+      action: { callback: () => this._onRemoteRootChanged() }
+    });
+    u.addItem({
+      key: "remote_root_hint",
+      type: "hint",
+      direction: "row",
+      value: this.knownSpacesSummary ? this.knownSpacesSummary() : "",
+      title: t.sygspRemoteRootDiscovered || "已发现的同步空间",
+      description: t.sygspRemoteRootDiscoveredDesc || "来自远端 .sy-gsp/ 声明(其他设备首次使用某空间时创建);声明仅供参考,始终由你自由选择"
+    });
+    u.addItem({
+      key: "remote_root_detect",
+      type: "button",
+      title: t.sygspRemoteRootDetect || "检测远程同步空间",
+      action: { callback: () => this._detectSpaces() }
     });
     u.addItem({
       key: "ignore_file",
@@ -5276,7 +5705,8 @@ var SettingsPanelBuilder = class {
       provider: this.currentPlatform(),
       owner: info.owner,
       repo: info.repo,
-      branch: this.utils.get("repository_branch") || ""
+      branch: this.utils.get("repository_branch") || "",
+      remoteRoot: String(this.utils.get("remote_root") || "").trim()
     });
     const base = repoKey ? this.metadataStore.get(repoKey) : null;
     this.utils.set(
@@ -5300,12 +5730,96 @@ var SettingsPanelBuilder = class {
             provider: this.currentPlatform(),
             owner: info.owner,
             repo: info.repo,
-            branch: this.utils.get("repository_branch") || ""
+            branch: this.utils.get("repository_branch") || "",
+            remoteRoot: String(this.utils.get("remote_root") || "").trim()
           });
           await this.metadataStore.clear(repoKey);
         }
       });
     }
+  }
+  /** 远程空间输入变更: 校验非法值(立即回退);空间实际切换必须经确认弹窗,
+   * 取消即回退——旧版插件共存会造成误下载/反复冲突/远端误删(用户确认的风险知悉) */
+  _onRemoteRootChanged() {
+    const u = this.utils;
+    const raw = String(u.get("remote_root") || "");
+    let normalized;
+    try {
+      normalized = validateRemoteRoot(raw);
+    } catch (err) {
+      if (this.q && typeof this.q.showMessage === "function") {
+        this.q.showMessage(String(err && err.message || err), 6e3, "error");
+      }
+      u.set("remote_root", this._lastValidRemoteRoot != null ? this._lastValidRemoteRoot : "");
+      return;
+    }
+    if (normalized === this._lastValidRemoteRoot) {
+      if (raw !== normalized) u.set("remote_root", normalized);
+      return;
+    }
+    this._openRemoteRootConfirmDialog(normalized);
+  }
+  /**
+   * 空间切换确认对话框(低频高危操作): 确认才生效,取消/关闭即回退原值。
+   * 用自定义 Dialog 而非内核 confirm: 取消语义必须可靠,不能依赖可选的取消回调。
+   */
+  _openRemoteRootConfirmDialog(target) {
+    const t = this.i18n;
+    const u = this.utils;
+    const previous = this._lastValidRemoteRoot != null ? this._lastValidRemoteRoot : "";
+    const dialog = new this.q.Dialog({
+      title: t.sygspRemoteRootConfirmTitle || "切换同步空间确认",
+      content: '<div id="sygspRemoteRootConfirm" style="padding:16px;white-space:pre-wrap"></div>',
+      width: "560px"
+    });
+    const root = dialog.element.querySelector("#sygspRemoteRootConfirm");
+    const targetText = target ? "空间 " + target + "(远端 " + target + "/data/**)" : t.sygspRemoteRootDefault || "默认根目录(远端 data/**)";
+    root.textContent = [
+      t.sygspRemoteRootConfirmTarget || "目标: {path}。旧空间数据不会被自动迁移或删除".replace("{path}", targetText),
+      t.sygspRemoteRootConfirmRisk || "⚠️ 所有设备必须已升级到支持 remoteRoot 的版本。旧版插件会把空间数据整份下载成工作区垃圾目录,并可能反复进入冲突暂停;旧版冲突选「保留本地」或执行「同步重建·以本地为准」会从远端删除该空间数据(可由 git 历史与本机备份恢复,但属于数据事故)",
+      t.sygspRemoteRootConfirmWizard || "确认后首次同步将进入首同步向导,请选择正确方向(上传本地/下载远端)",
+      t.sygspRemoteRootConfirmUnknown || "插件无法检测是否存在旧版设备,此确认仅为风险知悉"
+    ].join("\n\n");
+    const bar = document.createElement("div");
+    bar.className = "fn__flex";
+    bar.style.cssText = "justify-content:flex-end;gap:8px;margin-top:16px";
+    const cancel = document.createElement("button");
+    cancel.className = "b3-button b3-button--cancel";
+    cancel.textContent = t.cancel || "取消";
+    cancel.addEventListener("click", () => {
+      dialog.destroy();
+      u.set("remote_root", previous);
+    });
+    const confirm = document.createElement("button");
+    confirm.className = "b3-button b3-button--text";
+    confirm.textContent = t.sygspConfirm || "确定";
+    confirm.addEventListener("click", () => {
+      dialog.destroy();
+      this._lastValidRemoteRoot = target;
+      u.set("remote_root", target);
+      this._refreshBaseHints();
+    });
+    bar.appendChild(cancel);
+    bar.appendChild(confirm);
+    root.appendChild(bar);
+  }
+  /** 「检测远程同步空间」: 只读拉取远端声明并刷新提示行 */
+  async _detectSpaces() {
+    const t = this.i18n;
+    if (!this.detectRemoteSpaces) return;
+    this._setHint("remote_root_hint", t.sygspRemoteRootDetecting || "检测中…");
+    try {
+      const summary = await this.detectRemoteSpaces();
+      this._setHint("remote_root_hint", summary || t.sygspRemoteRootNone || "未发现声明文件(远端仅默认根目录)");
+    } catch (err) {
+      this._setHint("remote_root_hint", "检测失败: " + String(err && err.message || err));
+    }
+  }
+  /** hint 项文本更新(SettingUtils 对 hint 无 DOM 回写,这里补齐) */
+  _setHint(key, text) {
+    this.utils.set(key, text);
+    const el = this.utils.elements.get(key);
+    if (el) el.textContent = text;
   }
   async _savePlatformFile() {
     if (!this._platformFile) return;
@@ -6764,6 +7278,7 @@ function buildRadioItems(_title, options, settingKey, actions) {
 
 // src/plugin/index.js
 var PLUGIN_VERSION = "0.2.0";
+var REMOTE_SPACES_FILE = "remote-spaces.json";
 var ICONS_MAIN = '<symbol id="iconGmailSync" viewBox="0 0 1024 1024"><path d="M998.4 627.2c-51.2 230.4-256 396.8-499.2 396.8-224 0-409.6-140.8-480-339.2h121.6c64 134.4 198.4 230.4 358.4 230.4 179.2 0 332.8-121.6 384-281.6l115.2-6.4zM499.2 0c224 0 409.6 140.8 480 339.2h-121.6c-64-134.4-198.4-230.4-358.4-230.4-179.2 0-332.8 121.6-384 281.6L0 396.8C51.2 172.8 256 0 499.2 0z" fill="#646A73"></path><path d="M998.4 332.8c0 32-25.6 57.6-57.6 64h-140.8c-19.2 0-32-12.8-32-32v-51.2c0-19.2 12.8-32 32-32h83.2V32c0-12.8 12.8-25.6 25.6-32h57.6c19.2 0 32 12.8 32 32v300.8zM0 659.2c0-32 25.6-57.6 57.6-64h140.8c19.2 0 32 12.8 32 32v51.2c0 19.2-12.8 32-32 32H115.2V960c0 12.8-12.8 25.6-25.6 32H32c-19.2 0-32-12.8-32-32v-300.8z" fill="#646A73"></path><path d="M665.6 569.6H512V473.6h249.6c12.8 0 12.8 0 12.8 6.4 6.4 70.4 0 134.4-38.4 192-38.4 57.6-96 96-160 108.8-83.2 19.2-166.4 0-236.8-51.2-57.6-44.8-89.6-102.4-96-172.8-19.2-147.2 64-275.2 204.8-313.6 89.6-19.2 172.8 0 243.2 57.6l6.4 6.4L620.8 384l-6.4-6.4c-25.6-25.6-64-38.4-108.8-38.4-83.2 0-153.6 64-160 147.2-12.8 89.6 44.8 172.8 134.4 192 51.2 12.8 96 6.4 140.8-25.6 19.2-19.2 38.4-44.8 44.8-76.8v-6.4z" fill="#646A73"></path></symbol>';
 var ICONS_SYNC = '<symbol id="iconModeSync" viewBox="0 0 1024 1024"><path d="M512 128c-212.064 0-384 171.936-384 384h-64l106.624 149.312L277.312 512H213.344c0-164.928 133.728-298.656 298.656-298.656 61.6 0 118.848 18.624 166.4 50.56l46.912-51.904A380.544 380.544 0 0 0 512 128z m331.328 234.688L746.688 512h64c0 164.928-133.728 298.656-298.656 298.656a297.216 297.216 0 0 1-166.4-50.56l-46.912 51.904A380.544 380.544 0 0 0 512 896c212.064 0 384-171.936 384-384h64l-106.624-149.312z" fill="currentColor"></path></symbol>';
 var ICONS_REBUILD = '<symbol id="iconRebuild" viewBox="0 0 1024 1024"><path d="M192 384 H832 M704 256 L832 384 L704 512 M832 640 H192 M320 512 L192 640 L320 768" fill="none" stroke="currentColor" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/></symbol>';
@@ -6784,12 +7299,15 @@ var SyGspPlugin = class extends q.Plugin {
       this.kernel = createKernel(q);
       await this.logs.load(this);
       await this._initStores();
+      await this._loadKnownSpaces();
       this.notification = new NotificationService({ q, i18n: this.i18n });
       this.settingsBuilder = new SettingsPanelBuilder({
         plugin: this,
         q,
         i18n: this.i18n,
         metadataStore: this.metadataStore,
+        detectRemoteSpaces: () => this._detectRemoteSpaces(),
+        knownSpacesSummary: () => this._knownSpacesSummary(),
         onPlatformChanged: async () => {
           this.logs.info("平台已切换: " + this._platform());
         }
@@ -6937,6 +7455,47 @@ var SyGspPlugin = class extends q.Plugin {
     this.conflictService = new ConflictService(this);
     await this.conflictService.load();
   }
+  /** 载入已发现空间的本地缓存(读取失败按空处理,可重新检测) */
+  async _loadKnownSpaces() {
+    try {
+      this._knownSpaces = await this.loadData(REMOTE_SPACES_FILE);
+    } catch (err) {
+      this._knownSpaces = null;
+    }
+  }
+  /** 已发现空间的展示摘要(一行一条: 设备 → 空间;附默认根数据信号) */
+  _knownSpacesSummary() {
+    return formatSpacesSummary(this._knownSpaces || {}, this.i18n);
+  }
+  /**
+   * 只读检测远端同步空间: 读取仓库根 .sy-gsp/*-remoteRoot.json 声明,并统计
+   * 默认根 data/** 文件数(判断"可能仍有设备在用默认根/旧版"的唯一间接信号)。
+   * 结果缓存到本地(remote-spaces.json)供设置面板展示,并作为返回摘要。
+   */
+  async _detectRemoteSpaces() {
+    const info = this._repoInfo();
+    if (!info.owner || !info.branch) {
+      throw new Error("仓库配置不完整,无法检测远程同步空间");
+    }
+    const provider = this._makeProvider(info);
+    const head = await provider.getBranchHead();
+    const commit = await provider.getCommit(head.sha);
+    const tree = await provider.getTree(commit.treeSha);
+    const controlFiles = splitRemoteTree(tree, info.remoteRoot).control;
+    const declaration = new DeclarationService({
+      provider,
+      getDeviceName: () => String(this.settingUtils.take("device_name") || "")
+    });
+    const records = await declaration.discover(controlFiles, (sha) => provider.getBlob(sha));
+    this._knownSpaces = {
+      inspectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      records,
+      rootDataFiles: (tree || []).filter((e) => e && e.type === "blob" && String(e.path).indexOf("data/") === 0).length
+    };
+    await this.saveData(REMOTE_SPACES_FILE, this._knownSpaces);
+    this.logs.info("远程空间检测完成: " + records.length + " 条声明,默认根 " + this._knownSpaces.rootDataFiles + " 个文件");
+    return this._knownSpacesSummary();
+  }
   /** 旧版 SGSP 设置迁移(仅首次;失败不影响使用,详见迁移报告) */
   async _migrateFromLegacyIfNeeded() {
     const marker = await this.loadData("migration-report.json");
@@ -6986,7 +7545,7 @@ var SyGspPlugin = class extends q.Plugin {
   }
   _repoInfo() {
     if (!this.settingUtils) {
-      return { provider: "github", owner: "", repo: "", branch: "", token: "" };
+      return { provider: "github", owner: "", repo: "", branch: "", token: "", remoteRoot: "" };
     }
     const addr = String(this.settingUtils.take("repository_address") || "");
     const parsed = parseRepoAddress(addr);
@@ -6995,11 +7554,17 @@ var SyGspPlugin = class extends q.Plugin {
       owner: parsed.owner,
       repo: parsed.repo,
       branch: String(this.settingUtils.take("repository_branch") || "").trim(),
-      token: String(this.settingUtils.take("submit_token") || "")
+      token: String(this.settingUtils.take("submit_token") || ""),
+      remoteRoot: this._currentRemoteRoot()
     };
   }
+  /** 当前配置的同步空间(remoteRoot;空串 = 默认根目录) */
+  _currentRemoteRoot() {
+    if (!this.settingUtils) return "";
+    return String(this.settingUtils.take("remote_root") || "").trim();
+  }
   _repoKey(info) {
-    return info.provider + ":" + info.owner + "/" + info.repo + ":" + info.branch;
+    return composeRepoKey(info);
   }
   _buildController() {
     const self = this;
@@ -7026,6 +7591,7 @@ var SyGspPlugin = class extends q.Plugin {
   _makeEngineDeps(ctx) {
     const info = this._repoInfo();
     const self = this;
+    const remoteRoot = info.remoteRoot;
     const provider = new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
     const workspace = new WorkspaceAdapter(this.kernel, {
       getUserIgnore: () => this.settingUtils.get("ignore_file") || "",
@@ -7044,6 +7610,16 @@ var SyGspPlugin = class extends q.Plugin {
       readRemoteBlobBySha: async (sha) => provider.getBlob(sha),
       guardLocalDelete: async (path) => workspace.guardLocalDelete(path, self.manifestStore, { remoteEntryExists: true })
     });
+    const controlPlane = {
+      declaration: new DeclarationService({
+        provider,
+        getDeviceName: () => String(this.settingUtils.take("device_name") || "")
+      }),
+      catalog: new CatalogService({
+        kernel: this.kernel,
+        getNotebooks: workspace.getNotebooks
+      })
+    };
     return {
       provider,
       workspace,
@@ -7053,12 +7629,14 @@ var SyGspPlugin = class extends q.Plugin {
       conflictService: this.conflictService,
       planner,
       merger: new ThreeWayMerger(),
+      controlPlane,
       commitBuilder: new CommitBuilder({
         requestLimit: Number(this.settingUtils.take("sygsp_blob_request_limit")) || 33554432,
         deviceName: String(this.settingUtils.take("device_name") || "")
       }),
       events: this.events,
       config: {
+        remoteRoot,
         get repoKey() {
           return self._repoKey(info);
         },
@@ -7428,7 +8006,7 @@ var SyGspPlugin = class extends q.Plugin {
         getNotebooks: async () => (await this.kernel.lsNotebooks() || {}).notebooks || []
       });
       const adapter = new ContentAdapter(this.kernel, { backupDir: "temp/SY-GSP/backup/", i18n: this.i18n });
-      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { syncRange: Number(this.settingUtils.get("sync_range")) === 0 ? 1 : Number(this.settingUtils.get("sync_range")) || 1, syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
+      const service = new RebuildService({ provider, workspace, contentAdapter: adapter, metadataStore: this.metadataStore, manifestStore: this.manifestStore, conflictService: this.conflictService, config: { remoteRoot: info.remoteRoot, syncRange: Number(this.settingUtils.get("sync_range")) === 0 ? 1 : Number(this.settingUtils.get("sync_range")) || 1, syncFileType: Number(this.settingUtils.get("sync_file_type")) === 1 ? "markdown" : "siyuan", repoKey: this._repoKey(info) } });
       report = await service.inspect();
       this.logs.info("同步重建: 校验完成,本地 " + report.localCount + " 个,远端 " + report.remoteCount + " 个,差异 " + (report.onlyLocal.length + report.onlyRemote.length + report.different.length) + " 个");
     } catch (err) {
@@ -7642,16 +8220,24 @@ var SyGspPlugin = class extends q.Plugin {
   _makeProvider(info) {
     return new GitHubProvider({ owner: info.owner, repo: info.repo, branch: info.branch, token: info.token });
   }
-  /** 历史面板: 回滚(覆盖本地)/下载(另存到隔离目录) */
+  /** 历史面板: 回滚(覆盖本地)/下载(另存到隔离目录)。
+   * 面板展示的是远端路径(V2 起含空间前缀),落地前按同步空间映射回本地命名空间;
+   * 非本空间数据(其他空间/控制面)不允许覆盖本地 */
   async _writeCommitFile(path, ref, provider, overwrite) {
     try {
+      const kind = classifyRemotePath(path, this._currentRemoteRoot());
+      if (overwrite && kind.kind !== "data") {
+        this.notification.toast("该路径不属于当前同步空间,已停止回滚: " + path, "error");
+        return;
+      }
+      const localPath = kind.kind === "data" ? kind.localPath : path;
       const content = await provider.getFileContent(path, ref);
       const bytes = content.bytes;
       if (!bytes || bytes.length === 0) {
         this.notification.toast(this.i18n.sygspFileContentEmpty || "文件内容为空,已停止", "error");
         return;
       }
-      const targetPath = overwrite ? path : "temp/SY-GSP/downloads/" + String(path).replace(/^\/+/, "");
+      const targetPath = overwrite ? localPath : "temp/SY-GSP/downloads/" + String(localPath).replace(/^\/+/, "");
       await this.kernel.putFile(targetPath, new Blob([bytes]), false);
       const tpl = overwrite ? this.i18n.sygspRollbackDone || "已回滚" : this.i18n.sygspDownloadDone || "已下载";
       this.notification.toast(tpl + ": " + targetPath, "info");
@@ -7693,6 +8279,21 @@ var SyGspPlugin = class extends q.Plugin {
       ok: !!(info.owner && info.repo && info.branch),
       detail: info.owner ? info.provider + ": " + info.owner + "/" + info.repo + " @ " + info.branch : "仓库地址无法解析,请检查设置"
     });
+    if (info.remoteRoot) {
+      try {
+        validateRemoteRoot(info.remoteRoot);
+        checks.push({ name: "同步空间(remoteRoot)", ok: true, detail: info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**" });
+        checks.push({
+          name: "旧版共存风险",
+          ok: true,
+          detail: "⚠️ " + (this.i18n && this.i18n.sygspRemoteRootDiagnosisRisk || "旧版插件不识别 remoteRoot: 请确认所有设备已升级;未升级设备会误下载空间数据并反复冲突暂停,其「保留本地」/「同步重建·以本地为准」会从远端删除空间数据")
+        });
+      } catch (err) {
+        checks.push({ name: "同步空间(remoteRoot)", ok: false, detail: String(err && err.message || err) });
+      }
+    } else {
+      checks.push({ name: "同步空间(remoteRoot)", ok: true, detail: "默认根目录 → 远端 data/**" });
+    }
     checks.push({ name: "Token", ok: !!info.token, detail: info.token ? "已配置" : "未配置" });
     try {
       this.logs.info("只读诊断: 本地文件读写检查开始");
@@ -7762,13 +8363,18 @@ var SyGspPlugin = class extends q.Plugin {
       name: "本地扫描(同步范围内)",
       detail: scan.files.length + " 个文件" + (scan.enumErrorOccurred ? "(存在目录枚举异常)" : "")
     });
+    rows.push({
+      name: "同步空间(remoteRoot)",
+      detail: info.remoteRoot ? info.remoteRoot + " → 远端 " + info.remoteRoot + "/data/**" : "默认根目录 → 远端 data/**"
+    });
     try {
       const provider = this._makeProvider(info);
       const head = await provider.getBranchHead();
       const commit = await provider.getCommit(head.sha);
       const tree = await provider.getTree(commit.treeSha);
       const matcher = workspace.ignoreMatcher();
-      const remotePaths = new Set(tree.filter((e) => e.type === "blob" && !matcher.isIgnored(e.path)).map((e) => e.path));
+      const treeSplit = splitRemoteTree(tree, info.remoteRoot);
+      const remotePaths = new Set([...treeSplit.data.keys()].filter((p) => !matcher.isIgnored(p)));
       rows.push({ name: "远端文件", detail: remotePaths.size + " 个文件,HEAD " + head.sha.slice(0, 8) });
       const localSet = new Set(scan.files.map((f) => f.path));
       let onlyLocal = 0;

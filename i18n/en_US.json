@@ -260,5 +260,22 @@
   "sygspDeviceName": "Device name",
   "sygspDeviceNameDesc": "Tags GitHub commit messages with the source device, e.g. pad; leave empty for no prefix",
   "sygspMenuPauseAutoSync": "Pause sync",
-  "sygspMenuResumeAutoSync": "Resume sync (currently paused)"
+  "sygspMenuResumeAutoSync": "Resume sync (currently paused)",
+  "sygspRemoteRoot": "Remote sync space (remoteRoot)",
+  "sygspRemoteRootDesc": "Data will be stored under <space>/data/** in the remote repository; leave empty for the default root data/**. A single directory segment only (letters/digits/hyphens/underscores). Upgrade all devices to a version supporting this feature before enabling",
+  "sygspRemoteRootPlaceholder": "Empty = default root, e.g. A-Note",
+  "sygspRemoteRootDiscovered": "Discovered sync spaces",
+  "sygspRemoteRootDiscoveredDesc": "From remote .sy-gsp/ declarations (created when another device first uses a space); declarations are informational only, the choice is always yours",
+  "sygspRemoteRootDetect": "Detect remote sync spaces",
+  "sygspRemoteRootDetecting": "Detecting…",
+  "sygspRemoteRootNone": "No declarations found (remote uses the default root only)",
+  "sygspRemoteRootConfirmTitle": "Confirm sync space change",
+  "sygspRemoteRootConfirmTarget": "Target: {path}. Data in the previous space will not be migrated or deleted automatically",
+  "sygspRemoteRootConfirmRisk": "⚠️ All devices must be upgraded to a version supporting remoteRoot. Outdated plugins download the whole space into a junk workspace folder and may repeatedly enter conflict pause; choosing \"Keep local\" in conflicts or running \"Rebuild (local over remote)\" on an outdated device deletes this space's data from the remote (recoverable via git history and local backups, but it is a data incident)",
+  "sygspRemoteRootConfirmWizard": "After confirming, the first sync enters the first-sync wizard — choose the correct direction (upload local / download remote)",
+  "sygspRemoteRootConfirmUnknown": "The plugin cannot detect whether outdated devices exist; this confirmation is for risk awareness only",
+  "sygspRemoteRootDefault": "Default root (remote data/**)",
+  "sygspRemoteRootRootData": "Default root data/**: {n} files",
+  "sygspRemoteRootRootDataRisk": "⚠️ Default root still has data: some devices may still be on the default root / an outdated version. Upgrade all devices before enabling another space",
+  "sygspRemoteRootDiagnosisRisk": "Outdated plugins do not understand remoteRoot: confirm all devices are upgraded; outdated devices download space data into junk folders and repeatedly conflict, and their \"Keep local\" / \"Rebuild\" deletes this space's data from the remote"
 }
