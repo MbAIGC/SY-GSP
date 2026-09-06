@@ -1,6 +1,6 @@
 # SY-GSP
 
-[English](./README_en_US.md)
+[English](./README_EN.md)
 
 SY-GSP 是一款思源笔记 GitHub 同步插件，基于「同步引擎 2.0」方案以全新可读源码完整重写：三方合并、冲突中心、确认基准跟踪，全程不伪造成功。
 

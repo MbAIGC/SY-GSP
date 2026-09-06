@@ -8,6 +8,10 @@ name: 构建发布
 on:
   push:
     branches: [main]
+    # 纯文档变更(重命名/编辑/新增 md)不触发构建发布
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   workflow_dispatch:
     inputs:
       version:
@@ -80,7 +84,7 @@ jobs:
           mkdir -p dist
           zip -r -q "dist/SY-GSP-${{ steps.ver.outputs.version }}.zip" \
             index.js index.css plugin.json i18n icon.png preview.png \
-            README.md README_en_US.md
+            README.md README_EN.md
           ls -la dist/
 
       - name: 上传构建产物
