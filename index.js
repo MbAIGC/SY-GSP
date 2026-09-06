@@ -4201,34 +4201,42 @@ var SyncEngine = class {
       }
       await this.contentAdapter.writeFileBlob(app.path, new Blob([app.mergedBytes]), "raw", "update");
       let kernelState = "回读失败";
+      let kernelConf = null;
       try {
         const check = await this.contentAdapter.kernel.getNotebookConf(app.notebookId);
         const conf = check && typeof check === "object" ? check.conf || check.data || check : null;
-        kernelState = conf ? JSON.stringify(conf).slice(0, 300) : "空";
+        kernelConf = conf && typeof conf === "object" ? conf : null;
+        kernelState = kernelConf ? JSON.stringify(kernelConf).slice(0, 300) : "空";
       } catch (err) {
         kernelState = "失败: " + String(err && err.message || err).slice(0, 80);
       }
       let diskState = "读取失败";
+      let diskConf = null;
       try {
         const diskBytes = await this._readLocalBytes(app.path);
         diskState = diskBytes ? new TextDecoder().decode(diskBytes).slice(0, 200) : "(空)";
+        if (diskBytes) {
+          try {
+            const parsedDisk = JSON.parse(new TextDecoder().decode(diskBytes));
+            if (parsedDisk && typeof parsedDisk === "object") diskConf = parsedDisk;
+          } catch (e) {
+          }
+        }
       } catch (err) {
         diskState = "失败: " + String(err && err.message || err).slice(0, 80);
       }
       let anomaly = null;
-      try {
-        const kernelConf = JSON.parse(kernelState);
+      if (kernelConf === null) {
+        anomaly = "内核回读不可解析";
+      } else {
         if (kernelConf.name !== confObj.name) anomaly = "内核名称不一致: " + kernelConf.name;
         else if (confObj.icon && kernelConf.icon !== confObj.icon) anomaly = "内核 icon 未生效: " + kernelConf.icon;
-      } catch (err) {
-        anomaly = "内核回读不可解析";
       }
-      try {
-        const diskConf = JSON.parse(diskState);
+      if (diskConf === null) {
+        anomaly = (anomaly ? anomaly + "; " : "") + "磁盘内容不可解析";
+      } else {
         if (diskConf.name !== confObj.name) anomaly = (anomaly ? anomaly + "; " : "") + "磁盘名称不一致: " + diskConf.name;
         else if (confObj.icon && diskConf.icon !== confObj.icon) anomaly = (anomaly ? anomaly + "; " : "") + "磁盘 icon 未生效: " + diskConf.icon;
-      } catch (err) {
-        anomaly = (anomaly ? anomaly + "; " : "") + "磁盘内容不可解析";
       }
       if (anomaly) {
         this._emit("engine:operation", {

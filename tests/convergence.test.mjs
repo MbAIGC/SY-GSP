@@ -804,3 +804,45 @@ test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => 
   await plugin.saveData("f.json", { ok: 1 });
   assert.deepEqual(await plugin.loadData("f.json"), { ok: 1 });
 });
+
+test("conf.json 应用回读: 内核返回超长完整配置(>300字符)不误报'内核回读不可解析'", async () => {
+  const conf = D + ".siyuan/conf.json";
+  const h = await makeHarness({
+    remoteFiles: { [conf]: JSON.stringify({ name: "V2版本测试", icon: "26a0-fe0f" }) },
+    localFiles: {},
+  });
+  const ops = [];
+  h.engine.events.on("engine:operation", ({ operation }) => ops.push(String(operation)));
+  // 实证场景: 内核返回完整笔记本配置(name/icon 一致 + sort/closed/dailyNote 等
+  // 设备侧字段,序列化远超 300 字符展示截断),配置应用成功却曾误报不可解析
+  h.kernel.getNotebookConf = async (notebook) => ({
+    box: notebook,
+    conf: {
+      name: "V2版本测试",
+      icon: "26a0-fe0f",
+      sort: 0,
+      closed: true,
+      dailyNoteSavePath: "/daily note/" + "x".repeat(300),
+      refCreateSaveBox: "",
+      refCreateSavePath: "",
+    },
+  });
+  // 本地为空 → 引导下载,conf.json 走字段级合并 + setNotebookConf 应用 + 回读判定
+  const result = await h.engine.run(h.makeCtx());
+  assert.equal(result.success, true);
+  assert.ok(!ops.some((o) => o.includes("笔记本配置应用异常")), "不应误报: " + JSON.stringify(ops.filter((o) => o.includes("应用异常"))));
+});
+
+test("conf.json 应用回读: 内核名称不一致仍如实上报", async () => {
+  const conf = D + ".siyuan/conf.json";
+  const h = await makeHarness({
+    remoteFiles: { [conf]: JSON.stringify({ name: "远端名" }) },
+    localFiles: {},
+  });
+  const ops = [];
+  h.engine.events.on("engine:operation", ({ operation }) => ops.push(String(operation)));
+  h.kernel.getNotebookConf = async (notebook) => ({ box: notebook, conf: { name: "内核里的名字", sort: 0 } });
+  const result = await h.engine.run(h.makeCtx());
+  assert.equal(result.success, true);
+  assert.ok(ops.some((o) => o.includes("内核名称不一致: 内核里的名字")), "真实不一致必须上报: " + JSON.stringify(ops));
+});
