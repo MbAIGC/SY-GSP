@@ -72,8 +72,11 @@ for (const d of declarations) {
   }
 }
 
-// 索引页(确定性内容,不含时间戳,保证同输入字节稳定)
-generated.set("Mirror-Index.md", indexLines.join("\n") + "\n");
+// 索引页(确定性内容,不含时间戳,保证同输入字节稳定):
+// 根目录 MD-Index.md + MD-Note/README.md(GitHub 浏览 MD-Note 目录时直接渲染),内容一致
+const indexContent = indexLines.join("\n") + "\n";
+generated.set("MD-Index.md", indexContent);
+generated.set("MD-Note/README.md", indexContent);
 
 // 失败报告(仅存在失败时生成;无失败时清理上一次遗留)
 if (failures.length > 0) {
@@ -85,6 +88,10 @@ if (failures.length > 0) {
 } else {
   try {
     fs.rmSync(path.join(repoRoot, "Mirror-Errors.md"));
+  } catch {}
+  // 旧版索引文件清理(改名 MD-Index.md 前的遗留,仅删除本 Action 曾生成的固定名)
+  try {
+    fs.rmSync(path.join(repoRoot, "Mirror-Index.md"));
   } catch {}
 }
 

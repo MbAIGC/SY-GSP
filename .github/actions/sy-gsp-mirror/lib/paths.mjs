@@ -18,7 +18,7 @@ export function sanitizeSegment(title) {
 /** 保留名: 与数据面/控制面/插件目录冲突的名字不得用作镜像顶层目录 */
 export function isReservedRootName(name) {
   const n = String(name || "").toLowerCase();
-  return n === "data" || n === ".sy-gsp" || n === "temp" || n.startsWith(".") || n === "mirror-index.md";
+  return n === "data" || n === ".sy-gsp" || n === "temp" || n.startsWith(".") || n === "md-index.md" || n === "md-note";
 }
 
 /**
