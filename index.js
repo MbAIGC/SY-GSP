@@ -7438,7 +7438,6 @@ var SyGspPlugin = class extends q.Plugin {
    * 官方 addTopBar 按 id 幂等且对不在文档中的元素重新插入,借此周期性恢复 */
   _ensureTopBar() {
     try {
-      if (this.isMobile) return;
       if (this.topBarElement && !document.contains(this.topBarElement)) {
         this._registerTopBar();
       }
@@ -8028,19 +8027,15 @@ var SyGspPlugin = class extends q.Plugin {
   // ---------- UI 动作 ----------
   _registerTopBar() {
     try {
-      if (this.isMobile) {
-        this.topBarElement = document.querySelector("#toolbarMore");
-      } else {
-        this.topBarElement = this.addTopBar({
-          id: "iconGmailSync",
-          icon: "iconGmailSync",
-          title: this.i18n.addTopBarIcon || "SY-GSP",
-          position: "right",
-          callback: () => this._openMenu()
-        });
-        if (!this.topBarElement) {
-          console.error("[SY-GSP] addTopBar 未返回按钮元素(icon 非法或插件已销毁)");
-        }
+      this.topBarElement = this.addTopBar({
+        id: "iconGmailSync",
+        icon: "iconGmailSync",
+        title: this.i18n.addTopBarIcon || "SY-GSP",
+        position: "right",
+        callback: () => this._openMenu()
+      });
+      if (!this.topBarElement) {
+        console.error("[SY-GSP] addTopBar 未返回按钮元素(icon 非法或插件已销毁)");
       }
     } catch (err) {
       console.error("[SY-GSP] 顶栏注册失败:", err);

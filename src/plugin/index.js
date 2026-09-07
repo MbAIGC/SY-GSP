@@ -158,7 +158,7 @@ export default class SyGspPlugin extends q.Plugin {
    * 官方 addTopBar 按 id 幂等且对不在文档中的元素重新插入,借此周期性恢复 */
   _ensureTopBar() {
     try {
-      if (this.isMobile) return;
+      // 移动端同样自愈: 官方菜单项元素被 UI 重构移除时按 id 幂等重注册
       if (this.topBarElement && !document.contains(this.topBarElement)) {
         this._registerTopBar();
       }
@@ -804,22 +804,18 @@ export default class SyGspPlugin extends q.Plugin {
 
   _registerTopBar() {
     try {
-      if (this.isMobile) {
-        this.topBarElement = document.querySelector("#toolbarMore");
-      } else {
-        // 官方 API(siYuan Plugin.addTopBar): 实例方法,返回顶栏按钮元素;
-        // icon 必须是 addIcons 注册过的 symbol id(onload 首步已在 createIcons 注册);
-        // 传官方 id 选项,重复调用 onLayoutReady 时按 data-id 幂等复用
-        this.topBarElement = this.addTopBar({
-          id: "iconGmailSync",
-          icon: "iconGmailSync",
-          title: this.i18n.addTopBarIcon || "SY-GSP",
-          position: "right",
-          callback: () => this._openMenu(),
-        });
-        if (!this.topBarElement) {
-          console.error("[SY-GSP] addTopBar 未返回按钮元素(icon 非法或插件已销毁)");
-        }
+      // 桌面端: 顶栏图标;移动端: 官方 addTopBar 将插件项转为「更多 → 插件」菜单
+      // (#menuPluginTopBar),点击回调同为 _openMenu。官方已合并移动端顶栏/标签栏,
+      // 内部 DOM ID(如 #toolbarMore)不可依赖——入口一律由官方 API 负责。
+      this.topBarElement = this.addTopBar({
+        id: "iconGmailSync",
+        icon: "iconGmailSync",
+        title: this.i18n.addTopBarIcon || "SY-GSP",
+        position: "right",
+        callback: () => this._openMenu(),
+      });
+      if (!this.topBarElement) {
+        console.error("[SY-GSP] addTopBar 未返回按钮元素(icon 非法或插件已销毁)");
       }
     } catch (err) {
       console.error("[SY-GSP] 顶栏注册失败:", err);
