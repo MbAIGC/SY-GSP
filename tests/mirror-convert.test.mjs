@@ -84,6 +84,29 @@ test("路径清洗与防碰撞: 非法字符/重名追加短ID/保留名追加-M
   assert.equal(contained.get("x").path, "MD-Note/我的笔记本/t.md");
 });
 
+test("孤儿镜像清理: 删除/改名场景,孤儿 .md 与空目录被移除,生成物与 README 保留", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const actionMain = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".github", "actions", "sy-gsp-mirror", "main.mjs");
+  const nbDir = "SYNote/data/20240101120000-abc";
+  const root = makeTempRepo({
+    "SYNote/.sy-gsp/nas-remoteRoot.json": JSON.stringify({ remoteRoot: "SYNote" }),
+    [nbDir + "/.siyuan/conf.json"]: JSON.stringify({ name: "我的笔记" }),
+    [nbDir + "/20240101120001-aaa.sy"]: JSON.stringify({ ID: "20240101120001-aaa", Type: "NodeDocument", Properties: { id: "20240101120001-aaa", title: "活文档" }, Children: [] }),
+    // 孤儿: 源 .sy 已删除/改名的历史镜像 + 空目录候选
+    "MD-Note/我的笔记/旧文档.md": "# 旧",
+    "MD-Note/已删除笔记本/孤儿.md": "# 孤儿",
+    "MD-Note/我的笔记/活文档.md": "# 旧内容", // 将被重新生成覆盖
+  });
+  execFileSync(process.execPath, [actionMain, root], { stdio: "pipe" });
+  assert.equal(fs.existsSync(path.join(root, "MD-Note/我的笔记/旧文档.md")), false, "孤儿(改名遗留)删除");
+  assert.equal(fs.existsSync(path.join(root, "MD-Note/已删除笔记本/孤儿.md")), false, "孤儿(删除笔记本)删除");
+  assert.equal(fs.existsSync(path.join(root, "MD-Note/已删除笔记本")), false, "空目录顺级移除");
+  assert.equal(fs.existsSync(path.join(root, "MD-Note/README.md")), true, "索引 README 保留");
+  assert.equal(fs.existsSync(path.join(root, "MD-Index.md")), true, "根索引保留");
+  const md = fs.readFileSync(path.join(root, "MD-Note/我的笔记/活文档.md"), "utf8");
+  assert.match(md, /^# 活文档/, "生成物正常写入");
+});
+
 test("思源 icon 解码与笔记本目录延续: 十六进制码点串 → emoji 前缀", () => {
   assert.equal(decodeSiYuanIcon("26a0-fe0f"), "⚠️");
   assert.equal(decodeSiYuanIcon("1f3f4-200d-2620-fe0f"), "🏴‍☠️");

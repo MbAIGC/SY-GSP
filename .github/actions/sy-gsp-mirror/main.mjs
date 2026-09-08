@@ -19,6 +19,7 @@ if (declarations.length === 0) {
 
 const generated = new Map(); // 相对仓库根的 posix 路径 → 内容
 const failures = [];
+const missingDataRoots = [];
 const MIRROR_ROOT_DIR = "MD-Note";
 // 两份索引各自按所在位置生成相对链接: 根 MD-Index.md 用仓库根相对路径,
 // MD-Note/README.md 用相对 MD-Note/ 的路径(否则 GitHub 解析为 /MD-Note/MD-Note/...)
@@ -40,6 +41,7 @@ for (const d of declarations) {
   const notebooks = listNotebooks(repoRoot, space);
   if (notebooks === null) {
     console.log("[sy-gsp-mirror] 空间数据根不存在,跳过: " + space);
+    missingDataRoots.push(space);
     continue;
   }
   const catalog = readCatalog(repoRoot, space);
@@ -90,6 +92,46 @@ for (const d of declarations) {
 generated.set("MD-Index.md", indexRoot.join("\n") + "\n");
 generated.set(MIRROR_ROOT_DIR + "/README.md", indexNote.join("\n") + "\n");
 
+// 孤儿镜像清理(用户定稿): MD-Note 下不在本次生成集合中的 .md 一律删除,空目录顺级
+// 移除——覆盖 删除/改名/移动/笔记本删除/笔记本改名 全部场景。保护: README.md 在
+// generated 中天然受护;转换失败文档的占位页同样在 generated 中不被误删;
+// 任一空间数据根缺失时本轮跳过清理(检出不完整时宁可漏删不可误删)。
+let removed = 0;
+if (missingDataRoots.length === 0) {
+  const mirrorRootAbs = path.join(repoRoot, MIRROR_ROOT_DIR);
+  const collectStale = (dir, base) => {
+    const stale = [];
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, e.name);
+      const rel = base ? base + "/" + e.name : e.name;
+      if (e.isDirectory()) stale.push(...collectStale(abs, rel));
+      else if (e.name.toLowerCase().endsWith(".md") && !generated.has(rel)) stale.push({ abs, rel });
+    }
+    return stale;
+  };
+  if (fs.existsSync(mirrorRootAbs)) {
+    for (const s of collectStale(mirrorRootAbs, MIRROR_ROOT_DIR)) {
+      fs.rmSync(s.abs);
+      removed += 1;
+      console.log("[sy-gsp-mirror] 清理孤儿镜像: " + s.rel);
+    }
+    // 空目录顺级移除(仅 MD-Note 的子目录,容器本身保留)
+    const prune = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) prune(path.join(dir, e.name));
+      }
+      if (path.resolve(dir) !== path.resolve(mirrorRootAbs)) {
+        try {
+          if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+        } catch {}
+      }
+    };
+    prune(mirrorRootAbs);
+  }
+} else {
+  console.log("[sy-gsp-mirror] ⚠️ 空间数据根缺失(" + missingDataRoots.join(", ") + "),本轮跳过孤儿镜像清理");
+}
+
 // 失败报告(仅存在失败时生成;无失败时清理上一次遗留)
 if (failures.length > 0) {
   const body = ["# 镜像转换失败报告", "", "以下文档解析失败,已生成占位页;原始 `.sy` 为权威数据。", ""];
@@ -131,7 +173,7 @@ for (const [relPosix, content] of generated) {
   changed += 1;
 }
 console.log(
-  "[sy-gsp-mirror] 完成: 更新 " + changed + " 个文件,未变化 " + unchanged + " 个" +
+  "[sy-gsp-mirror] 完成: 更新 " + changed + " 个文件,未变化 " + unchanged + " 个,清理孤儿 " + removed + " 个" +
   (failures.length > 0 ? ",转换失败 " + failures.length + " 个(见 Mirror-Errors.md)" : "")
 );
-if (changed === 0) console.log("[sy-gsp-mirror] 镜像无变化,不产生提交");
+if (changed === 0 && removed === 0) console.log("[sy-gsp-mirror] 镜像无变化,不产生提交");
