@@ -19,7 +19,17 @@ if (declarations.length === 0) {
 
 const generated = new Map(); // 相对仓库根的 posix 路径 → 内容
 const failures = [];
-const indexLines = [];
+const MIRROR_ROOT_DIR = "MD-Note";
+// 两份索引各自按所在位置生成相对链接: 根 MD-Index.md 用仓库根相对路径,
+// MD-Note/README.md 用相对 MD-Note/ 的路径(否则 GitHub 解析为 /MD-Note/MD-Note/...)
+const indexRoot = [];
+const indexNote = [];
+const pushIndex = (line) => {
+  indexRoot.push(line);
+  indexNote.push(line);
+};
+const relToMirrorRoot = (full) =>
+  full.startsWith(MIRROR_ROOT_DIR + "/") ? full.slice(MIRROR_ROOT_DIR.length + 1) : full;
 
 for (const d of declarations) {
   const space = d.space;
@@ -36,7 +46,7 @@ for (const d of declarations) {
   const catalogNotebooks = catalog ? catalog.notebooks : {};
   console.log("[sy-gsp-mirror] 空间 " + (space || "默认根") + ": " + notebooks.length + " 个笔记本" + (catalog ? "(含层级清单)" : "(无层级清单,平铺+ID 后缀)"));
 
-  indexLines.push("# 空间: " + (space || "默认根目录") + "\n");
+  pushIndex("# 空间: " + (space || "默认根目录") + "\n");
   // 保留名守卫: 笔记本目录不得与空间容器/数据面/控制面冲突
   const reservedRootNames = declarations.map((x) => x.space).filter(Boolean).concat(["data"]);
   for (const nb of notebooks) {
@@ -49,8 +59,8 @@ for (const d of declarations) {
         parent: catDoc ? catDoc.parent || "" : "",
       });
     }
-    const paths = buildNotebookPaths({ notebookName: nb.name, docs: docsMap, reservedRootNames, rootDir: "MD-Note" });
-    indexLines.push("## " + nb.name + "\n");
+    const paths = buildNotebookPaths({ notebookName: nb.name, docs: docsMap, reservedRootNames, rootDir: MIRROR_ROOT_DIR });
+    pushIndex("## " + nb.name + "\n");
     for (const doc of nb.docs) {
       const info = paths.get(doc.id);
       const depth = info.path.split("/").length - 1;
@@ -66,17 +76,19 @@ for (const d of declarations) {
         content = "# ⚠️ 文档转换失败\n\n- 文档 ID: `" + doc.id + "`\n- 错误: " + msg + "\n\n原始 `.sy` 为权威数据,请在仓库对应路径查看;本次镜像未覆盖该文档内容。\n";
       }
       generated.set(info.path, content);
-      indexLines.push("- [" + (docsMap.get(doc.id).title || doc.id) + "](" + encodeURI(info.path) + ")" + (failed ? "(转换失败)" : ""));
-      if (info.orphan) indexLines.push("  - ↳ 该文档缺少层级清单记录,已平铺到笔记本根");
+      const label = "- [" + (docsMap.get(doc.id).title || doc.id) + "](";
+      const suffix = (failed ? "(转换失败)" : "");
+      indexRoot.push(label + encodeURI(info.path) + ")" + suffix);
+      indexNote.push(label + encodeURI(relToMirrorRoot(info.path)) + ")" + suffix);
+      if (info.orphan) pushIndex("  - ↳ 该文档缺少层级清单记录,已平铺到笔记本根");
     }
   }
 }
 
 // 索引页(确定性内容,不含时间戳,保证同输入字节稳定):
-// 根目录 MD-Index.md + MD-Note/README.md(GitHub 浏览 MD-Note 目录时直接渲染),内容一致
-const indexContent = indexLines.join("\n") + "\n";
-generated.set("MD-Index.md", indexContent);
-generated.set("MD-Note/README.md", indexContent);
+// 根目录 MD-Index.md(仓库根相对链接)+ MD-Note/README.md(相对 MD-Note/ 的链接)
+generated.set("MD-Index.md", indexRoot.join("\n") + "\n");
+generated.set(MIRROR_ROOT_DIR + "/README.md", indexNote.join("\n") + "\n");
 
 // 失败报告(仅存在失败时生成;无失败时清理上一次遗留)
 if (failures.length > 0) {
