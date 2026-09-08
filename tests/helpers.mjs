@@ -23,6 +23,9 @@ export function makeFakeKernel(initial = {}) {
   const dirs = new Set();
   const removedNotebooks = [];
   const appliedConfs = [];
+  // 笔记本开闭状态: 内核对磁盘新出现的笔记本默认可标记为已关闭(测试模拟该行为)
+  const closedNotebooks = new Set();
+  const openedNotebooks = [];
 
   function ensureDir(path) {
     const parts = path.split("/");
@@ -117,11 +120,28 @@ export function makeFakeKernel(initial = {}) {
       files.set("data/" + notebook + "/.siyuan/conf.json", new TextEncoder().encode(JSON.stringify(data)));
       return { code: 0 };
     },
+    async openNotebook(notebook) {
+      closedNotebooks.delete(notebook);
+      openedNotebooks.push(notebook);
+      return { code: 0 };
+    },
+    async getNotebookConf(notebook) {
+      let conf = {};
+      try {
+        const bytes = files.get("data/" + notebook + "/.siyuan/conf.json");
+        if (bytes) conf = JSON.parse(new TextDecoder().decode(bytes));
+      } catch (err) {
+        conf = {};
+      }
+      return { box: notebook, conf: Object.assign({}, conf, { closed: closedNotebooks.has(notebook) }) };
+    },
     async refreshFiletree() {
       return { code: 0 };
     },
     __files: files,
     __removedNotebooks: removedNotebooks,
     __appliedConfs: appliedConfs,
+    __closedNotebooks: closedNotebooks,
+    __openedNotebooks: openedNotebooks,
   };
 }

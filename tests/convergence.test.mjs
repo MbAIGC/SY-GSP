@@ -805,8 +805,31 @@ test("假内核冒烟: makeFakeKernel/markFakePlugin 装配完整", async () => 
   assert.deepEqual(await plugin.loadData("f.json"), { ok: 1 });
 });
 
-test("conf.json 应用回读: 内核返回超长完整配置(>300字符)不误报'内核回读不可解析'", async () => {
-  const conf = D + ".siyuan/conf.json";
+test("重建'以远端为准': 内核注册为已关闭的笔记本在落地收口时被统一打开", async () => {
+  const a = D + "a.md";
+  const h = await makeHarness({
+    remoteFiles: { [a]: "remote a" },
+    localFiles: { [a]: "local a" }, // 本地已有同名文件 → 重建下载 op 全为 update,逐文件触发不了 openNotebook
+  });
+  await h.manifestStore.replaceAll([a]);
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  // 模拟内核行为: 磁盘上的笔记本按「已关闭」注册(安卓重建后实证场景)
+  h.kernel.__closedNotebooks.add("20240101120000-abc");
+
+  const result = await runQuiet(h, { trigger: "rebuild", mode: "remote_over_local" });
+  assert.equal(result.success, true);
+  assert.equal(await (await h.kernel.getFile(a)).text(), "remote a");
+  assert.ok(h.kernel.__openedNotebooks.includes("20240101120000-abc"), "落地收口必须打开已关闭的笔记本");
+
+  // 已打开的笔记本不重复触发(无视图切换副作用)
+  const before = h.kernel.__openedNotebooks.length;
+  const second = await runQuiet(h);
+  assert.equal(second.success, true);
+  assert.equal(h.kernel.__openedNotebooks.length, before, "非关闭态不再重复 openNotebook");
+});
+
+test("conf.json 应用回读: 内核返回超长完整配置(>300字符)不误报'内核回读不可解析'", async () => {  const conf = D + ".siyuan/conf.json";
   const h = await makeHarness({
     remoteFiles: { [conf]: JSON.stringify({ name: "V2版本测试", icon: "26a0-fe0f" }) },
     localFiles: {},

@@ -4257,6 +4257,22 @@ var SyncEngine = class {
     if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0 || confApplications.length > 0) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
+    const touchedNotebooks = new Set(confApplications.map((app) => app.notebookId));
+    for (const item of plan.downloads) {
+      const id = confNotebookId(item.path);
+      if (id && NOTEBOOK_ID_RE2.test(id)) touchedNotebooks.add(id);
+    }
+    for (const notebookId of touchedNotebooks) {
+      try {
+        const check = await this.contentAdapter.kernel.getNotebookConf(notebookId);
+        const conf = check && typeof check === "object" ? check.conf || check.data || check : null;
+        if (conf && conf.closed === true) {
+          await this.contentAdapter.kernel.openNotebook(notebookId);
+          this._emit("engine:operation", { ctx, operation: "已打开同步落地的笔记本", count: 1, paths: [notebookId] });
+        }
+      } catch (err) {
+      }
+    }
   }
   /** 断言本地文件自快照以来未变化(sha 级复查);快照无记录或内容变化一律中止 */
   async _assertLocalUnchanged(ctx, path, message) {

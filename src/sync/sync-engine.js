@@ -1472,6 +1472,26 @@ export class SyncEngine {
     if (plan.downloads.length > 0 || plan.deletionsLocal.length > 0 || confApplications.length > 0) {
       await this.contentAdapter.kernel.refreshFiletree();
     }
+    // 落地收口: 内核对磁盘新出现/未注册的笔记本默认按「已关闭」注册(安卓/内核实证),
+    // 逐文件触发的 openNotebook 覆盖不了重建路径(本地已有同名文件时落地 op 全为
+    // update)。refreshFiletree 之后统一回查,仅对确实处于关闭态的本轮笔记本补打开。
+    const touchedNotebooks = new Set(confApplications.map((app) => app.notebookId));
+    for (const item of plan.downloads) {
+      const id = confNotebookId(item.path);
+      if (id && NOTEBOOK_ID_RE.test(id)) touchedNotebooks.add(id);
+    }
+    for (const notebookId of touchedNotebooks) {
+      try {
+        const check = await this.contentAdapter.kernel.getNotebookConf(notebookId);
+        const conf = check && typeof check === "object" ? (check.conf || check.data || check) : null;
+        if (conf && conf.closed === true) {
+          await this.contentAdapter.kernel.openNotebook(notebookId);
+          this._emit("engine:operation", { ctx, operation: "已打开同步落地的笔记本", count: 1, paths: [notebookId] });
+        }
+      } catch (err) {
+        // 回读/打开失败不阻断同步: 笔记本以关闭态存在,数据完整,用户可手动打开
+      }
+    }
   }
 
   /** 断言本地文件自快照以来未变化(sha 级复查);快照无记录或内容变化一律中止 */
