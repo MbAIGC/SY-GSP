@@ -17,7 +17,7 @@
     "makesure": "Before using this template, please read the <a href=\"https://github.com/siyuan-note/plugin-sample\">offical sample</a>, make sure that you've known about the pipeline for plugin developing."
   },
   "disclaimeTitle": "Disclaimer of Interest",
-  "disclaimeDesc": "SY-GSP is a personal note-sync tool provided as-is. Before use, enable SiYuan snapshots or back up regularly — the developer is not liable for data loss caused by software defects, network issues, or GitHub platform limitations. Keep your token and credentials safe; third-party platform availability and policy changes are beyond the developer's control. No personal data is collected; data only flows between your authorized devices and repositories.",
+  "disclaimeDesc": "<strong>SY-GSP</strong> is a personal note-sync tool provided as-is.<br><strong>💾 Backup first</strong>: enable SiYuan snapshots or back up regularly before use — the developer is not liable for data loss caused by software defects, network issues, or GitHub platform limitations.<br><strong>🔑 Credentials</strong>: keep your token and credentials safe; third-party platform availability and policy changes are beyond the developer's control.<br><strong>🔒 Privacy</strong>: no personal data is collected; data only flows between your authorized devices and repositories.",
   "hintTitle": "About",
   "hintDesc": "<a href=\"https://github.com/MbAIGC/SY-GSP\">SY-GSP project home</a><br>Maintainer: MbAIGC<br>Original project: <a href=\"https://github.com/xstarling/sy-git-sync-plugin\">xstarling/sy-git-sync-plugin</a><br>",
   "startSync": "Start sync ",
