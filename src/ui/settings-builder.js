@@ -81,6 +81,10 @@ export class SettingsPanelBuilder {
         description: "检测到旧版 Gitee 配置,已切换为 GitHub 通道。Gitee 支持将在后续版本恢复;当前请填写 GitHub 仓库地址(历史 Gitee 数据文件已保留)",
       });
     }
+    // 所有配置源(settings.json/平台文件/迁移规范化/基准展示)就绪后,统一把最终
+    // 内部状态刷进 DOM: 控件是注册期用默认值创建的,不刷新则首开显示空/旧值,
+    // 且用户不做任何修改直接点确定会用空 DOM 反向覆盖真实配置(实证 bug)
+    this.utils.refreshElements();
     return this.utils;
   }
 

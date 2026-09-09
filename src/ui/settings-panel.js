@@ -161,6 +161,13 @@ export class SettingUtils {
     else if (item.type !== "button" && item.type !== "hint") el.value = item.value === undefined || item.value === null ? "" : String(item.value);
   }
 
+  /** 内部 value → 全部已注册 DOM。控件在注册期以默认值创建,而 load/迁移/平台文件
+   * 合并只更新 item.value——加载完成后必须统一刷新一次,否则面板首开显示空/旧值,
+   * 且用户直接点确定会用空 DOM 反向覆盖已加载配置(实证 bug)。 */
+  refreshElements() {
+    for (const key of this.settings.keys()) this.updateElementFromValue(key);
+  }
+
   createElement(item) {
     let el;
     switch (item.type) {

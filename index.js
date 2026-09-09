@@ -5429,6 +5429,12 @@ var SettingUtils = class {
     else if (item.type === "select") el.value = String(item.value);
     else if (item.type !== "button" && item.type !== "hint") el.value = item.value === void 0 || item.value === null ? "" : String(item.value);
   }
+  /** 内部 value → 全部已注册 DOM。控件在注册期以默认值创建,而 load/迁移/平台文件
+   * 合并只更新 item.value——加载完成后必须统一刷新一次,否则面板首开显示空/旧值,
+   * 且用户直接点确定会用空 DOM 反向覆盖已加载配置(实证 bug)。 */
+  refreshElements() {
+    for (const key of this.settings.keys()) this.updateElementFromValue(key);
+  }
   createElement(item) {
     let el;
     switch (item.type) {
@@ -5570,6 +5576,7 @@ var SettingsPanelBuilder = class {
         description: "检测到旧版 Gitee 配置,已切换为 GitHub 通道。Gitee 支持将在后续版本恢复;当前请填写 GitHub 仓库地址(历史 Gitee 数据文件已保留)"
       });
     }
+    this.utils.refreshElements();
     return this.utils;
   }
   _registerItems(t) {
