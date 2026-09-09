@@ -29,6 +29,18 @@ test("putFile: Android HTTP 200 空响应视为成功", async () => {
   });
 });
 
+test("getFile: 404 返回 null(明确不存在),5xx 抛错(读取失败≠不存在,P1-3)", async () => {
+  await withFetch(response("", false, 404), async () => {
+    assert.equal(await createKernel().getFile("data/box/missing.sy"), null);
+  });
+  await withFetch(response("", false, 500), async () => {
+    await assert.rejects(
+      () => createKernel().getFile("data/box/doc.sy"),
+      (err) => /HTTP 500/.test(String(err.message))
+    );
+  });
+});
+
 test("putFile: 非空成功 JSON 正常返回", async () => {
   await withFetch(response('{"code":0}'), async () => {
     const result = await createKernel().putFile("data/box/doc.sy", new Blob(["{}"]))

@@ -87,7 +87,9 @@ function createKernel(q2) {
       method: "POST",
       body: JSON.stringify({ path })
     });
-    return resp.ok ? resp.blob() : null;
+    if (resp.ok) return resp.blob();
+    if (resp.status === 404) return null;
+    throw new Error("读取本地文件失败 " + path + ": HTTP " + resp.status);
   }
   async function putFile(path, blob, isDir = false) {
     const form = new FormData();
@@ -1557,6 +1559,16 @@ var SyncPlanner = class {
       }
       if (mode === "local_over_remote") {
         this._applyOverride(plan, path, "keep_local", ctx);
+        continue;
+      }
+      if (opts.canonicalFailed && opts.canonicalFailed.has(path)) {
+        plan.conflicts.push({
+          path,
+          reason: "本地内容无法转换为 canonical(markdown)表示,已暂停交人工处理",
+          baseSha: ctx.baseEntry ? ctx.baseEntry.sha : null,
+          localSha: localShas.get(path) || null,
+          remoteSha: ctx.remoteEntry ? ctx.remoteEntry.sha : null
+        });
         continue;
       }
       await this._decideAuto(plan, path, ctx);
@@ -3032,14 +3044,31 @@ var SyncEngine = class {
       const scan = await this.workspace.scan({ range: this.config.syncRange });
       const localShas = /* @__PURE__ */ new Map();
       const rawShas = /* @__PURE__ */ new Map();
+      const canonicalFailed = /* @__PURE__ */ new Set();
       for (const file of scan.files) {
-        const bytes = await this._readLocalBytes(file.path);
+        let bytes;
+        try {
+          bytes = await this._readLocalBytes(file.path);
+        } catch (err) {
+          throw new SyncError({
+            category: SyncErrorCategory.LOCAL_FILE,
+            code: "LOCAL_READ_FAILED",
+            operation: "snapshotLocal",
+            path: file.path,
+            message: "本地文件读取失败,已中止本轮同步(不按删除处理): " + String(err && err.message || err),
+            retryable: true,
+            recoverable: true,
+            cause: err
+          });
+        }
         const rawSha = bytes ? await this.provider.gitBlobSha(bytes) : null;
         rawShas.set(file.path, rawSha);
         if (rawSha !== null && isNotebookConfPath(file.path)) {
           localShas.set(file.path, await this._confCanonicalSha(file.path));
         } else {
-          localShas.set(file.path, await this._planSha(file.path, rawSha));
+          const planSha = await this._planSha(file.path, rawSha);
+          if (planSha === null && rawSha !== null) canonicalFailed.add(file.path);
+          localShas.set(file.path, planSha);
         }
       }
       ctx.localShas = localShas;
@@ -3126,7 +3155,8 @@ var SyncEngine = class {
         bootstrap: ctx.bootstrapDownload === true,
         remoteCommitDate: ctx.remoteCommitDate,
         allowTimeArbitration: !firstSyncBothSides,
-        blockedDownloads
+        blockedDownloads,
+        canonicalFailed
       });
       ctx.plan = plan;
       transition(ctx, SyncState.MERGING);
@@ -3217,7 +3247,14 @@ var SyncEngine = class {
           recoverable: false
         });
       }
-      await this._writeMergedResults(ctx, plan);
+      try {
+        await this._writeMergedResults(ctx, plan);
+      } catch (err) {
+        if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+          return this._pauseLocalChanged(ctx, err);
+        }
+        throw err;
+      }
       const drifts = [];
       try {
         await this._applyLocalChanges(ctx, plan, { drifts, remoteEntries });
@@ -3445,17 +3482,29 @@ var SyncEngine = class {
     return roots;
   }
   /** 残留笔记本整体注销: 先逐文件备份,再走内核 removeNotebook(注册/索引/数据一并删除);
-   *  内核不支持/失败时回退为逐文件删除(尽力;被忽略文件亦尝试) */
+   *  内核不支持/失败时回退为逐文件删除(尽力;被忽略文件亦尝试)。
+   *  备份失败 = 该笔记本拒绝注销(数据保留,可见报错,可重试)——破坏性删除的
+   *  前置条件是备份成功,绝不静默吞掉备份失败后继续删(GPT 审查约束第 7 条)。 */
   async _removeLocalNotebooks(ctx, roots) {
     for (const root of roots) {
       const notebookId = root.split("/").pop();
       const files = await this._collectLocalFilesUnder(root);
+      let backupFailed = false;
       for (const p of files) {
         try {
           await this.contentAdapter.backupFileWithBackup(p);
         } catch (err) {
+          backupFailed = true;
+          this._emit("engine:operation", {
+            ctx,
+            operation: "⚠️ 备份失败,已拒绝注销该笔记本(数据保留,可重试)",
+            count: 1,
+            paths: [p + " — " + String(err && err.message || err)]
+          });
+          break;
         }
       }
+      if (backupFailed) continue;
       try {
         await this.contentAdapter.kernel.removeNotebook(notebookId);
         this._emit("engine:operation", {
@@ -3786,10 +3835,14 @@ var SyncEngine = class {
     }
     plan.merges.length = 0;
   }
-  /** 推送确认后把合并结果写入本地(与 _runMerges 的暂存配对) */
+  /** 推送确认后把合并结果写入本地(与 _runMerges 的暂存配对)。
+   * 写回前逐文件 M5 复查: 合并的同步窗口最长(快照→合并→推送→落盘),期间用户
+   * 对同一文档的编辑不得被合并产物静默覆盖——中止并交冲突中心(合并内容已在
+   * 远端,下一轮按本地新修改正常收敛)。 */
   async _writeMergedResults(ctx, plan) {
     const writes = plan.mergedWrites || [];
     for (const item of writes) {
+      await this._assertLocalUnchanged(ctx, item.path, "合并结果写回前发现本地已被修改,已中止覆盖(本地修改保留,合并内容已在远端)");
       await this.contentAdapter.writeFileBlob(item.path, new Blob([item.bytes]), item.format, "update");
     }
     if (writes.length > 0) {

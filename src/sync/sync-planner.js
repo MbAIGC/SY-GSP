@@ -99,6 +99,19 @@ export class SyncPlanner {
         this._applyOverride(plan, path, "keep_local", ctx);
         continue;
       }
+      // markdown canonical 不可得(内核导出失败): 不回退 raw 字节比较——raw .sy 与
+      // 远端 md 必然不等,会制造"本地已修改"假信号。直接进入人工冲突;
+      // 用户显式决策(override)与强制方向不受此拦截(由执行层可见报错收口)。
+      if (opts.canonicalFailed && opts.canonicalFailed.has(path)) {
+        plan.conflicts.push({
+          path,
+          reason: "本地内容无法转换为 canonical(markdown)表示,已暂停交人工处理",
+          baseSha: ctx.baseEntry ? ctx.baseEntry.sha : null,
+          localSha: localShas.get(path) || null,
+          remoteSha: ctx.remoteEntry ? ctx.remoteEntry.sha : null,
+        });
+        continue;
+      }
       await this._decideAuto(plan, path, ctx);
     }
     return plan;

@@ -75,15 +75,36 @@ export class SyncEngine {
       const scan = await this.workspace.scan({ range: this.config.syncRange });
       const localShas = new Map();
       const rawShas = new Map();
+      // markdown canonical 不可得的路径: 不得回退 raw 字节比较(raw .sy 与远端 md
+      // 必然不等,会制造"本地已修改"假信号),交规划器直接进入人工冲突
+      const canonicalFailed = new Set();
       for (const file of scan.files) {
-        const bytes = await this._readLocalBytes(file.path);
+        let bytes;
+        try {
+          bytes = await this._readLocalBytes(file.path);
+        } catch (err) {
+          // 读取失败≠文件不存在: 混淆会让规划器把瞬时读失败判成"本地已删除"
+          throw new SyncError({
+            category: SyncErrorCategory.LOCAL_FILE,
+            code: "LOCAL_READ_FAILED",
+            operation: "snapshotLocal",
+            path: file.path,
+            message: "本地文件读取失败,已中止本轮同步(不按删除处理): " + String((err && err.message) || err),
+            retryable: true,
+            recoverable: true,
+            cause: err,
+          });
+        }
         const rawSha = bytes ? await this.provider.gitBlobSha(bytes) : null;
         rawShas.set(file.path, rawSha);
         // conf.json 用规范化 sha(仅 name): 内核 touch 不再产生修改信号
         if (rawSha !== null && isNotebookConfPath(file.path)) {
           localShas.set(file.path, await this._confCanonicalSha(file.path));
         } else {
-          localShas.set(file.path, await this._planSha(file.path, rawSha));
+          const planSha = await this._planSha(file.path, rawSha);
+          // rawSha 可得而 planSha 为空 = markdown 导出失败(区别于 crypto 不可用导致的全局 sha 缺失)
+          if (planSha === null && rawSha !== null) canonicalFailed.add(file.path);
+          localShas.set(file.path, planSha);
         }
       }
       ctx.localShas = localShas;
@@ -203,6 +224,7 @@ export class SyncEngine {
         remoteCommitDate: ctx.remoteCommitDate,
         allowTimeArbitration: !firstSyncBothSides,
         blockedDownloads,
+        canonicalFailed,
       });
       ctx.plan = plan;
 
@@ -310,8 +332,16 @@ export class SyncEngine {
         });
       }
       // 合并结果在推送确认后才写本地: 推送失败时本地仍是合并前内容,
-      // 重规划不会把"合并产物"误判为本地新修改(避免合并内容反复进冲突)
-      await this._writeMergedResults(ctx, plan);
+      // 重规划不会把"合并产物"误判为本地新修改(避免合并内容反复进冲突)。
+      // 写回前逐文件 M5 复查: 推送窗口内用户对同一文档的编辑绝不静默覆盖
+      try {
+        await this._writeMergedResults(ctx, plan);
+      } catch (err) {
+        if (err instanceof SyncError && err.code === "LOCAL_CHANGED") {
+          return this._pauseLocalChanged(ctx, err);
+        }
+        throw err;
+      }
       const drifts = [];
       try {
         await this._applyLocalChanges(ctx, plan, { drifts, remoteEntries });
@@ -567,18 +597,29 @@ export class SyncEngine {
   }
 
   /** 残留笔记本整体注销: 先逐文件备份,再走内核 removeNotebook(注册/索引/数据一并删除);
-   *  内核不支持/失败时回退为逐文件删除(尽力;被忽略文件亦尝试) */
+   *  内核不支持/失败时回退为逐文件删除(尽力;被忽略文件亦尝试)。
+   *  备份失败 = 该笔记本拒绝注销(数据保留,可见报错,可重试)——破坏性删除的
+   *  前置条件是备份成功,绝不静默吞掉备份失败后继续删(GPT 审查约束第 7 条)。 */
   async _removeLocalNotebooks(ctx, roots) {
     for (const root of roots) {
       const notebookId = root.split("/").pop();
       const files = await this._collectLocalFilesUnder(root);
+      let backupFailed = false;
       for (const p of files) {
         try {
           await this.contentAdapter.backupFileWithBackup(p);
         } catch (err) {
-          // 备份失败不阻断注销
+          backupFailed = true;
+          this._emit("engine:operation", {
+            ctx,
+            operation: "⚠️ 备份失败,已拒绝注销该笔记本(数据保留,可重试)",
+            count: 1,
+            paths: [p + " — " + String((err && err.message) || err)],
+          });
+          break;
         }
       }
+      if (backupFailed) continue;
       try {
         await this.contentAdapter.kernel.removeNotebook(notebookId);
         this._emit("engine:operation", {
@@ -943,10 +984,14 @@ export class SyncEngine {
     plan.merges.length = 0;
   }
 
-  /** 推送确认后把合并结果写入本地(与 _runMerges 的暂存配对) */
+  /** 推送确认后把合并结果写入本地(与 _runMerges 的暂存配对)。
+   * 写回前逐文件 M5 复查: 合并的同步窗口最长(快照→合并→推送→落盘),期间用户
+   * 对同一文档的编辑不得被合并产物静默覆盖——中止并交冲突中心(合并内容已在
+   * 远端,下一轮按本地新修改正常收敛)。 */
   async _writeMergedResults(ctx, plan) {
     const writes = plan.mergedWrites || [];
     for (const item of writes) {
+      await this._assertLocalUnchanged(ctx, item.path, "合并结果写回前发现本地已被修改,已中止覆盖(本地修改保留,合并内容已在远端)");
       await this.contentAdapter.writeFileBlob(item.path, new Blob([item.bytes]), item.format, "update");
     }
     if (writes.length > 0) {

@@ -152,7 +152,7 @@ async function makeFakeRepo(files = {}) {
   };
 }
 
-async function makeHarness({ remoteFiles = {}, localFiles = {}, remoteRoot = "", controlPlane = null, commitBuilder = new CommitBuilder({}) } = {}) {
+async function makeHarness({ remoteFiles = {}, localFiles = {}, remoteRoot = "", controlPlane = null, syncFileType = "raw", commitBuilder = new CommitBuilder({}) } = {}) {
   const repo = await makeFakeRepo({ ...remoteFiles });
   const kernel = makeFakeKernel();
   for (const [path, content] of Object.entries(localFiles)) {
@@ -221,7 +221,7 @@ async function makeHarness({ remoteFiles = {}, localFiles = {}, remoteRoot = "",
       repoKey: composeRepoKey({ provider: "github", owner: "o", repo: "r", branch: "main", remoteRoot }),
       remoteRoot,
       syncRange: 1,
-      syncFileType: "raw",
+      syncFileType,
     },
   });
   const makeCtx = (extra = {}) => {

@@ -869,3 +869,76 @@ test("conf.json 应用回读: 内核名称不一致仍如实上报", async () =>
   assert.equal(result.success, true);
   assert.ok(ops.some((o) => o.includes("内核名称不一致: 内核里的名字")), "真实不一致必须上报: " + JSON.stringify(ops));
 });
+
+test("P0 合并写回保护: 推送窗口内本地被修改 → 合并产物不覆盖,暂停交冲突且本地修改保留", async () => {
+  const a = D + "a.md";
+  // 三方可自动合并: 基准 line3, 本地改 line1, 远端改 line3(非相邻)
+  const h = await makeHarness({
+    remoteFiles: { [a]: "line1\nline2\nline3" },
+    localFiles: { [a]: "line1-local\nline2\nline3" },
+  });
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  await h.manifestStore.replaceAll([a]);
+  h.repo.files[a] = "line1\nline2\nline3-remote";
+  await h.repo.snapshot("remote edit"); // 远端推进 → 触发合并
+
+  // 模拟推送窗口内用户编辑该文档(快照之后、合并写回之前,确定性注入:
+  // 阻塞引用更新直到变异落盘)
+  let mutationPromise = null;
+  h.engine.events.on("engine:phase", ({ state }) => {
+    if (state === "COMMITTING" && !mutationPromise) {
+      mutationPromise = h.kernel.putFile(a, new Blob([enc("用户在推送窗口内的编辑")]), false);
+    }
+  });
+  const origUpdateRef = h.repo.provider.updateBranchRef.bind(h.repo.provider);
+  h.repo.provider.updateBranchRef = async (sha, opts) => {
+    if (mutationPromise) await mutationPromise;
+    return origUpdateRef(sha, opts);
+  };
+
+  const result = await runQuiet(h);
+  assert.equal(result.paused, true, "必须暂停交冲突: " + JSON.stringify(result));
+  assert.equal(await (await h.kernel.getFile(a)).text(), "用户在推送窗口内的编辑", "本地编辑绝不被合并产物覆盖");
+  assert.ok(h.conflictService.openSet("github:o/r:main"), "冲突集已保存供人工处理");
+});
+
+test("P1 markdown canonical 失败: 不回退 raw 比较,直接进入人工冲突", async () => {
+  const a = D + "a.sy";
+  const sy = JSON.stringify({ ID: "20240101120001-aaa", Type: "NodeDocument", Properties: { id: "20240101120001-aaa", title: "文档" }, Children: [] });
+  const h = await makeHarness({
+    remoteFiles: { [a]: "远端 md 内容" },
+    localFiles: { [a]: sy },
+    syncFileType: "markdown",
+  });
+  await h.manifestStore.replaceAll([a]);
+  const baseCommit = await h.repo.snapshot("base");
+  await h.metadataStore.setConfirmedCommit("github:o/r:main", baseCommit.sha, "prep");
+  // 内核导出失败模拟: markdown readFileBlob 分支抛错(= canonical 不可得)。
+  // raw .sy 与远端 md 必然不等——回退 raw 比较会制造"本地已修改"假信号并上传
+  h.engine.contentAdapter.readFileBlob = async (p, format) => {
+    if (format === "markdown") throw new Error("内核导出失败");
+    return h.kernel.getFile(p);
+  };
+  const result = await runQuiet(h);
+  assert.equal(result.paused, true, "canonical 失败必须暂停: " + JSON.stringify(result));
+  assert.equal(result.kind, "FILE_CONFLICTS");
+});
+
+test("P1 重建注销保护: 备份失败拒绝注销该笔记本(数据保留,其余流程不受影响)", async () => {
+  const a = "data/20240101120000-abc/a.md";
+  const zomb = "data/20240101120003-zomb99/.siyuan/conf.json";
+  const h = await makeHarness({
+    remoteFiles: { [a]: "a", [zomb]: JSON.stringify({ name: "僵尸" }) },
+    localFiles: { [a]: "a", [zomb]: JSON.stringify({ name: "僵尸" }) },
+  });
+  h.workspace.getNotebooks = async () => [{ id: "20240101120000-abc", closed: false }];
+  h.engine.contentAdapter.backupFileWithBackup = async () => {
+    throw new Error("备份盘已满");
+  };
+  const result = await runQuiet(h, { trigger: "rebuild", mode: "local_over_remote" });
+  assert.equal(result.success, true, "其余流程不受影响: " + JSON.stringify(result));
+  assert.ok(!h.kernel.__removedNotebooks.includes("20240101120003-zomb99"), "备份失败拒绝注销");
+  assert.ok(h.kernel.__files.has(zomb), "笔记本数据保留在磁盘");
+  assert.ok(!h.kernel.__removedNotebooks.includes("20240101120000-abc"), "正常笔记本不受影响");
+});

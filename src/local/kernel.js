@@ -56,7 +56,12 @@ export function createKernel(q) {
       method: "POST",
       body: JSON.stringify({ path }),
     });
-    return resp.ok ? resp.blob() : null;
+    if (resp.ok) return resp.blob();
+    // 404 = 明确不存在(返回 null 交由调用方按缺失处理);
+    // 其余状态是读取失败而非不存在——与"不存在"混同会让规划器把瞬时
+    // 读失败判成"本地已删除"(GPT 审查 P1-3),必须显式抛错
+    if (resp.status === 404) return null;
+    throw new Error("读取本地文件失败 " + path + ": HTTP " + resp.status);
   }
 
   async function putFile(path, blob, isDir = false) {
